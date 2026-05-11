@@ -51,6 +51,9 @@ class AgentState(TypedDict, total=False):
     test_results: List[TestResult]
     trajectory: List[TrajectoryStep] # 整个任务的结果集
 
+    retrieved_memories: List[Dict[str, Any]]
+    memory_written: bool
+
     patch: Optional[str] # 修改文件的块
     patch_summary: Optional[str]
 

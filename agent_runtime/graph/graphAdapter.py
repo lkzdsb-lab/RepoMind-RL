@@ -5,14 +5,9 @@
 """
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.graph.state import CompiledStateGraph
-from langgraph.typing import ContextT
-from langgraph_sdk.schema import _TypedDictLikeV1
-from pydantic import BaseModel
 
 from model.agent.graph import AgentState
-from typing import TypedDict, Dict, Any
-from graph.node import (
+from agent_runtime.graph.node import (
     understand_task_node,
     retrieve_context_node,
     make_plan_node,
@@ -24,12 +19,13 @@ from graph.node import (
     reflect_node,
     finalize_node,
 )
-from graph.router import route_after_observe, route_after_reflect
+from agent_runtime.graph.router import route_after_observe, route_after_reflect
 
 
-def build_graph(ctx: ContextT, agent_state: AgentState):
-    builder = StateGraph(state_schema=agent_state, context_schema=ctx)
+def build_graph():
+    builder = StateGraph(AgentState)
 
+    # 注册节点
     builder.add_node("understand_task", understand_task_node)
     builder.add_node("retrieve_context", retrieve_context_node)
     builder.add_node("make_plan", make_plan_node)
@@ -40,7 +36,7 @@ def build_graph(ctx: ContextT, agent_state: AgentState):
     builder.add_node("run_tests", run_tests_node)
     builder.add_node("reflect", reflect_node)
     builder.add_node("finalize", finalize_node)
-
+    # 注册边
     builder.add_edge(START, "understand_task")
     builder.add_edge("understand_task", "retrieve_context")
     builder.add_edge("retrieve_context", "make_plan")
@@ -48,6 +44,7 @@ def build_graph(ctx: ContextT, agent_state: AgentState):
     builder.add_edge("select_action", "execute_action")
     builder.add_edge("execute_action", "observe")
 
+    # 增加从一个 node 到任何其他 node 的连接
     builder.add_conditional_edges(
         "observe",
         route_after_observe,
@@ -72,7 +69,6 @@ def build_graph(ctx: ContextT, agent_state: AgentState):
 
     builder.add_edge("finalize", END)
 
-    checkpointer = InMemorySaver()
     graph = builder.compile(checkpointer=checkpointer)
 
     return graph

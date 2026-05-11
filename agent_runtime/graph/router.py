@@ -1,6 +1,7 @@
 from model.agent.graph import AgentState
 
-
+# 节点走向
+# todo 这里路由先写死，后续否应该是 llm 自己决定选哪个 node
 def route_after_observe(state: AgentState) -> str:
     if state.get("error"):
         return "finalize"

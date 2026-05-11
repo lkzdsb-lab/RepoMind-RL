@@ -1,16 +1,65 @@
-# 这是一个示例 Python 脚本。
+from __future__ import annotations
 
-# 按 ⌃R 执行或将其替换为您的代码。
-# 按 双击 ⇧ 在所有地方搜索类、文件、工具窗口、操作和设置。
+import argparse
+import json
+from pathlib import Path
 
-
-def print_hi(name):
-    # 在下面的代码行中使用断点来调试脚本。
-    print(f'Hi, {name}')  # 按 ⌘F8 切换断点。
+from agent_runtime.executor import DebugAgent, DebugAgentConfig
 
 
-# 按装订区域中的绿色按钮以运行脚本。 
-if __name__ == '__main__':
-    print_hi('PyCharm')
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="RepoMind-RL first-version debug agent harness."
+    )
+    parser.add_argument("issue", help="Bug/issue title or short description.")
+    parser.add_argument(
+        "--description",
+        default="",
+        help="Detailed issue description.",
+    )
+    parser.add_argument(
+        "--repo",
+        default=".",
+        help="Target repository path. Defaults to current directory.",
+    )
+    parser.add_argument(
+        "--verify",
+        default="pytest",
+        help="Verification command, for example `pytest` or `go test ./...`.",
+    )
+    parser.add_argument(
+        "--max-loops",
+        type=int,
+        default=8,
+        help="Maximum agent action loops.",
+    )
+    return parser.parse_args()
 
-# 访问 https://www.jetbrains.com/help/pycharm/ 获取 PyCharm 帮助
+
+def main() -> None:
+    args = parse_args()
+    repo_path = Path(args.repo).resolve()
+    config = DebugAgentConfig(
+        repo_path=repo_path.as_posix(),
+        verify_command=args.verify,
+        max_loops=args.max_loops,
+    )
+    result = DebugAgent(config).run(
+        title=args.issue,
+        description=args.description,
+    )
+
+    state = result.state
+    summary = {
+        "task_id": state.get("task_id"),
+        "status": state.get("status"),
+        "candidate_files": state.get("candidate_files", []),
+        "patch_summary": state.get("patch_summary"),
+        "trace_path": result.trace_path,
+        "tool_calls": len(state.get("tool_calls", [])),
+    }
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()

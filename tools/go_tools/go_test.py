@@ -1,15 +1,16 @@
 import subprocess
+import shlex
 from typing import Dict, Any
 
 
-def run_go_test(repo_path: str, command: str = "go test ./...") -> Dict[str, Any]:
+def run_command(repo_path: str, command: str = "pytest", timeout: int = 120) -> Dict[str, Any]:
     try:
         result = subprocess.run(
-            command.split(),
+            shlex.split(command),
             cwd=repo_path,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout,
         )
 
         return {
@@ -23,5 +24,16 @@ def run_go_test(repo_path: str, command: str = "go test ./...") -> Dict[str, Any
             "command": command,
             "exit_code": -1,
             "stdout": "",
-            "stderr": "go test timeout",
+            "stderr": "command timeout",
         }
+    except ValueError as exc:
+        return {
+            "command": command,
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": str(exc),
+        }
+
+
+def run_go_test(repo_path: str, command: str = "go test ./...") -> Dict[str, Any]:
+    return run_command(repo_path, command, timeout=120)
