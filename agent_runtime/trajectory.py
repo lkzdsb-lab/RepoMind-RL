@@ -15,21 +15,11 @@ from typing import Any, Dict
 from uuid import uuid4
 
 from model.agent.graph import AgentState, TrajectoryStep
+from model.agent.trajectory import TraceEvent
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-@dataclass
-class TraceEvent:
-    step_id: int
-    node: str
-    thought: str
-    action: str | None = None
-    action_input: Dict[str, Any] | None = None
-    observation: Dict[str, Any] | None = None
-    created_at: str = field(default_factory=utc_now)
 
 
 class TrajectoryRecorder:

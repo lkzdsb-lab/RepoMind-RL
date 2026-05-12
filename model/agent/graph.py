@@ -2,6 +2,7 @@
     File name: graph.py
     Author: kunze.li
 """
+from dataclasses import dataclass
 from typing import TypedDict, List, Dict, Any, Optional, Literal
 
 # 工具调用格式
@@ -12,6 +13,7 @@ class ToolCall(TypedDict, total=False):
     error: Optional[str]
 
 # 结果返回格式
+@dataclass
 class TestResult(TypedDict, total=False):
     command: str
     exit_code: int
@@ -19,6 +21,7 @@ class TestResult(TypedDict, total=False):
     stderr: str
 
 # 每一个步骤的记录格式
+@dataclass
 class TrajectoryStep(TypedDict, total=False):
     step_id: int
     node: str
@@ -28,11 +31,13 @@ class TrajectoryStep(TypedDict, total=False):
     observation: Optional[Dict[str, Any]]
 
 # 记录 agent 活动状态格式
+@dataclass
 class AgentState(TypedDict, total=False):
     task_id: str  # 后续考虑是否添加 trace id 跟踪任务流程
     task_type: Literal["BUG_FIX", "FEATURE_IMPL", "DIAGNOSE"]
     title: str
     description: str
+    registry_snapshot: Dict[str, List[str]]
     # 引入 skill
     task_category: str
     selected_skills: list[str]
@@ -74,3 +79,19 @@ class AgentState(TypedDict, total=False):
     ]
 
     error: Optional[str]
+
+
+@dataclass
+class DebugAgentConfig:
+    repo_path: str
+    verify_command: str = "pytest"
+    max_loops: int = 8
+    trace_dir: str = ".repomind/traces"
+    memory_path: str = ".repomind/memory.jsonl"
+    manifest_dir: str | None = None
+
+
+@dataclass
+class AgentRunResult:
+    state: AgentState
+    trace_path: str

@@ -5,25 +5,11 @@ The policy layer emits Action objects; the executor layer only knows how to
 dispatch them through ToolRegistry. This keeps future RL/LLM policies isolated
 from tool implementation details.
 """
-
 from dataclasses import dataclass, field
-from typing import Any, Dict, Literal
-
-
-ActionName = Literal[
-    "list_files",
-    "search_code",
-    "read_file",
-    "run_tests",
-    "git_diff",
-    "write_memory",
-    "finish",
-]
-
+from typing import Dict, Any
 
 @dataclass(frozen=True)
 class Action:
-    name: ActionName
+    name: str
     args: Dict[str, Any] = field(default_factory=dict)
     thought: str = ""
-

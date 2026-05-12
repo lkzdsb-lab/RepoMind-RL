@@ -7,31 +7,79 @@ RL policies can share the same sandbox interface.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable, Dict
+from types import MappingProxyType
+from typing import Any, Dict, Mapping
 
 from config import FileConfig
+from model.agent.tools import ToolSpec
 from tools.code_tools.code import search_code
 from tools.code_tools.file import list_files, read_file
 from tools.git_tools.diff import git_diff
 from tools.go_tools.go_test import run_command
 
 
-ToolFn = Callable[[str, Dict[str, Any]], Dict[str, Any]]
+def reduce_search_code_output(
+    state: Dict[str, Any],
+    output: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {"candidate_files": _extract_files_from_search(output.get("matches", []))}
 
 
-@dataclass
-class ToolSpec:
-    name: str
-    description: str
-    runner: ToolFn
+def reduce_run_tests_output(
+    state: Dict[str, Any],
+    output: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "test_results": state.get("test_results", []) + [output],
+        "status": "testing",
+    }
 
 
+def reduce_git_diff_output(
+    state: Dict[str, Any],
+    output: Dict[str, Any],
+) -> Dict[str, Any]:
+    diff = output.get("diff", "")
+    return {
+        "patch": diff or None,
+        "patch_summary": summarize_diff(diff),
+    }
+
+
+def _extract_files_from_search(matches: list[str]) -> list[str]:
+    files: list[str] = []
+    for line in matches:
+        path = line.split(":", 1)[0]
+        if path.startswith("./"):
+            path = path[2:]
+        if path and path not in files:
+            files.append(path)
+    return files[:10]
+
+
+def summarize_diff(diff: str) -> str:
+    if not diff:
+        return "当前工作区没有 git diff。"
+    added = sum(
+        1
+        for line in diff.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    )
+    removed = sum(
+        1
+        for line in diff.splitlines()
+        if line.startswith("-") and not line.startswith("---")
+    )
+    return f"当前补丁包含 {added} 行新增、{removed} 行删除。"
+
+# 工具注册
 class ToolRegistry:
-    def __init__(self) -> None:
+    def __init__(self, include_defaults: bool = True) -> None:
         self._tools: dict[str, ToolSpec] = {}
-        self.register_defaults()
+        if include_defaults:
+            self.register_defaults()
 
+    # 后续新注册 tools
     def register(self, spec: ToolSpec) -> None:
         self._tools[spec.name] = spec
 
@@ -42,6 +90,12 @@ class ToolRegistry:
 
     def names(self) -> list[str]:
         return sorted(self._tools)
+
+    def get(self, name: str) -> ToolSpec | None:
+        return self._tools.get(name)
+
+    def items(self) -> Mapping[str, ToolSpec]:
+        return MappingProxyType(dict(self._tools))
 
     def register_defaults(self) -> None:
         self.register(
@@ -58,6 +112,7 @@ class ToolRegistry:
             ToolSpec(
                 name="search_code",
                 description="Search code using ripgrep when available.",
+                reducer=reduce_search_code_output,
                 runner=lambda repo, args: search_code(
                     repo,
                     str(args.get("query", "")),
@@ -80,6 +135,7 @@ class ToolRegistry:
             ToolSpec(
                 name="run_tests",
                 description="Run the configured verification command.",
+                reducer=reduce_run_tests_output,
                 runner=lambda repo, args: run_command(
                     repo,
                     str(args.get("command", "pytest")),
@@ -91,7 +147,7 @@ class ToolRegistry:
             ToolSpec(
                 name="git_diff",
                 description="Return the current git diff.",
+                reducer=reduce_git_diff_output,
                 runner=lambda repo, args: git_diff(repo),
             )
         )
-

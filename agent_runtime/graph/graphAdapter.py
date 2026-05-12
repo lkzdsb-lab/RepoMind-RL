@@ -3,9 +3,12 @@
     Author: kunze.li
     description: The whole graph
 """
+from __future__ import annotations
+
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import InMemorySaver
 
+from agent_runtime.registry import RegistryManager, RegistrySnapshot
 from model.agent.graph import AgentState
 from agent_runtime.graph.node import (
     understand_task_node,
@@ -21,8 +24,9 @@ from agent_runtime.graph.node import (
 )
 from agent_runtime.graph.router import route_after_observe, route_after_reflect
 
-
-def build_graph():
+# 后续这些
+def build_graph(registry_snapshot: RegistrySnapshot | None = None):
+    registry_snapshot = registry_snapshot or RegistryManager().snapshot()
     builder = StateGraph(AgentState)
 
     # 注册节点
@@ -36,6 +40,7 @@ def build_graph():
     builder.add_node("run_tests", run_tests_node)
     builder.add_node("reflect", reflect_node)
     builder.add_node("finalize", finalize_node)
+    _add_registered_nodes(builder, registry_snapshot)
     # 注册边
     builder.add_edge(START, "understand_task")
     builder.add_edge("understand_task", "retrieve_context")
@@ -68,7 +73,44 @@ def build_graph():
     )
 
     builder.add_edge("finalize", END)
-
-    graph = builder.compile(checkpointer=checkpointer)
+    # checkpointer 提供上下问切换的能力，允许从任何一个节点重放
+    memory_saver = InMemorySaver()
+    graph = builder.compile(checkpointer=memory_saver)
 
     return graph
+
+
+def _add_registered_nodes(
+    builder: StateGraph,
+    registry_snapshot: RegistrySnapshot,
+) -> None:
+    builtins = {
+        "understand_task",
+        "retrieve_context",
+        "make_plan",
+        "select_action",
+        "execute_action",
+        "observe",
+        "generate_patch",
+        "run_tests",
+        "reflect",
+        "finalize",
+    }
+
+    for node in registry_snapshot.nodes.values():
+        if node.name not in builtins:
+            builder.add_node(node.name, node.handler)
+
+        for edge in node.metadata.get("edges", []):
+            source = edge.get("from")
+            target = edge.get("to")
+            if source and target:
+                builder.add_edge(_graph_endpoint(source), _graph_endpoint(target))
+
+
+def _graph_endpoint(name: str):
+    if name == "START":
+        return START
+    if name == "END":
+        return END
+    return name

@@ -33,6 +33,11 @@ def parse_args() -> argparse.Namespace:
         default=8,
         help="Maximum agent action loops.",
     )
+    parser.add_argument(
+        "--manifest-dir",
+        default=None,
+        help="Optional directory containing runtime registry manifests.",
+    )
     return parser.parse_args()
 
 
@@ -43,6 +48,7 @@ def main() -> None:
         repo_path=repo_path.as_posix(),
         verify_command=args.verify,
         max_loops=args.max_loops,
+        manifest_dir=args.manifest_dir,
     )
     result = DebugAgent(config).run(
         title=args.issue,

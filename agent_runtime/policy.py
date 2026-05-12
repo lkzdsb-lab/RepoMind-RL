@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from agent_runtime.actions import Action
+from model.agent.actions import Action
 from model.agent.graph import AgentState
 
 

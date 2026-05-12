@@ -8,33 +8,18 @@ layer can evolve independently.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
 from uuid import uuid4
 
-from agent_runtime.actions import Action
 from agent_runtime.memory.cards import MemoryCard
 from agent_runtime.memory.store import JsonlMemoryStore
 from agent_runtime.policy import HeuristicDebugPolicy
+from agent_runtime.registry import RegistryManager, RegistrySnapshot
 from agent_runtime.tool_registry import ToolRegistry
 from agent_runtime.trajectory import TrajectoryRecorder
-from model.agent.graph import AgentState
-
-
-@dataclass
-class DebugAgentConfig:
-    repo_path: str
-    verify_command: str = "pytest"
-    max_loops: int = 8
-    trace_dir: str = ".repomind/traces"
-    memory_path: str = ".repomind/memory.jsonl"
-
-
-@dataclass
-class AgentRunResult:
-    state: AgentState
-    trace_path: str
+from model.agent.graph import AgentState, DebugAgentConfig, AgentRunResult
+from model.agent.actions import Action
 
 
 class DebugAgent:
@@ -43,18 +28,24 @@ class DebugAgent:
         config: DebugAgentConfig,
         policy: HeuristicDebugPolicy | None = None,
         tools: ToolRegistry | None = None,
+        registry: RegistryManager | None = None,
         memory_store: JsonlMemoryStore | None = None,
         recorder: TrajectoryRecorder | None = None,
     ) -> None:
         self.config = config
         self.policy = policy or HeuristicDebugPolicy()
-        self.tools = tools or ToolRegistry()
+        self.registry_manager = registry or RegistryManager(
+            tools=tools,
+            manifest_dir=config.manifest_dir,
+        )
+        self._active_registry: RegistrySnapshot | None = None
         self.memory_store = memory_store or JsonlMemoryStore(
             Path(config.repo_path) / config.memory_path
         )
         self.recorder = recorder or TrajectoryRecorder()
 
     def run(self, title: str, description: str = "") -> AgentRunResult:
+        self._active_registry = self.registry_manager.snapshot()
         state = self._initial_state(title=title, description=description)
         state = self._understand_task(state)
         state = self._retrieve_memories(state)
@@ -87,11 +78,18 @@ class DebugAgent:
         return AgentRunResult(state=state, trace_path=trace_path.as_posix())
 
     def _initial_state(self, title: str, description: str) -> AgentState:
+        registry = self._registry()
         return AgentState(
             task_id=str(uuid4()),
             task_type="BUG_FIX",
             title=title,
             description=description,
+            registry_snapshot={
+                "tools": registry.names("tools"),
+                "nodes": registry.names("nodes"),
+                "prompts": registry.names("prompts"),
+                "skills": registry.names("skills"),
+            },
             repo_path=self.config.repo_path,
             branch="",
             verify_command=self.config.verify_command,
@@ -167,7 +165,11 @@ class DebugAgent:
         if action.name == "write_memory":
             output = self._write_memory(state)
         else:
-            output = self.tools.run(action.name, self.config.repo_path, action.args)
+            output = self._registry().run_tool(
+                action.name,
+                self.config.repo_path,
+                action.args,
+            )
 
         state = self._apply_tool_output(state, action, output)
         state = {
@@ -191,17 +193,9 @@ class DebugAgent:
     ) -> AgentState:
         updates: Dict[str, Any] = {}
 
-        if action.name == "search_code":
-            updates["candidate_files"] = self._extract_files_from_search(
-                output.get("matches", [])
-            )
-        elif action.name == "run_tests":
-            updates["test_results"] = state.get("test_results", []) + [output]
-            updates["status"] = "testing"
-        elif action.name == "git_diff":
-            diff = output.get("diff", "")
-            updates["patch"] = diff or None
-            updates["patch_summary"] = self._summarize_diff(diff)
+        tool_spec = self._registry().get_tool(action.name)
+        if tool_spec and tool_spec.reducer:
+            updates.update(tool_spec.reducer(state, output))
         elif action.name == "write_memory":
             updates["memory_written"] = True
 
@@ -292,19 +286,7 @@ class DebugAgent:
             },
         )
 
-    def _extract_files_from_search(self, matches: list[str]) -> list[str]:
-        files: list[str] = []
-        for line in matches:
-            path = line.split(":", 1)[0]
-            if path.startswith("./"):
-                path = path[2:]
-            if path and path not in files:
-                files.append(path)
-        return files[:10]
-
-    def _summarize_diff(self, diff: str) -> str:
-        if not diff:
-            return "当前工作区没有 git diff。"
-        added = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
-        removed = sum(1 for line in diff.splitlines() if line.startswith("-") and not line.startswith("---"))
-        return f"当前补丁包含 {added} 行新增、{removed} 行删除。"
+    def _registry(self) -> RegistrySnapshot:
+        if self._active_registry is None:
+            self._active_registry = self.registry_manager.snapshot()
+        return self._active_registry
