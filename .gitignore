@@ -1,0 +1,4 @@
+.repomind/
+__pycache__/
+*.py[cod]
+

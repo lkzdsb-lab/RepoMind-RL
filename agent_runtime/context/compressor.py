@@ -1,0 +1,415 @@
+"""Context compression implementations."""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+from agent_runtime.context.cards import ContextDigest, ContextItem
+from agent_runtime.context.token_counter import estimate_context_tokens
+from agent_runtime.llm import LLMConfig, LLMMessage, LLMRequest, build_llm_client
+from model.agent.graph import AgentState
+from config import DebugAgentConfig
+from loguru import logger
+
+# 抽象接口
+class ContextCompressor(Protocol):
+    def compress(self, items: list[ContextItem], state: AgentState) -> ContextDigest:
+        ...
+
+
+@dataclass
+class ContextCompressionPolicy:
+    enabled: bool = True
+    max_context_tokens: int = 32000
+    threshold: float = 0.75
+    recent_items: int = 8
+
+    def should_compress(self, items: list[ContextItem]) -> bool:
+        if not self.enabled:
+            return False
+        return estimate_context_tokens(items) >= int(self.max_context_tokens * self.threshold)
+
+
+class RuleBasedContextCompressor:
+    def compress(self, items: list[ContextItem], state: AgentState) -> ContextDigest:
+        tool_results = [_summarize_tool_call(call) for call in state.get("tool_calls", [])[-12:]]
+        trajectory = state.get("trajectory", [])
+        completed = [
+            f"{step.get('node')}: {step.get('thought')}"
+            for step in trajectory[-8:]
+            if step.get("node") and step.get("thought")
+        ]
+        observations = _summarize_observations(state.get("observations", [])[-10:])
+        memory_refs = _summarize_memory_refs(state.get("retrieved_memories", {}))
+        code_changes = []
+        if state.get("patch_summary"):
+            code_changes.append(str(state["patch_summary"]))
+
+        latest_error = state.get("error")
+        constraints = [
+            f"repo_path={state.get('repo_path', '')}",
+            f"verify_command={state.get('verify_command', '')}",
+        ]
+        if latest_error:
+            constraints.append(f"latest_error={latest_error}")
+
+        return ContextDigest(
+            summary=_first_non_empty(
+                [
+                    f"Task `{state.get('title', '')}` is in step `{state.get('current_step', '')}`.",
+                    "Prior context was compressed from runtime state.",
+                ]
+            ),
+            current_goal=" ".join(
+                part for part in [state.get("title", ""), state.get("description", "")] if part
+            ),
+            constraints=constraints,
+            decisions=[],
+            completed_tasks=completed,
+            open_tasks=_open_tasks(state),
+            key_observations=observations,
+            tool_results=tool_results,
+            code_changes=code_changes,
+            memory_refs=memory_refs,
+            source_item_ids=[item.item_id for item in items],
+            compression_method="rule_based",
+        )
+
+
+class LLMContextCompressor:
+    def __init__(
+        self,
+        llm_config: LLMConfig,
+        fallback: ContextCompressor | None = None,
+    ) -> None:
+        self.client = build_llm_client(llm_config)
+        self.llm_config = llm_config
+        self.fallback = fallback or RuleBasedContextCompressor()
+
+    def compress(self, items: list[ContextItem], state: AgentState) -> ContextDigest:
+        fallback_digest = self.fallback.compress(items, state)
+        try:
+            logger.bind(task_id=state.get("task_id")).info(
+                "llm context compression requested items={} model={} provider={}",
+                len(items),
+                self.llm_config.model,
+                self.llm_config.provider,
+            )
+            response = self.client.complete(
+                LLMRequest(
+                    model=self.llm_config.model,
+                    temperature=self.llm_config.temperature,
+                    response_format={"type": "json_object"},
+                    messages=[
+                        LLMMessage(
+                            role="system",
+                            content=(
+                                "You compress long agent context into a faithful JSON digest. "
+                                "Do not invent facts. Preserve current goal, constraints, "
+                                "open tasks, completed tasks, key observations, tool results, "
+                                "code changes, and memory references."
+                            ),
+                        ),
+                        LLMMessage(
+                            role="user",
+                            content=_build_llm_compression_prompt(items, state, fallback_digest),
+                        ),
+                    ],
+                )
+            )
+            data = _parse_json_object(response.content)
+            digest = ContextDigest.from_dict(
+                {
+                    **fallback_digest.to_dict(),
+                    **data,
+                    "compression_method": "llm",
+                    "source_item_ids": fallback_digest.source_item_ids,
+                }
+            )
+            return digest
+        except Exception as exc:
+            logger.bind(task_id=state.get("task_id")).warning(
+                "llm context compression failed; using fallback error={}",
+                exc,
+            )
+            return fallback_digest.with_error(str(exc))
+
+
+class ContextCompressionManager:
+    def __init__(
+        self,
+        policy: ContextCompressionPolicy,
+        compressor: ContextCompressor,
+    ) -> None:
+        self.policy = policy
+        self.compressor = compressor
+
+    @classmethod
+    def from_config(cls, config: DebugAgentConfig) -> "ContextCompressionManager":
+        policy = ContextCompressionPolicy(
+            enabled=config.context_compression_enabled,
+            max_context_tokens=config.context_max_tokens,
+            threshold=config.context_compression_threshold,
+            recent_items=config.context_recent_items,
+        )
+        llm_config = LLMConfig(
+            provider=config.context_llm_provider,
+            model=config.context_llm_model,
+            api_base=config.context_llm_api_base,
+            api_key_env=config.context_llm_api_key_env,
+            timeout=config.context_llm_timeout,
+            temperature=config.context_llm_temperature,
+            max_output_chars=config.context_llm_max_output_chars,
+        )
+        compressor: ContextCompressor
+        if config.context_llm_provider.strip().lower() in {"", "disabled", "none"}:
+            compressor = RuleBasedContextCompressor()
+        else:
+            compressor = LLMContextCompressor(llm_config)
+        logger.info(
+            "context compression configured enabled={} provider={} threshold={} max_tokens={}",
+            policy.enabled,
+            config.context_llm_provider,
+            policy.threshold,
+            policy.max_context_tokens,
+        )
+        return cls(policy=policy, compressor=compressor)
+
+    def prepare(self, state: AgentState) -> AgentState:
+        items = collect_context_items(state)
+        token_estimate = estimate_context_tokens(items)
+        threshold_tokens = int(self.policy.max_context_tokens * self.policy.threshold)
+        if not self.policy.enabled:
+            logger.bind(task_id=state.get("task_id")).debug(
+                "context compression disabled items={} estimated_tokens={}",
+                len(items),
+                token_estimate,
+            )
+            return {
+                **state,
+                "context_items": [item.to_dict() for item in items[-self.policy.recent_items :]],
+            }
+        if token_estimate < threshold_tokens:
+            logger.bind(task_id=state.get("task_id")).debug(
+                "context compression skipped items={} estimated_tokens={} threshold_tokens={}",
+                len(items),
+                token_estimate,
+                threshold_tokens,
+            )
+            return {
+                **state,
+                "context_items": [item.to_dict() for item in items[-self.policy.recent_items :]],
+            }
+
+        pinned = [item for item in items if item.pinned]
+        recent = items[-self.policy.recent_items :]
+        recent_ids = {item.item_id for item in recent}
+        pinned_ids = {item.item_id for item in pinned}
+        already_compressed = set(
+            (state.get("context_digest") or {}).get("source_item_ids", [])
+        )
+        compressible = [
+            item
+            for item in items
+            if item.item_id not in recent_ids
+            and item.item_id not in pinned_ids
+            and item.item_id not in already_compressed
+        ]
+        if not compressible:
+            logger.bind(task_id=state.get("task_id")).debug(
+                "context compression skipped; no new compressible items items={}",
+                len(items),
+            )
+            return {
+                **state,
+                "context_items": [item.to_dict() for item in items],
+            }
+
+        logger.bind(task_id=state.get("task_id")).info(
+            "context compression started items={} compressible={} estimated_tokens={} threshold_tokens={}",
+            len(items),
+            len(compressible),
+            token_estimate,
+            threshold_tokens,
+        )
+        digest = self.compressor.compress(compressible, state)
+        logger.bind(task_id=state.get("task_id")).info(
+            "context compression completed method={} source_items={}",
+            digest.compression_method,
+            len(digest.source_item_ids),
+        )
+        return {
+            **state,
+            "context_digest": digest.to_dict(),
+            "compressed_context": digest.render_for_prompt(),
+            "context_items": [item.to_dict() for item in pinned + recent],
+        }
+
+
+def collect_context_items(state: AgentState) -> list[ContextItem]:
+    items: list[ContextItem] = []
+    goal = " ".join(
+        part for part in [state.get("title", ""), state.get("description", "")] if part
+    )
+    if goal:
+        items.append(
+            ContextItem(
+                role="user",
+                item_type="task",
+                content=goal,
+                pinned=True,
+                metadata={"source": "task"},
+                item_id="task:current",
+            )
+        )
+    if state.get("memory_context"):
+        items.append(
+            ContextItem(
+                role="system",
+                item_type="memory_context",
+                content=str(state["memory_context"]),
+                pinned=True,
+                metadata={"source": "memory"},
+                item_id="memory:context",
+            )
+        )
+    for index, step in enumerate(state.get("trajectory", [])):
+        items.append(
+            ContextItem(
+                role="assistant",
+                item_type="trajectory",
+                content=json.dumps(step, ensure_ascii=False, default=str),
+                metadata={"source": "trajectory", "node": step.get("node")},
+                item_id=f"trajectory:{step.get('step_id', index)}",
+            )
+        )
+    for index, call in enumerate(state.get("tool_calls", [])):
+        items.append(
+            ContextItem(
+                role="tool",
+                item_type="tool_call",
+                content=json.dumps(call, ensure_ascii=False, default=str),
+                metadata={"source": "tool_call", "name": call.get("name")},
+                item_id=f"tool_call:{index}:{call.get('name', 'unknown')}",
+            )
+        )
+    for index, observation in enumerate(state.get("observations", [])):
+        items.append(
+            ContextItem(
+                role="tool",
+                item_type="observation",
+                content=json.dumps(observation, ensure_ascii=False, default=str),
+                metadata={"source": "observation", "type": observation.get("type")},
+                item_id=f"observation:{index}:{observation.get('type', 'unknown')}",
+            )
+        )
+    if state.get("compressed_context"):
+        items.append(
+            ContextItem(
+                role="system",
+                item_type="compressed_context",
+                content=str(state["compressed_context"]),
+                metadata={"source": "previous_digest"},
+                item_id="compressed:current",
+            )
+        )
+    return items
+
+
+def _build_llm_compression_prompt(
+    items: list[ContextItem],
+    state: AgentState,
+    fallback_digest: ContextDigest,
+) -> str:
+    item_text = "\n\n".join(
+        f"[{idx}] role={item.role} type={item.item_type} pinned={item.pinned}\n{item.content[:4000]}"
+        for idx, item in enumerate(items, start=1)
+    )
+    return (
+        "Return only a JSON object with these keys: summary, current_goal, constraints, "
+        "decisions, open_tasks, completed_tasks, key_observations, tool_results, "
+        "code_changes, memory_refs.\n\n"
+        f"Current fallback digest:\n{json.dumps(fallback_digest.to_dict(), ensure_ascii=False)}\n\n"
+        f"Current state hints:\n"
+        f"title={state.get('title', '')}\n"
+        f"description={state.get('description', '')}\n"
+        f"current_step={state.get('current_step', '')}\n"
+        f"status={state.get('status', '')}\n"
+        f"error={state.get('error', '')}\n\n"
+        f"Compress these context items:\n{item_text}"
+    )
+
+
+def _parse_json_object(text: str) -> dict:
+    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if match:
+        text = match.group(1)
+    return json.loads(text)
+
+
+def _summarize_tool_call(call: dict) -> dict:
+    output = call.get("output") or {}
+    status = "error" if call.get("error") or output.get("error") else "ok"
+    return {
+        "name": call.get("name", "unknown"),
+        "status": status,
+        "summary": _tool_output_summary(call.get("name", ""), output),
+    }
+
+
+def _tool_output_summary(name: str, output: dict) -> str:
+    if output.get("error"):
+        return str(output["error"])
+    if name == "search_code":
+        return f"{len(output.get('matches', []))} matches for query `{output.get('query', '')}`"
+    if name == "read_file":
+        return f"read {output.get('file_path', 'unknown file')}"
+    if name == "run_tests":
+        return f"exit_code={output.get('exit_code')} command={output.get('command', '')}"
+    if name == "git_diff":
+        return f"{len(str(output.get('diff', '')).splitlines())} diff lines"
+    return f"keys={', '.join(sorted(output.keys()))}"
+
+
+def _summarize_observations(observations: list[dict]) -> list[str]:
+    summaries = []
+    for observation in observations:
+        kind = observation.get("type", "observation")
+        content = observation.get("content", {})
+        if isinstance(content, dict):
+            summaries.append(f"{kind}: keys={', '.join(sorted(content.keys()))}")
+        else:
+            summaries.append(f"{kind}: {str(content)[:240]}")
+    return summaries
+
+
+def _summarize_memory_refs(memories: Any) -> list[str]:
+    refs: list[str] = []
+    if isinstance(memories, dict):
+        for tier, values in memories.items():
+            if isinstance(values, list) and values:
+                refs.append(f"{tier}: {len(values)} memories")
+    elif isinstance(memories, list) and memories:
+        refs.append(f"retrieved: {len(memories)} memories")
+    return refs
+
+
+def _open_tasks(state: AgentState) -> list[str]:
+    open_tasks = []
+    if not state.get("test_results"):
+        open_tasks.append("Run verification command.")
+    if state.get("patch_summary") is None:
+        open_tasks.append("Inspect current git diff.")
+    if not state.get("memory_written"):
+        open_tasks.append("Write reward-gated memory.")
+    return open_tasks
+
+
+def _first_non_empty(values: list[str]) -> str:
+    for value in values:
+        if value:
+            return value
+    return ""

@@ -2,6 +2,13 @@ import os
 from pathlib import Path
 from typing import Dict, Any, List
 
+def _safe_path(repo_path: str, file_path: str) -> Path:
+    repo = Path(repo_path).resolve()
+    target = (repo / file_path).resolve()
+    if target != repo and repo not in target.parents:
+        raise ValueError(f"Path escapes repository: {file_path}")
+    return target
+
 # 查看文件列表
 def list_files(repo_path: str, max_files: int = 200) -> Dict[str, Any]:
     files: List[str] = []
@@ -22,10 +29,15 @@ def list_files(repo_path: str, max_files: int = 200) -> Dict[str, Any]:
 
 # 读取文件
 def read_file(repo_path: str, file_path: str, max_chars: int = 8000) -> Dict[str, Any]:
-    target = Path(repo_path) / file_path
+    try:
+        target = _safe_path(repo_path, file_path)
+    except ValueError as exc:
+        return {"error": str(exc)}
 
     if not target.exists():
         return {"error": f"File not found: {file_path}"}
+    if not target.is_file():
+        return {"error": f"Not a file: {file_path}"}
 
     content = target.read_text(encoding="utf-8", errors="ignore")
     return {

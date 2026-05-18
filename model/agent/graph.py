@@ -2,6 +2,9 @@
     File name: graph.py
     Author: kunze.li
 """
+from __future__ import annotations
+
+from dataclasses import dataclass
 from typing import TypedDict, List, Dict, Any, Optional, Literal
 
 # 工具调用格式
@@ -33,6 +36,7 @@ class AgentState(TypedDict, total=False):
     task_type: Literal["BUG_FIX", "FEATURE_IMPL", "DIAGNOSE"]
     title: str
     description: str
+    registry_snapshot: Dict[str, List[str]]
     # 引入 skill
     task_category: str
     selected_skills: list[str]
@@ -46,10 +50,31 @@ class AgentState(TypedDict, total=False):
     current_step: str
 
     candidate_files: List[str] # llm 想要调用的 files
+    code_context: Dict[str, Any]
     observations: List[Dict[str, Any]] # 执行流程记录
     tool_calls: List[ToolCall] # llm 使用过的 tools
     test_results: List[TestResult]
     trajectory: List[TrajectoryStep] # 整个任务的结果集
+
+    # 查询过的记忆记录
+    retrieved_memories: List[Dict[str, Any]]
+    memory_context: str
+
+    # 上下文压缩
+    context_items: List[Dict[str, Any]]
+    context_digest: Dict[str, Any]
+    compressed_context: str
+
+    # 记忆持久话相关
+    short_term_memories: List[Dict[str, Any]]
+    promoted_memories: List[Dict[str, Any]]
+    consolidated_skills: List[Dict[str, Any]]
+    memory_written: bool
+
+    # rl 模块相关
+    rl_enabled: bool
+    rl_transitions: List[Dict[str, Any]]
+    rl_last_reward: Dict[str, Any]
 
     patch: Optional[str] # 修改文件的块
     patch_summary: Optional[str]
@@ -71,3 +96,9 @@ class AgentState(TypedDict, total=False):
     ]
 
     error: Optional[str]
+
+
+@dataclass
+class AgentRunResult:
+    state: AgentState
+    trace_path: str
