@@ -33,7 +33,3 @@ def run_command(repo_path: str, command: str = "pytest", timeout: int = 120) -> 
             "stdout": "",
             "stderr": str(exc),
         }
-
-
-def run_go_test(repo_path: str, command: str = "go test ./...") -> Dict[str, Any]:
-    return run_command(repo_path, command, timeout=120)

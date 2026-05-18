@@ -13,3 +13,9 @@ class Action:
     name: str
     args: Dict[str, Any] = field(default_factory=dict)
     thought: str = ""
+
+# 每个动作的语义
+@dataclass(frozen=True)
+class ActionSpec:
+    name: str
+    description: str

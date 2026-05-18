@@ -8,8 +8,7 @@ debugging, and later RL transition extraction.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict
 from uuid import uuid4
@@ -17,11 +16,9 @@ from uuid import uuid4
 from model.agent.graph import AgentState, TrajectoryStep
 from model.agent.trajectory import TraceEvent
 
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
+"""
+    跑图流程记录
+"""
 class TrajectoryRecorder:
     def __init__(self, task_id: str | None = None) -> None:
         self.task_id = task_id or str(uuid4())

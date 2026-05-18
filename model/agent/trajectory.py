@@ -1,7 +1,8 @@
-from dataclasses import dataclass, field
-from typing import Dict, Any
+from __future__ import annotations
 
-from agent_runtime.trajectory import utc_now
+from dataclasses import dataclass, field
+from utils import utc_now
+from typing import Dict, Any
 
 
 @dataclass

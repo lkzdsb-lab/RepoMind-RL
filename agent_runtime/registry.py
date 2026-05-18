@@ -16,7 +16,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
-from graph.register import NodeRegistry
+from agent_runtime.graph.register import NodeRegistry
 from model.agent.tools import ToolSpec
 from model.agent.node import NodeSpec
 from model.skill import SkillSpec
@@ -24,6 +24,8 @@ from model.prompt import PromptSpec
 from agent_runtime.tool_registry import ToolRegistry
 from prompts.register import PromptRegistry
 from skills.register import SkillRegistry
+from config import ManifestConfig
+from loguru import logger
 
 try:
     import tomllib
@@ -59,7 +61,9 @@ class RegistrySnapshot:
     ) -> dict[str, Any]:
         spec = self.get_tool(name)
         if spec is None:
+            logger.warning("unknown tool requested name={}", name)
             return {"error": f"Unknown tool: {name}"}
+        logger.debug("running registered tool name={} repo_path={} args={}", name, repo_path, args or {})
         return spec.runner(repo_path, args or {})
 
     # 用 name 反射获取已经注册的元素集合
@@ -95,33 +99,50 @@ class RegistryManager:
             self.load_manifests(manifest_dir)
 
     def load_manifests(self, manifest_dir: str | Path) -> None:
+        logger.info("loading registry manifests dir={}", manifest_dir)
         ManifestLoader(self).load_dir(manifest_dir)
 
     def snapshot(self) -> RegistrySnapshot:
-        return RegistrySnapshot(
+        snapshot = RegistrySnapshot(
             tools=MappingProxyType(dict(self.tools.items())),
             nodes=MappingProxyType(dict(self.nodes.items())),
             prompts=MappingProxyType(dict(self.prompts.items())),
             skills=MappingProxyType(dict(self.skills.items())),
         )
+        logger.debug(
+            "registry snapshot created tools={} nodes={} prompts={} skills={}",
+            len(snapshot.tools),
+            len(snapshot.nodes),
+            len(snapshot.prompts),
+            len(snapshot.skills),
+        )
+        return snapshot
 
-
+"""
+    运行时注册器
+"""
 class ManifestLoader:
-    SUPPORTED_SUFFIXES = {".json", ".toml"}
-
     def __init__(self, manager: RegistryManager) -> None:
         self.manager = manager
 
     def load_dir(self, manifest_dir: str | Path) -> None:
         root = Path(manifest_dir)
         if not root.exists():
+            logger.error("manifest directory does not exist path={}", root)
             raise FileNotFoundError(f"Manifest directory does not exist: {root}")
         if not root.is_dir():
+            logger.error("manifest path is not directory path={}", root)
             raise NotADirectoryError(f"Manifest path is not a directory: {root}")
 
+        loaded = 0
         for path in sorted(root.rglob("*")):
-            if path.is_file() and path.suffix in self.SUPPORTED_SUFFIXES:
+            if path.is_file() and path.suffix in ManifestConfig.SUPPORTED_SUFFIXES:
                 self.load_file(path)
+                loaded += 1
+        if loaded == 0:
+            logger.warning("no registry manifests found dir={}", root)
+        else:
+            logger.info("registry manifests loaded dir={} count={}", root, loaded)
 
     # 从配置文件中加载 tools、skills 等数据
     def load_file(self, path: str | Path) -> None:
@@ -130,14 +151,23 @@ class ManifestLoader:
         kind = str(data.get("kind", "")).lower()
 
         if kind == "tool":
-            self.manager.tools.register(self._tool_spec(data))
+            spec = self._tool_spec(data)
+            self.manager.tools.register(spec)
+            logger.info("manifest registered kind=tool name={} path={}", spec.name, manifest_path)
         elif kind == "node":
-            self.manager.nodes.register(self._node_spec(data))
+            spec = self._node_spec(data)
+            self.manager.nodes.register(spec)
+            logger.info("manifest registered kind=node name={} path={}", spec.name, manifest_path)
         elif kind == "prompt":
-            self.manager.prompts.register(self._prompt_spec(data, manifest_path.parent))
+            spec = self._prompt_spec(data, manifest_path.parent)
+            self.manager.prompts.register(spec)
+            logger.info("manifest registered kind=prompt name={} path={}", spec.name, manifest_path)
         elif kind == "skill":
-            self.manager.skills.register(self._skill_spec(data))
+            spec = self._skill_spec(data)
+            self.manager.skills.register(spec)
+            logger.info("manifest registered kind=skill name={} path={}", spec.name, manifest_path)
         else:
+            logger.error("unsupported manifest kind kind={} path={}", kind, manifest_path)
             raise ValueError(f"Unsupported manifest kind `{kind}` in {manifest_path}")
 
     def _read_manifest(self, path: Path) -> dict[str, Any]:
@@ -174,6 +204,12 @@ class ManifestLoader:
         )
 
     def _prompt_spec(self, data: dict[str, Any], base_dir: Path) -> PromptSpec:
+        """
+            prompt 支持两种写法：
+            template = "..."
+            或者
+            template_file = "../../prompts/system/debug_agent.md"
+        """
         template = data.get("template")
         template_file = data.get("template_file")
         if template is None and template_file:
@@ -207,7 +243,7 @@ def _optional_callable(value: Any) -> Callable[..., Any] | None:
         return None
     return _import_callable(str(value))
 
-
+# 解析指定调用格式：runner = "my_package.my_tools:run_my_tool"
 def _import_callable(path: str) -> Callable[..., Any]:
     module_name, separator, attr_name = path.partition(":")
     if not separator or not module_name or not attr_name:
@@ -216,10 +252,12 @@ def _import_callable(path: str) -> Callable[..., Any]:
     module = importlib.import_module(module_name)
     value = getattr(module, attr_name)
     if not callable(value):
+        logger.error("imported manifest callable is not callable path={}", path)
         raise TypeError(f"Imported value is not callable: {path}")
+    logger.debug("manifest callable imported path={}", path)
     return value
 
-
+# 兼容低版本 toml 库
 def _loads_simple_toml(text: str) -> dict[str, Any]:
     data: dict[str, Any] = {}
     current: dict[str, Any] = data

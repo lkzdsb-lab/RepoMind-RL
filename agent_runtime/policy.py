@@ -9,16 +9,22 @@ DQN controller.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
 
+from agent_runtime.search_query import SearchQueryPlanner
 from model.agent.actions import Action
 from model.agent.graph import AgentState
 
-
+"""
+    llm 启发式学习策略
+"""
 @dataclass
 class HeuristicDebugPolicy:
     default_query: str = "TODO"
 
+    def __post_init__(self) -> None:
+        self.query_planner = SearchQueryPlanner(default_query=self.default_query)
+
+    # plan 阶段，todo 后续也是用一个 skill 形式实现
     def make_initial_plan(self, state: AgentState) -> list[str]:
         verify_command = state.get("verify_command") or "pytest"
         return [
@@ -27,9 +33,10 @@ class HeuristicDebugPolicy:
             "阅读候选文件建立上下文",
             f"运行验证命令：{verify_command}",
             "查看 git diff 并汇总当前补丁状态",
-            "记录 trajectory，必要时写入第一版经验记忆",
+            "按 reward gate 写入分层记忆，必要时沉淀到 skill",
         ]
 
+    # llm 决策
     def next_action(self, state: AgentState) -> Action:
         loop_count = state.get("loop_count", 0)
         max_loops = state.get("max_loops", 8)
@@ -44,11 +51,11 @@ class HeuristicDebugPolicy:
             )
 
         if loop_count == 1:
-            query = self.extract_keyword(state)
+            query_plan = self.query_planner.plan(state)
             return Action(
-                "search_code",
-                {"query": query},
-                thought=f"用关键词 `{query}` 搜索相关代码。",
+                "search_code_context",
+                {"query": query_plan.query, "query_plan": query_plan.to_dict()},
+                thought=f"用查询 `{query_plan.query}` 搜索结构化代码上下文。",
             )
 
         candidate_files = state.get("candidate_files") or []
@@ -87,43 +94,7 @@ class HeuristicDebugPolicy:
         return Action("finish", thought="已完成第一版可执行流程。")
 
     def extract_keyword(self, state: AgentState) -> str:
-        text = f"{state.get('title', '')} {state.get('description', '')}".lower()
-        tokens = self._tokenize(text)
-        stop_words = {
-            "the",
-            "and",
-            "for",
-            "with",
-            "when",
-            "from",
-            "this",
-            "that",
-            "一个",
-            "这个",
-            "偶尔",
-            "不会",
-            "定位",
-            "修复",
-            "问题",
-            "项目",
-        }
-
-        for token in tokens:
-            if len(token) >= 3 and token not in stop_words:
-                return token
-
-        return self.default_query
-
-    def _tokenize(self, text: str) -> Iterable[str]:
-        token = []
-        for char in text:
-            if char.isalnum() or char in {"_", "-"}:
-                token.append(char)
-            elif token:
-                yield "".join(token)
-                token = []
-        if token:
-            yield "".join(token)
+        return self.query_planner.plan(state).query
 
     def _read_files_from_state(self, state: AgentState) -> set[str]:
         files: set[str] = set()

@@ -13,9 +13,11 @@ from typing import Any, Dict, Mapping
 from config import FileConfig
 from model.agent.tools import ToolSpec
 from tools.code_tools.code import search_code
+from tools.code_tools.context import build_codebase_context, search_code_context
 from tools.code_tools.file import list_files, read_file
 from tools.git_tools.diff import git_diff
 from tools.go_tools.go_test import run_command
+from loguru import logger
 
 
 def reduce_search_code_output(
@@ -23,6 +25,29 @@ def reduce_search_code_output(
     output: Dict[str, Any],
 ) -> Dict[str, Any]:
     return {"candidate_files": _extract_files_from_search(output.get("matches", []))}
+
+
+def reduce_search_code_context_output(
+    state: Dict[str, Any],
+    output: Dict[str, Any],
+) -> Dict[str, Any]:
+    files = []
+    for item in output.get("files", []):
+        path = item.get("path") if isinstance(item, dict) else ""
+        if path and path not in files:
+            files.append(path)
+    for item in output.get("functions", []):
+        path = item.get("file_path") if isinstance(item, dict) else ""
+        if path and path not in files:
+            files.append(path)
+    for item in output.get("symbols", []):
+        path = item.get("file_path") if isinstance(item, dict) else ""
+        if path and path not in files:
+            files.append(path)
+    return {
+        "candidate_files": files[:10],
+        "code_context": output,
+    }
 
 
 def reduce_run_tests_output(
@@ -81,11 +106,17 @@ class ToolRegistry:
 
     # 后续新注册 tools
     def register(self, spec: ToolSpec) -> None:
+        if spec.name in self._tools:
+            logger.warning("overriding registered tool name={}", spec.name)
+        else:
+            logger.debug("registering tool name={}", spec.name)
         self._tools[spec.name] = spec
 
     def run(self, name: str, repo_path: str, args: Dict[str, Any] | None = None) -> Dict[str, Any]:
         if name not in self._tools:
+            logger.warning("unknown tool requested name={}", name)
             return {"error": f"Unknown tool: {name}"}
+        logger.debug("tool registry dispatch name={} repo_path={} args={}", name, repo_path, args or {})
         return self._tools[name].runner(repo_path, args or {})
 
     def names(self) -> list[str]:
@@ -98,6 +129,31 @@ class ToolRegistry:
         return MappingProxyType(dict(self._tools))
 
     def register_defaults(self) -> None:
+        self.register(
+            ToolSpec(
+                name="build_codebase_context",
+                description="Build or refresh the local codebase context index.",
+                runner=lambda repo, args: build_codebase_context(
+                    repo,
+                    index_path=str(args.get("index_path", ".repomind/codebase_context/index.json")),
+                    force_rebuild=bool(args.get("force_rebuild", False)),
+                ),
+            )
+        )
+        self.register(
+            ToolSpec(
+                name="search_code_context",
+                description="Search the structured codebase context index.",
+                reducer=reduce_search_code_context_output,
+                runner=lambda repo, args: search_code_context(
+                    repo,
+                    str(args.get("query", "")),
+                    limit=int(args.get("limit", args.get("max_results", 10))),
+                    index_path=str(args.get("index_path", ".repomind/codebase_context/index.json")),
+                    force_rebuild=bool(args.get("force_rebuild", False)),
+                ),
+            )
+        )
         self.register(
             ToolSpec(
                 name="list_files",

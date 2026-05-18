@@ -13,7 +13,11 @@ class ToolSpec:
     description: str
     runner: ToolFn
     input_schema: Dict[str, Any] = field(default_factory=dict)
+    """ 定义工具接收参数 """
     output_schema: Dict[str, Any] = field(default_factory=dict)
+    """ 定义工具返回参数 """
     permissions: list[str] = field(default_factory=list)
+    """ 权限 """
     metadata: Dict[str, Any] = field(default_factory=dict)
     reducer: ToolReducer | None = None
+    """ 定义了工具的运行结果如何合并回全局状态（AgentState） """
