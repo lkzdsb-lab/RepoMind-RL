@@ -41,10 +41,12 @@ class AgentState(TypedDict, total=False):
     task_category: str
     task_analysis: Dict[str, Any]
     selected_skills: list[str]
+    skill_selection: Dict[str, Any]
     skill_context: list[dict]
 
     repo_path: str # 仓库路径
     branch: str # 仓库分支
+    review_only: bool # 只做代码审查，不运行验证命令
     verify_command: str # 权限认证相关命令
 
     plan: List[str] # llm 给的 plan
@@ -52,6 +54,9 @@ class AgentState(TypedDict, total=False):
 
     candidate_files: List[str] # llm 想要调用的 files
     code_context: Dict[str, Any]
+    selected_code_context: Dict[str, Any]
+    code_context_query_plan: Dict[str, Any]
+    code_context_rerank: Dict[str, Any]
     observations: List[Dict[str, Any]] # 执行流程记录
     llm_observations: List[Dict[str, Any]]
     tool_calls: List[ToolCall] # llm 使用过的 tools
@@ -59,7 +64,10 @@ class AgentState(TypedDict, total=False):
     trajectory: List[TrajectoryStep] # 整个任务的结果集
 
     # 查询过的记忆记录
-    retrieved_memories: List[Dict[str, Any]]
+    retrieved_memories: Dict[str, Any]
+    selected_memories: Dict[str, Any]
+    memory_query_plan: Dict[str, Any]
+    memory_rerank: Dict[str, Any]
     memory_context: str
 
     # 上下文压缩
@@ -81,6 +89,7 @@ class AgentState(TypedDict, total=False):
 
     patch: Optional[str] # 修改文件的块
     patch_summary: Optional[str]
+    final_report: Dict[str, Any]
 
     next_action: Optional[str] # 下一个步骤
     next_action_input: Optional[Dict[str, Any]]

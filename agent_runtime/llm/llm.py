@@ -30,8 +30,12 @@ class OpenAICompatibleLLMClient:
     def __init__(self, config: LLMConfig) -> None:
         self.config = config
         api_key = os.getenv(config.api_key_env) if config.api_key_env else ""
+        if not api_key:
+            raise RuntimeError(
+                f"LLM API key env var `{config.api_key_env}` is not set for provider `{config.provider}`."
+            )
         self.client = OpenAI(
-            api_key=api_key or "disabled",
+            api_key=api_key,
             base_url=config.api_base or None,
             timeout=config.timeout,
         )
@@ -99,7 +103,7 @@ def build_llm_client(config: LLMConfig) -> LLMClient:
     provider = config.provider.strip().lower()
     if provider in {"", "disabled", "none"}:
         return DisabledLLMClient()
-    if provider in {"openai", "openai_compatible", "openai-compatible"}:
+    if provider in {"openai", "openai_compatible", "openai-compatible", "enable"}:
         if not config.model:
             return DisabledLLMClient()
         return OpenAICompatibleLLMClient(config)

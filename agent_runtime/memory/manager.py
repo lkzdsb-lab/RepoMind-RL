@@ -95,6 +95,7 @@ class LayeredMemoryManager:
         state: AgentState,
         registry: RegistrySnapshot,
         limit: int = 5,
+        touch: bool = True,
     ) -> MemoryContextPack:
         """
         description: 根据 query 结合当前 state 获取记忆
@@ -105,7 +106,8 @@ class LayeredMemoryManager:
             long_term=self.long_store.search_cards(query, limit=limit),
             skill=self._retrieve_skill_memory(query, state, registry, limit=limit),
         )
-        self._touch_retrieved(pack, state)
+        if touch:
+            self._touch_retrieved(pack, state)
         logger.bind(task_id=state.get("task_id")).info(
             "layered memory retrieve query_chars={} short={} mid={} long={} skill={}",
             len(query),
@@ -115,6 +117,9 @@ class LayeredMemoryManager:
             len(pack.skill),
         )
         return pack
+
+    def touch_retrieved(self, pack: MemoryContextPack, state: AgentState) -> None:
+        self._touch_retrieved(pack, state)
 
     def record_task_memory(
         self,
@@ -214,7 +219,12 @@ class LayeredMemoryManager:
                 skill_name=skill.name,
                 status="verified",
             )
-            score = _lexical_score(query_terms or skill_terms, card)
+            score_terms = query_terms or skill_terms
+            if selected and skill.name in selected:
+                score_terms = query_terms.union(skill_terms) if query_terms else skill_terms
+            score = _lexical_score(score_terms, card)
+            if selected and skill.name in selected and score <= 0:
+                score = 0.01
             if score > 0:
                 results.append(MemorySearchResult(card=card, score=score, source="skill"))
 
@@ -470,6 +480,12 @@ class LayeredMemoryManager:
 
     def _procedural_content(self, state: AgentState) -> str:
         command = state.get("verify_command", "pytest")
+        if state.get("review_only"):
+            return (
+                f"Procedure for similar review-only tasks: search using task-specific keywords, "
+                f"read the top candidate files, skip `{command}`, inspect `git_diff`, and keep "
+                f"the memory as draft unless separate verification evidence is present."
+            )
         return (
             f"Procedure for similar tasks: search using task-specific keywords, read the "
             f"top candidate files, run `{command}`, inspect `git_diff`, and only promote "

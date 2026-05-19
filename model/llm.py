@@ -30,6 +30,58 @@ class ObservationResponse(BaseModel):
     confidence: float = 0.5
 
 
+class FinalReportResponse(BaseModel):
+    summary: str = ""
+    work_done: list[str] = Field(default_factory=list)
+    candidate_files: list[str] = Field(default_factory=list)
+    test_results: list[str] = Field(default_factory=list)
+    has_patch: bool = False
+    patch_status: str = ""
+    next_steps: list[str] = Field(default_factory=list)
+
+
+class MemoryQueryPlanResponse(BaseModel):
+    queries: list[str]
+    rationale: str = ""
+
+
+class MemorySelectionResponse(BaseModel):
+    memory_id: str
+    relevance: float
+    reason: str = ""
+
+
+class MemoryRerankResponse(BaseModel):
+    selected: list[MemorySelectionResponse]
+
+
+class CodeContextQueryPlanResponse(BaseModel):
+    queries: list[str]
+    rationale: str = ""
+
+
+class CodeContextSelectionResponse(BaseModel):
+    candidate_id: str
+    relevance: float
+    reason: str = ""
+
+
+class CodeContextRerankResponse(BaseModel):
+    selected: list[CodeContextSelectionResponse]
+    rationale: str = ""
+
+
+class SkillSelectionResponse(BaseModel):
+    skill_name: str
+    relevance: float
+    reason: str = ""
+
+
+class SkillSelectorResponse(BaseModel):
+    selected: list[SkillSelectionResponse]
+    rationale: str = ""
+
+
 class ActionChoiceResponse(BaseModel):
     action: str = ""
     reason: str = ""

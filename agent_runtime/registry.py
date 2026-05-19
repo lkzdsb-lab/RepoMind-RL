@@ -163,7 +163,7 @@ class ManifestLoader:
             self.manager.prompts.register(spec)
             logger.info("manifest registered kind=prompt name={} path={}", spec.name, manifest_path)
         elif kind == "skill":
-            spec = self._skill_spec(data)
+            spec = self._skill_spec(data, manifest_path.parent)
             self.manager.skills.register(spec)
             logger.info("manifest registered kind=skill name={} path={}", spec.name, manifest_path)
         else:
@@ -226,13 +226,19 @@ class ManifestLoader:
             metadata=dict(data.get("metadata", {})),
         )
 
-    def _skill_spec(self, data: dict[str, Any]) -> SkillSpec:
+    def _skill_spec(self, data: dict[str, Any], base_dir: Path) -> SkillSpec:
+        resources = []
+        for resource in data.get("resources", []):
+            resource_path = Path(str(resource))
+            if not resource_path.is_absolute():
+                resource_path = (base_dir / resource_path).resolve()
+            resources.append(resource_path.as_posix())
         return SkillSpec(
             name=str(data["name"]),
             description=str(data.get("description", "")),
             version=str(data.get("version", "0.1.0")),
             triggers=list(data.get("triggers", [])),
-            resources=list(data.get("resources", [])),
+            resources=resources,
             entrypoints=dict(data.get("entrypoints", {})),
             metadata=dict(data.get("metadata", {})),
         )

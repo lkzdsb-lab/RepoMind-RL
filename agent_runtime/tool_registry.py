@@ -31,22 +31,37 @@ def reduce_search_code_context_output(
     state: Dict[str, Any],
     output: Dict[str, Any],
 ) -> Dict[str, Any]:
+    context = output.get("selected_code_context")
+    if not isinstance(context, dict):
+        context = output
+
     files = []
-    for item in output.get("files", []):
+    for item in context.get("files", []):
         path = item.get("path") if isinstance(item, dict) else ""
         if path and path not in files:
             files.append(path)
-    for item in output.get("functions", []):
+    for item in context.get("functions", []):
         path = item.get("file_path") if isinstance(item, dict) else ""
         if path and path not in files:
             files.append(path)
-    for item in output.get("symbols", []):
+    for item in context.get("symbols", []):
+        path = item.get("file_path") if isinstance(item, dict) else ""
+        if path and path not in files:
+            files.append(path)
+    for item in context.get("api_routes", []):
+        path = item.get("file_path") if isinstance(item, dict) else ""
+        if path and path not in files:
+            files.append(path)
+    for item in context.get("db_models", []):
         path = item.get("file_path") if isinstance(item, dict) else ""
         if path and path not in files:
             files.append(path)
     return {
         "candidate_files": files[:10],
         "code_context": output,
+        "selected_code_context": context if context is not output else {},
+        "code_context_query_plan": output.get("query_plan", {}),
+        "code_context_rerank": output.get("code_context_rerank", {}),
     }
 
 
@@ -54,6 +69,8 @@ def reduce_run_tests_output(
     state: Dict[str, Any],
     output: Dict[str, Any],
 ) -> Dict[str, Any]:
+    if output.get("skipped"):
+        return {"status": "running"}
     return {
         "test_results": state.get("test_results", []) + [output],
         "status": "testing",

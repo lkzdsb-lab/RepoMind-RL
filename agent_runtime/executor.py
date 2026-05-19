@@ -13,12 +13,36 @@ from pathlib import Path
 from typing import Any, Dict
 from uuid import uuid4
 
+from agent_runtime.codebase_context.retrieval import (
+    CodeContextQueryPlanner,
+    CodeContextReranker,
+    DisabledCodeContextQueryPlanner,
+    DisabledCodeContextReranker,
+    LLMCodeContextQueryPlanner,
+    LLMCodeContextReranker,
+    merge_code_context_outputs,
+)
 from agent_runtime.context import ContextCompressionManager
 from agent_runtime.logging_config import configure_from_agent_config
 from agent_runtime.llm.llm_policy import LLMActionPolicy
+from agent_runtime.llm.final_reporter import (
+    FinalReporter,
+    LLMFinalReporter,
+    RuleBasedFinalReporter,
+)
+from agent_runtime.llm.observation import DisabledObserver, LLMObserver, Observer
+from agent_runtime.llm.task_analysis import DisabledTaskAnalyzer, LLMTaskAnalyzer, TaskAnalyzer
 from agent_runtime.memory.manager import LayeredMemoryManager
+from agent_runtime.memory.retrieval import (
+    DisabledMemoryQueryPlanner,
+    DisabledMemoryReranker,
+    LLMMemoryQueryPlanner,
+    LLMMemoryReranker,
+    MemoryQueryPlanner,
+    MemoryReranker,
+    merge_memory_packs,
+)
 from agent_runtime.memory.store import JsonlMemoryStore
-from llm.observation import DisabledObserver, LLMObserver, Observer
 from agent_runtime.planning import HeuristicPlanner, LLMPlanner, Planner
 from agent_runtime.policy import HeuristicDebugPolicy
 from agent_runtime.registry import RegistryManager, RegistrySnapshot
@@ -31,10 +55,10 @@ from agent_runtime.rl import (
     StateEncoder,
     Transition,
 )
+from agent_runtime.skill_selection import DisabledSkillSelector, LLMSkillSelector, SkillSelector
 from agent_runtime.rl.trainer import QTableStore
 from agent_runtime.tool_registry import ToolRegistry
 from agent_runtime.trajectory import TrajectoryRecorder
-from llm.task_analysis import DisabledTaskAnalyzer, LLMTaskAnalyzer, TaskAnalyzer
 from model.agent.graph import AgentState, AgentRunResult
 from model.agent.actions import Action
 from config import DebugAgentConfig, LLMConfig
@@ -53,6 +77,12 @@ class DebugAgent:
         planner: Planner | None = None,
         task_analyzer: TaskAnalyzer | None = None,
         observer: Observer | None = None,
+        final_reporter: FinalReporter | None = None,
+        memory_query_planner: MemoryQueryPlanner | None = None,
+        memory_reranker: MemoryReranker | None = None,
+        code_context_query_planner: CodeContextQueryPlanner | None = None,
+        code_context_reranker: CodeContextReranker | None = None,
+        skill_selector: SkillSelector | None = None,
         tools: ToolRegistry | None = None,
         registry: RegistryManager | None = None,
         memory_manager: LayeredMemoryManager | None = None,
@@ -92,10 +122,18 @@ class DebugAgent:
         self.planner = planner or self._default_planner()
         self.task_analyzer = task_analyzer or self._default_task_analyzer()
         self.observer = observer or self._default_observer()
+        self.final_reporter = final_reporter or self._default_final_reporter()
+        self.memory_query_planner = memory_query_planner or self._default_memory_query_planner()
+        self.memory_reranker = memory_reranker or self._default_memory_reranker()
+        self.code_context_query_planner = (
+            code_context_query_planner or self._default_code_context_query_planner()
+        )
+        self.code_context_reranker = code_context_reranker or self._default_code_context_reranker()
         self.registry_manager = registry or RegistryManager(
             tools=tools,
             manifest_dir=config.manifest_dir,
         )
+        self.skill_selector = skill_selector or self._default_skill_selector()
         self._active_registry: RegistrySnapshot | None = None
         self.memory_manager = memory_manager or LayeredMemoryManager.from_config(config)
         if memory_store is not None:
@@ -103,9 +141,10 @@ class DebugAgent:
         self.context_manager = context_manager or ContextCompressionManager.from_config(config)
         self.recorder = recorder or TrajectoryRecorder()
         logger.info(
-            "debug agent initialized repo_path={} max_loops={} rl_enabled={} manifest_dir={}",
+            "debug agent initialized repo_path={} max_loops={} review_only={} rl_enabled={} manifest_dir={}",
             config.repo_path,
             config.max_loops,
+            config.review_only,
             self.rl_enabled,
             config.manifest_dir,
         )
@@ -122,6 +161,7 @@ class DebugAgent:
         )
         state = self._understand_task(state)
         if state.get("status") == "failed":
+            state = self._finalize(state)
             trace_path = self.recorder.save(state, self.config.trace_dir)
             run_logger.error(
                 "agent run aborted during task analysis error={} trace_path={}",
@@ -129,7 +169,26 @@ class DebugAgent:
                 trace_path.as_posix(),
             )
             return AgentRunResult(state=state, trace_path=trace_path.as_posix())
+        state = self._select_skills(state)
+        if state.get("status") == "failed":
+            state = self._finalize(state)
+            trace_path = self.recorder.save(state, self.config.trace_dir)
+            run_logger.error(
+                "agent run aborted during skill selection error={} trace_path={}",
+                state.get("error"),
+                trace_path.as_posix(),
+            )
+            return AgentRunResult(state=state, trace_path=trace_path.as_posix())
         state = self._retrieve_memories(state)
+        if state.get("status") == "failed":
+            state = self._finalize(state)
+            trace_path = self.recorder.save(state, self.config.trace_dir)
+            run_logger.error(
+                "agent run aborted during memory retrieval error={} trace_path={}",
+                state.get("error"),
+                trace_path.as_posix(),
+            )
+            return AgentRunResult(state=state, trace_path=trace_path.as_posix())
         state = self._prepare_context(state)
         state = self._make_plan(state)
 
@@ -145,6 +204,8 @@ class DebugAgent:
                 break
 
             state = self._execute_action(state, action)
+            if state.get("status") == "failed":
+                break
             state = self._observe(state)
             if state.get("status") == "failed":
                 break
@@ -160,11 +221,8 @@ class DebugAgent:
                 self.config.max_loops,
                 len(state.get("tool_calls", [])),
             )
-            state = self.recorder.append(
-                state,
-                node="finalize",
-                thought="达到最大循环次数，第一版 agent 停止执行。",
-            )
+        if state.get("current_step") != "finished":
+            state = self._finalize(state)
 
         trace_path = self.recorder.save(state, self.config.trace_dir)
         logger.bind(task_id=state.get("task_id")).info(
@@ -192,20 +250,28 @@ class DebugAgent:
             },
             repo_path=self.config.repo_path,
             branch="",
+            review_only=self.config.review_only,
             verify_command=self.config.verify_command,
             task_analysis={},
             plan=[],
             current_step="created",
             candidate_files=[],
             code_context={},
+            selected_code_context={},
+            code_context_query_plan={},
+            code_context_rerank={},
             observations=[],
             llm_observations=[],
             tool_calls=[],
             test_results=[],
             trajectory=[],
             selected_skills=[],
+            skill_selection={},
             skill_context=[],
             retrieved_memories=[],
+            selected_memories={},
+            memory_query_plan={},
+            memory_rerank={},
             memory_context="",
             context_items=[],
             context_digest={},
@@ -220,6 +286,7 @@ class DebugAgent:
             llm_guard_events=[],
             patch=None,
             patch_summary=None,
+            final_report={},
             next_action=None,
             next_action_input=None,
             loop_count=0,
@@ -277,43 +344,130 @@ class DebugAgent:
             observation={"task_analysis": analysis},
         )
 
-    def _retrieve_memories(self, state: AgentState) -> AgentState:
-        analysis = state.get("task_analysis") or {}
-        query_parts = [
-            str(state.get("title", "")),
-            str(state.get("description", "")),
-        ]
-        if isinstance(analysis, dict):
-            query_parts.extend(
-                [
-                    str(analysis.get("task_category", "")),
-                    " ".join(str(item) for item in _list_values(analysis.get("entities"))[:8]),
-                    " ".join(str(item) for item in _list_values(analysis.get("search_hints"))[:8]),
-                ]
+    def _select_skills(self, state: AgentState) -> AgentState:
+        try:
+            selection = self.skill_selector.select(state, self._registry().skills)
+        except Exception as exc:
+            logger.bind(task_id=state.get("task_id")).exception(
+                "skill selection failed without fallback"
             )
-        query = " ".join(part for part in query_parts if part).strip()
-        memory_pack = self.memory_manager.retrieve(query, state, self._registry())
-        memories = memory_pack.to_dict()
+            failed_state = {
+                **state,
+                "status": "failed",
+                "current_step": "select_skills",
+                "error": f"Skill selection failed: {exc}",
+            }
+            return self.recorder.append(
+                failed_state,
+                node="select_skills",
+                thought="Skill 选择失败，未启用降级策略。",
+                observation={"error": str(exc), "fallback": False},
+            )
+
+        selected_skills = _merge_unique(
+            state.get("selected_skills", []),
+            selection.selected_skills,
+        )
+        selection_payload = selection.to_dict()
+        observations = state.get("observations", []) + [
+            {
+                "type": "skill_selection",
+                "content": selection_payload,
+            }
+        ]
+        state = {
+            **state,
+            "current_step": "select_skills",
+            "selected_skills": selected_skills,
+            "skill_selection": selection_payload,
+            "observations": observations,
+        }
+        logger.bind(task_id=state.get("task_id")).info(
+            "skills selected source={} count={} selected={}",
+            selection.source,
+            len(selected_skills),
+            selected_skills,
+        )
+        return self.recorder.append(
+            state,
+            node="select_skills",
+            thought=f"选择 {len(selected_skills)} 个 skill 作为本轮流程约束。",
+            observation=selection_payload,
+        )
+
+    def _retrieve_memories(self, state: AgentState) -> AgentState:
+        try:
+            query_plan = self.memory_query_planner.plan(state)
+            packs = [
+                self.memory_manager.retrieve(
+                    query,
+                    state,
+                    self._registry(),
+                    limit=self.config.memory_query_limit,
+                    touch=False,
+                )
+                for query in query_plan.queries
+            ]
+            candidate_pack = merge_memory_packs(packs)
+            memory_pack, rerank_decision = self.memory_reranker.rerank(
+                state,
+                query_plan,
+                candidate_pack,
+            )
+            self.memory_manager.touch_retrieved(memory_pack, state)
+        except Exception as exc:
+            logger.bind(task_id=state.get("task_id")).exception(
+                "memory retrieval failed without fallback"
+            )
+            failed_state = {
+                **state,
+                "status": "failed",
+                "current_step": "retrieve_memory",
+                "error": f"Memory retrieval failed: {exc}",
+            }
+            return self.recorder.append(
+                failed_state,
+                node="retrieve_memory",
+                thought="记忆检索失败，未启用降级策略。",
+                observation={"error": str(exc), "fallback": False},
+            )
+
+        candidate_memories = candidate_pack.to_dict()
+        selected_memories = memory_pack.to_dict()
         memory_context = memory_pack.render_for_prompt()
         skill_context = [result.to_dict() for result in memory_pack.skill]
-        selected_skills = [
+        memory_selected_skills = [
             result.card.skill_name
             for result in memory_pack.skill
             if result.card.skill_name
         ]
+        selected_skills = _merge_unique(state.get("selected_skills", []), memory_selected_skills)
         observations = state.get("observations", []) + [
-            {"type": "retrieved_memories", "content": memories}
+            {
+                "type": "retrieved_memories",
+                "content": {
+                    "query_plan": query_plan.to_dict(),
+                    "candidate_count": len(candidate_pack.all_results()),
+                    "selected_count": len(memory_pack.all_results()),
+                    "rerank": rerank_decision.to_dict(),
+                },
+            }
         ]
         state = {
             **state,
             "observations": observations,
-            "retrieved_memories": memories,
+            "retrieved_memories": candidate_memories,
+            "selected_memories": selected_memories,
+            "memory_query_plan": query_plan.to_dict(),
+            "memory_rerank": rerank_decision.to_dict(),
             "memory_context": memory_context,
             "skill_context": skill_context,
             "selected_skills": selected_skills,
         }
         logger.bind(task_id=state.get("task_id")).info(
-            "memory retrieved total={} short={} mid={} long={} skill={} selected_skills={}",
+            "memory retrieved queries={} candidates={} selected={} short={} mid={} long={} skill={} selected_skills={}",
+            len(query_plan.queries),
+            len(candidate_pack.all_results()),
             len(memory_pack.all_results()),
             len(memory_pack.short_term),
             len(memory_pack.mid_term),
@@ -324,10 +478,13 @@ class DebugAgent:
         return self.recorder.append(
             state,
             node="retrieve_memory",
-            thought=f"检索到 {len(memory_pack.all_results())} 条分层记忆。",
+            thought=f"检索到 {len(candidate_pack.all_results())} 条候选记忆，选中 {len(memory_pack.all_results())} 条。",
             observation={
-                "count": len(memory_pack.all_results()),
-                "memories": memories,
+                "query_plan": query_plan.to_dict(),
+                "candidate_count": len(candidate_pack.all_results()),
+                "selected_count": len(memory_pack.all_results()),
+                "selected_memories": selected_memories,
+                "rerank": rerank_decision.to_dict(),
                 "memory_context": memory_context,
             },
         )
@@ -396,11 +553,19 @@ class DebugAgent:
         started_at = time.perf_counter()
         action_logger.info("action execution started")
         try:
-            if action.name == "write_memory":
+            if action.name == "run_tests" and self.config.review_only:
+                output = {
+                    "command": action.args.get("command", self.config.verify_command),
+                    "skipped": True,
+                    "reason": "review_only",
+                }
+            elif action.name == "write_memory":
                 output = self._write_memory(state)
+            elif action.name == "search_code_context":
+                output = self._search_code_context(state, action)
             else:
                 action_args = dict(action.args)
-                if action.name in {"build_codebase_context", "search_code_context"}:
+                if action.name == "build_codebase_context":
                     action_args.setdefault("index_path", self.config.code_context_index_path)
                 output = self._registry().run_tool(
                     action.name,
@@ -410,6 +575,11 @@ class DebugAgent:
         except Exception as exc:
             action_logger.exception("action execution raised exception")
             output = {"error": str(exc), "exception_type": exc.__class__.__name__}
+            if action.name == "search_code_context" and (
+                (self.config.code_context_query_planner_mode or "").strip().lower() == "llm"
+                or (self.config.code_context_reranker_mode or "").strip().lower() == "llm"
+            ):
+                output["fatal"] = True
         elapsed_ms = (time.perf_counter() - started_at) * 1000
         if output.get("error"):
             action_logger.warning(
@@ -435,6 +605,53 @@ class DebugAgent:
             action_input=action.args,
             observation=output,
         )
+
+    def _search_code_context(self, state: AgentState, action: Action) -> Dict[str, Any]:
+        action_args = dict(action.args)
+        action_args.setdefault("index_path", self.config.code_context_index_path)
+        base_query = str(action_args.get("query", "")).strip()
+        query_plan = self.code_context_query_planner.plan(state, base_query)
+        queries = query_plan.queries or ([base_query] if base_query else [])
+        if not queries:
+            return {
+                "error": "Code context query planner returned no queries.",
+                "query_plan": query_plan.to_dict(),
+            }
+
+        outputs: list[dict[str, Any]] = []
+        for query in queries:
+            query_args = dict(action_args)
+            query_args["query"] = query
+            query_args["limit"] = int(self.config.code_context_query_limit)
+            outputs.append(
+                self._registry().run_tool(
+                    action.name,
+                    self.config.repo_path,
+                    query_args,
+                )
+            )
+
+        merged = merge_code_context_outputs(outputs)
+        merged["queries"] = queries
+        merged["query"] = " | ".join(queries)
+        merged["query_plan"] = query_plan.to_dict()
+        if merged.get("error"):
+            return merged
+
+        selected_context, rerank_decision = self.code_context_reranker.rerank(
+            state,
+            query_plan,
+            merged,
+        )
+        merged["selected_code_context"] = selected_context
+        merged["code_context_rerank"] = rerank_decision.to_dict()
+        logger.bind(task_id=state.get("task_id")).info(
+            "code context searched queries={} candidates_files={} selected_ids={}",
+            len(queries),
+            len(merged.get("files", []) or []),
+            rerank_decision.selected_ids,
+        )
+        return merged
 
     def _apply_tool_output(
         self,
@@ -470,6 +687,8 @@ class DebugAgent:
 
         if output.get("error"):
             updates["error"] = output["error"]
+            if output.get("fatal"):
+                updates["status"] = "failed"
             logger.bind(task_id=state.get("task_id"), action=action.name).warning(
                 "tool output contains error error={}",
                 output["error"],
@@ -610,6 +829,8 @@ class DebugAgent:
         if tool_name == "read_file":
             return f"{tool_name} read {output.get('file_path', 'unknown file')}."
         if tool_name == "run_tests":
+            if output.get("skipped"):
+                return f"{tool_name} skipped reason={output.get('reason')}"
             return f"{tool_name} exit_code={output.get('exit_code')} command={output.get('command')}"
         if tool_name == "git_diff":
             diff = output.get("diff", "")
@@ -625,10 +846,18 @@ class DebugAgent:
                 **state,
                 "rl_last_reward": terminal.to_dict(),
             }
+        try:
+            final_report = self.final_reporter.report(state)
+        except Exception as exc:
+            logger.bind(task_id=state.get("task_id")).exception("final report generation failed")
+            final_report = RuleBasedFinalReporter().report(state)
+            final_report["fallback_reason"] = str(exc)
+        state = {**state, "final_report": final_report}
         logger.bind(task_id=state.get("task_id")).info(
-            "finalizing run status={} error={}",
+            "finalizing run status={} error={} final_report_source={}",
             status,
             state.get("error"),
+            final_report.get("source"),
         )
         return self.recorder.append(
             state,
@@ -638,6 +867,7 @@ class DebugAgent:
                 "status": status,
                 "candidate_files": state.get("candidate_files", []),
                 "patch_summary": state.get("patch_summary"),
+                "final_report": final_report,
             },
         )
 
@@ -696,6 +926,79 @@ class DebugAgent:
             )
         return DisabledObserver()
 
+    def _default_final_reporter(self) -> FinalReporter:
+        mode = (self.config.final_reporter_mode or "").strip().lower()
+        fallback = RuleBasedFinalReporter()
+        if mode == "llm":
+            return LLMFinalReporter(
+                llm_config=_resolve_llm_config(
+                    self.config.llm_config,
+                    self.config.final_reporter_llm_config,
+                ),
+                fallback=fallback,
+            )
+        return fallback
+
+    def _default_memory_query_planner(self) -> MemoryQueryPlanner:
+        mode = (self.config.memory_query_planner_mode or "").strip().lower()
+        if mode == "llm":
+            return LLMMemoryQueryPlanner(
+                llm_config=_resolve_llm_config(
+                    self.config.llm_config,
+                    self.config.memory_query_llm_config,
+                ),
+            )
+        return DisabledMemoryQueryPlanner()
+
+    def _default_memory_reranker(self) -> MemoryReranker:
+        mode = (self.config.memory_reranker_mode or "").strip().lower()
+        if mode == "llm":
+            return LLMMemoryReranker(
+                llm_config=_resolve_llm_config(
+                    self.config.llm_config,
+                    self.config.memory_rerank_llm_config,
+                ),
+                selected_limit=self.config.memory_selected_limit,
+                candidate_limit=self.config.memory_rerank_candidate_limit,
+            )
+        return DisabledMemoryReranker(selected_limit=self.config.memory_selected_limit)
+
+    def _default_code_context_query_planner(self) -> CodeContextQueryPlanner:
+        mode = (self.config.code_context_query_planner_mode or "").strip().lower()
+        if mode == "llm":
+            return LLMCodeContextQueryPlanner(
+                llm_config=_resolve_llm_config(
+                    self.config.llm_config,
+                    self.config.code_context_query_llm_config,
+                ),
+            )
+        return DisabledCodeContextQueryPlanner()
+
+    def _default_code_context_reranker(self) -> CodeContextReranker:
+        mode = (self.config.code_context_reranker_mode or "").strip().lower()
+        if mode == "llm":
+            return LLMCodeContextReranker(
+                llm_config=_resolve_llm_config(
+                    self.config.llm_config,
+                    self.config.code_context_rerank_llm_config,
+                ),
+                selected_limit=self.config.code_context_selected_limit,
+                candidate_limit=self.config.code_context_rerank_candidate_limit,
+            )
+        return DisabledCodeContextReranker(selected_limit=self.config.code_context_selected_limit)
+
+    def _default_skill_selector(self) -> SkillSelector:
+        mode = (self.config.skill_selector_mode or "").strip().lower()
+        if mode == "llm":
+            return LLMSkillSelector(
+                llm_config=_resolve_llm_config(
+                    self.config.llm_config,
+                    self.config.skill_selector_llm_config,
+                ),
+                selected_limit=self.config.skill_selected_limit,
+            )
+        return DisabledSkillSelector()
+
 
 def _resolve_llm_config(base: LLMConfig, override: LLMConfig) -> LLMConfig:
     default = LLMConfig()
@@ -724,9 +1027,13 @@ def _resolve_llm_config(base: LLMConfig, override: LLMConfig) -> LLMConfig:
     )
 
 
-def _list_values(value: Any) -> list[Any]:
-    if isinstance(value, list):
-        return value
-    if value in (None, ""):
-        return []
-    return [value]
+def _merge_unique(*groups: Any) -> list[str]:
+    values: list[str] = []
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        for item in group:
+            value = str(item).strip()
+            if value and value not in values:
+                values.append(value)
+    return values

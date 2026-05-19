@@ -35,6 +35,7 @@ class ActionSpace:
         called = [call.get("name") for call in state.get("tool_calls", [])]
         candidate_files = state.get("candidate_files") or []
         unread = [path for path in candidate_files if path not in self._read_files(state)]
+        review_only = bool(state.get("review_only"))
 
         # 根据动作名称列表补充 action spec
         if "list_files" in self.action_names and "list_files" not in called:
@@ -46,12 +47,12 @@ class ActionSpace:
         if "read_file" in self.action_names and unread:
             specs.append(ActionSpec("read_file", "Read the next unread candidate file."))
 
-        if "run_tests" in self.action_names and not state.get("test_results"):
+        if "run_tests" in self.action_names and not review_only and not state.get("test_results"):
             specs.append(ActionSpec("run_tests", "Run verification command."))
 
         if (
             "git_diff" in self.action_names
-            and state.get("test_results")
+            and (review_only or state.get("test_results"))
             and state.get("patch_summary") is None
         ):
             specs.append(ActionSpec("git_diff", "Inspect current git diff."))

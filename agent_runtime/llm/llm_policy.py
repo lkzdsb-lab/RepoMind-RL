@@ -15,6 +15,7 @@ from loguru import logger
 from model.agent.actions import Action, ActionSpec
 from model.agent.graph import AgentState
 from model.llm import ActionChoiceResponse, GuardDecision
+from prompts.templates import load_prompt, render_prompt
 
 
 @dataclass
@@ -36,11 +37,7 @@ class LLMActionPolicy:
         self.node = LLMJsonNode(
             name="action_policy",
             llm_config=self.llm_config,
-            system_prompt=(
-                "You are choosing the next action for a debugging agent. "
-                "You must choose one action from the q-table allow list. "
-                "Return only JSON matching the requested schema."
-            ),
+            system_prompt=load_prompt("system/action_policy.md"),
             build_prompt=_action_node_prompt,
             fallback=_action_fallback_payload,
             response_model=ActionChoiceResponse,
@@ -292,20 +289,24 @@ def _action_prompt(
         {"name": spec.name, "description": spec.description}
         for spec in legal_specs
     ]
-    return (
-        f"title={state.get('title', '')}\n"
-        f"description={state.get('description', '')}\n"
-        f"current_step={state.get('current_step', '')}\n"
-        f"status={state.get('status', '')}\n"
-        f"candidate_files={state.get('candidate_files', [])}\n"
-        f"test_results={state.get('test_results', [])[-2:]}\n"
-        f"patch_summary={state.get('patch_summary')}\n"
-        f"memory_context={state.get('memory_context', '')[:2500]}\n"
-        f"compressed_context={state.get('compressed_context', '')[:2500]}\n"
-        f"legal_actions={json.dumps(legal, ensure_ascii=False)}\n"
-        f"qtable_guard={json.dumps(guard.to_dict(), ensure_ascii=False)}\n"
-        f"allowed_actions={json.dumps(guard.allow_list, ensure_ascii=False)}\n"
-        f"hard_denied_actions={json.dumps(guard.hard_denied, ensure_ascii=False)}\n"
-        f"fallback_action={json.dumps({'name': fallback_action.name, 'args': fallback_action.args}, ensure_ascii=False)}\n"
-        "Choose only from allowed_actions. Return JSON like {\"action\": \"read_file\", \"reason\": \"...\"}."
+    return render_prompt(
+        "user/action_policy.md",
+        title=state.get("title", ""),
+        description=state.get("description", ""),
+        current_step=state.get("current_step", ""),
+        status=state.get("status", ""),
+        review_only=json.dumps(bool(state.get("review_only"))),
+        candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),
+        test_results=json.dumps(state.get("test_results", [])[-2:], ensure_ascii=False, default=str),
+        patch_summary=state.get("patch_summary"),
+        memory_context=str(state.get("memory_context", ""))[:2500],
+        compressed_context=str(state.get("compressed_context", ""))[:2500],
+        legal_actions=json.dumps(legal, ensure_ascii=False),
+        qtable_guard=json.dumps(guard.to_dict(), ensure_ascii=False),
+        allowed_actions=json.dumps(guard.allow_list, ensure_ascii=False),
+        hard_denied_actions=json.dumps(guard.hard_denied, ensure_ascii=False),
+        fallback_action=json.dumps(
+            {"name": fallback_action.name, "args": fallback_action.args},
+            ensure_ascii=False,
+        ),
     )

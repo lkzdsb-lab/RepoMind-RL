@@ -10,6 +10,7 @@ from agent_runtime.llm.llm_nodes import LLMJsonNode
 from config import LLMConfig
 from model.agent.graph import AgentState
 from model.llm import ObservationResponse
+from prompts.templates import load_prompt, render_prompt
 
 
 OBSERVATION_STATUSES = {"ok", "error", "inconclusive", "complete"}
@@ -48,11 +49,7 @@ class LLMObserver:
         self.node = LLMJsonNode(
             name="observer",
             llm_config=self.llm_config,
-            system_prompt=(
-                "You synthesize the latest tool result for a coding agent. "
-                "Return only JSON matching the requested schema. "
-                "Be factual and do not invent files, test results, or code changes."
-            ),
+            system_prompt=load_prompt("system/observer.md"),
             build_prompt=_observation_prompt,
             fallback=None,
             response_model=ObservationResponse,
@@ -66,22 +63,23 @@ class LLMObserver:
 
 def _observation_prompt(state: AgentState, context: dict[str, Any]) -> str:
     latest = _latest_tool_call(state)
-    return (
-        "Return JSON with keys: latest_tool, status, summary, new_findings, hypotheses, "
-        "missing_context, next_search_terms, confidence.\n"
-        "status must be one of ok, error, inconclusive, complete. "
-        "Use short list fields. If uncertain, use empty lists instead of guessing.\n\n"
-        f"title={state.get('title', '')}\n"
-        f"description={state.get('description', '')}\n"
-        f"task_analysis={json.dumps(state.get('task_analysis', {}), ensure_ascii=False)}\n"
-        f"current_step={state.get('current_step', '')}\n"
-        f"plan={json.dumps(state.get('plan', []), ensure_ascii=False)}\n"
-        f"candidate_files={json.dumps(state.get('candidate_files', []), ensure_ascii=False)}\n"
-        f"test_results_tail={json.dumps(state.get('test_results', [])[-2:], ensure_ascii=False, default=str)}\n"
-        f"patch_summary={state.get('patch_summary')}\n"
-        f"memory_context={str(state.get('memory_context', ''))[:1800]}\n"
-        f"compressed_context={str(state.get('compressed_context', ''))[:1800]}\n"
-        f"latest_tool_call={json.dumps(_trim_tool_call(latest), ensure_ascii=False, default=str)}\n"
+    return render_prompt(
+        "user/observer.md",
+        title=state.get("title", ""),
+        description=state.get("description", ""),
+        task_analysis=json.dumps(state.get("task_analysis", {}), ensure_ascii=False),
+        current_step=state.get("current_step", ""),
+        plan=json.dumps(state.get("plan", []), ensure_ascii=False),
+        candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),
+        test_results_tail=json.dumps(
+            state.get("test_results", [])[-2:],
+            ensure_ascii=False,
+            default=str,
+        ),
+        patch_summary=state.get("patch_summary"),
+        memory_context=str(state.get("memory_context", ""))[:1800],
+        compressed_context=str(state.get("compressed_context", ""))[:1800],
+        latest_tool_call=json.dumps(_trim_tool_call(latest), ensure_ascii=False, default=str),
     )
 
 

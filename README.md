@@ -14,17 +14,79 @@ RepoMind-RL 是一个能在真实代码仓库中自动定位 Bug、生成补丁�
 运行示例：
 
 ```bash
-python3 main.py "订单状态不会从 pending 更新到 paid" \
-  --description "请定位并修复支付回调后订单状态偶发不更新的问题" \
-  --repo /path/to/target/repo \
-  --verify "pytest"
+python3 main.py "订单状态不会从 pending 更新到 paid"
+```
+
+如果只想让 agent 阅读并审查代码，不运行验证命令，可以开启 review-only：
+
+```bash
+python3 main.py "检查订单状态流转有没有问题" --repo /path/to/repo --review-only
+```
+
+配置文件里等价写法：
+
+```json
+{
+  "review_only": true
+}
+```
+
+启动时会自动读取仓库根目录下的 `config.json`。常用运行参数、LLM API、mode、memory、code context、RL 和日志配置都可以放在这个文件里；`config.example.json` 是完整模板，`config.schema.json` 提供可选值校验，完整说明见 `docs/config.md`。命令行参数仍然保留，且只在显式传入时覆盖配置文件。
+
+根 `llm` 只作为默认模型配置，不代表所有 LLM 模块都会启用。是否调用 LLM 由 `modes` 单独控制；比如 `modes.memory_reranker = "disabled"` 时，即使根 `llm` 已配置 key 和 model，memory reranker 也不会调用 LLM。
+
+运行产物按目标项目隔离。传入 `--repo /path/to/project-a` 时，trace、memory、log、code index、RL 数据都会写入 `/path/to/project-a/.repomind/`；调试另一个项目会写入另一个项目自己的 `.repomind/`。
+
+LLM key 不写入 `config.json`。默认会从同目录 `.env` 读取：
+
+```bash
+cp .env.example .env
+# edit .env: LLM_API_KEY=...
+```
+
+`config.json` 里只保留 key 的环境变量名：
+
+```json
+{
+  "env_file": ".env",
+  "llm": {
+    "provider": "openai_compatible",
+    "model": "<model-name>",
+    "api_base": "https://<host>/v1",
+    "api_key_env": "LLM_API_KEY"
+  }
+}
+```
+
+也可以指定其他配置文件或禁用配置文件：
+
+```bash
+python3 main.py "定位订单状态问题" --config config.local.json
+python3 main.py "定位订单状态问题" --no-config --repo /path/to/repo
+```
+
+如果把任务也写进配置文件：
+
+```json
+{
+  "task": {
+    "title": "订单状态不会从 pending 更新到 paid",
+    "description": "请定位并修复支付回调后订单状态偶发不更新的问题"
+  }
+}
+```
+
+就可以直接运行：
+
+```bash
+python3 main.py
 ```
 
 ## 运行时 Registry
 
 运行时资源由 `RegistryManager` 管理，包含 `tools`、`nodes`、`prompts`、`skills` 四类 registry。每次 agent run 开始时会创建一份不可变 `RegistrySnapshot`，本轮执行只使用这份 snapshot；后续 manifest reload 或服务端发布不会影响已经开始的任务。
 
-可以通过 `--manifest-dir` 加载 JSON/TOML manifest：
+可以通过 `config.json` 的 `manifest_dir` 加载 JSON/TOML manifest，也可以临时使用 `--manifest-dir` 覆盖：
 
 ```bash
 python3 main.py "定位订单状态问题" \
@@ -84,6 +146,16 @@ triggers = ["go", "bug", "test"]
 resources = ["../../skills/go_bug_localization.md"]
 ```
 
+默认内置的 workflow skills 会随 `SkillRegistry` 自动注册，不需要额外 manifest：
+
+- `go_backend_debug`
+- `codebase_context_workflow`
+- `memory_consolidation`
+- `registry_extension`
+- `test_failure_triage`
+
+这些 skill 不替代工具和存储层；它们描述如何组合 tools、memory、registry 和测试反馈完成一类任务。检索命中后会进入 `skill_context` 和 `selected_skills`，再参与 memory/context/LLM prompt。
+
 ## 分层 Memory
 
 当前 memory 层实现了四种记忆类型：
@@ -123,16 +195,25 @@ Agent 每轮 action 前会调用 `ContextCompressionManager`。当估算 token �
 - `AgentState.compressed_context`
 - `AgentState.context_items`
 
-默认使用 rule-based compressor，不需要外部 API。要启用 LLM 压缩，提供 OpenAI-compatible chat completions 配置：
+默认使用 rule-based compressor，不需要外部 API。要启用 LLM 压缩，在 `config.json` 中提供 OpenAI-compatible 配置；`ContextCompressionManager` 会复用根 `llm` 配置：
 
-```bash
-export LLM_API_KEY="..."
-
-python3 main.py "定位订单状态问题" \
-  --repo /path/to/repo \
-  --context-llm-provider openai_compatible \
-  --context-llm-model "<model-name>" \
-  --context-llm-api-base "https://<host>/v1"
+```json
+{
+  "llm": {
+    "provider": "openai_compatible",
+    "model": "<model-name>",
+    "api_base": "https://<host>/v1",
+    "api_key_env": "LLM_API_KEY"
+  },
+  "modes": {
+    "context_compressor": "llm"
+  },
+  "context": {
+    "enabled": true,
+    "max_tokens": 32000,
+    "compression_threshold": 0.75
+  }
+}
 ```
 
 如果 LLM 未配置、请求失败或返回无法解析的 JSON，会自动降级到 rule-based compression，并把 fallback 原因写入 digest constraints。

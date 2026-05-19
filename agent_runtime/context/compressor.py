@@ -11,8 +11,9 @@ from agent_runtime.context.token_counter import estimate_context_tokens
 from agent_runtime.llm.llm_nodes import LLMJsonNode
 from model.agent.graph import AgentState
 from model.llm import ContextCompressionResponse
-from config import DebugAgentConfig, LLMConfig
+from config import DebugAgentConfig, LLMConfig, resolve_llm_config
 from loguru import logger
+from prompts.templates import load_prompt, render_prompt
 
 # 抽象接口
 class ContextCompressor(Protocol):
@@ -51,6 +52,7 @@ class RuleBasedContextCompressor:
         latest_error = state.get("error")
         constraints = [
             f"repo_path={state.get('repo_path', '')}",
+            f"review_only={bool(state.get('review_only'))}",
             f"verify_command={state.get('verify_command', '')}",
         ]
         if latest_error:
@@ -90,12 +92,7 @@ class LLMContextCompressor:
         self.node = LLMJsonNode(
             name="context_compressor",
             llm_config=llm_config,
-            system_prompt=(
-                "You compress long agent context into a faithful JSON digest. "
-                "Do not invent facts. Preserve current goal, constraints, "
-                "open tasks, completed tasks, key observations, tool results, "
-                "code changes, and memory references."
-            ),
+            system_prompt=load_prompt("system/context_compressor.md"),
             build_prompt=_build_llm_compression_prompt,
             fallback=_context_compression_fallback,
             response_model=ContextCompressionResponse,
@@ -148,15 +145,25 @@ class ContextCompressionManager:
             threshold=config.context_compression_threshold,
             recent_items=config.context_recent_items,
         )
-        llm_config = config.llm_config
+        mode = (config.context_compressor_mode or "rule_based").strip().lower()
         compressor: ContextCompressor
-        if llm_config.provider.strip().lower() in {"", "disabled", "none"}:
+        if mode == "disabled":
+            policy.enabled = False
             compressor = RuleBasedContextCompressor()
-        else:
+            llm_config = config.llm_config
+        elif mode == "llm":
+            llm_config = resolve_llm_config(
+                config.llm_config,
+                config.context_compressor_llm_config,
+            )
             compressor = LLMContextCompressor(llm_config)
+        else:
+            llm_config = config.llm_config
+            compressor = RuleBasedContextCompressor()
         logger.info(
-            "context compression configured enabled={} provider={} threshold={} max_tokens={}",
+            "context compression configured enabled={} mode={} provider={} threshold={} max_tokens={}",
             policy.enabled,
+            mode,
             llm_config.provider,
             policy.threshold,
             policy.max_context_tokens,
@@ -337,18 +344,15 @@ def _build_llm_compression_prompt(
         f"[{idx}] role={item.role} type={item.item_type} pinned={item.pinned}\n{item.content[:4000]}"
         for idx, item in enumerate(items, start=1)
     )
-    return (
-        "Return only a JSON object with these keys: summary, current_goal, constraints, "
-        "decisions, open_tasks, completed_tasks, key_observations, tool_results, "
-        "code_changes, memory_refs.\n\n"
-        f"Current fallback digest:\n{json.dumps(fallback_digest.to_dict(), ensure_ascii=False)}\n\n"
-        f"Current state hints:\n"
-        f"title={state.get('title', '')}\n"
-        f"description={state.get('description', '')}\n"
-        f"current_step={state.get('current_step', '')}\n"
-        f"status={state.get('status', '')}\n"
-        f"error={state.get('error', '')}\n\n"
-        f"Compress these context items:\n{item_text}"
+    return render_prompt(
+        "user/context_compressor.md",
+        fallback_digest=json.dumps(fallback_digest.to_dict(), ensure_ascii=False),
+        title=state.get("title", ""),
+        description=state.get("description", ""),
+        current_step=state.get("current_step", ""),
+        status=state.get("status", ""),
+        error=state.get("error", ""),
+        item_text=item_text,
     )
 
 
@@ -445,6 +449,8 @@ def _tool_output_summary(name: str, output: dict) -> str:
     if name == "read_file":
         return f"read {output.get('file_path', 'unknown file')}"
     if name == "run_tests":
+        if output.get("skipped"):
+            return f"skipped reason={output.get('reason', '')}"
         return f"exit_code={output.get('exit_code')} command={output.get('command', '')}"
     if name == "git_diff":
         return f"{len(str(output.get('diff', '')).splitlines())} diff lines"

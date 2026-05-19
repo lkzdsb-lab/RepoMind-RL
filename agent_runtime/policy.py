@@ -29,11 +29,17 @@ class HeuristicDebugPolicy:
 
     def make_initial_plan(self, state: AgentState) -> list[str]:
         verify_command = state.get("verify_command") or "pytest"
+        review_only = bool(state.get("review_only"))
+        verification_step = (
+            "跳过验证命令（review-only）"
+            if review_only
+            else f"运行验证命令：{verify_command}"
+        )
         return [
             "解析 issue，提取代码搜索关键词",
             "读取仓库结构并搜索相关代码",
             "阅读候选文件建立上下文",
-            f"运行验证命令：{verify_command}",
+            verification_step,
             "查看 git diff 并汇总当前补丁状态",
             "按 reward gate 写入分层记忆，必要时沉淀到 skill",
         ]
@@ -70,7 +76,7 @@ class HeuristicDebugPolicy:
                 thought=f"阅读候选文件 `{unread[0]}`。",
             )
 
-        if not state.get("test_results"):
+        if not state.get("review_only") and not state.get("test_results"):
             command = state.get("verify_command") or "pytest"
             return Action(
                 "run_tests",

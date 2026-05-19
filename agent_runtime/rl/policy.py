@@ -30,11 +30,17 @@ class QLearningDebugPolicy:
 
     def make_initial_plan(self, state: AgentState) -> list[str]:
         verify_command = state.get("verify_command") or "pytest"
+        review_only = bool(state.get("review_only"))
+        verification_step = (
+            "跳过验证命令（review-only）"
+            if review_only
+            else f"验证命令：{verify_command}"
+        )
         return [
             "使用 RL policy 基于 state features 选择下一步 action",
             "优先利用结构化 codebase context 定位候选文件",
-            "阅读候选文件、运行验证命令并检查 diff",
-            f"验证命令：{verify_command}",
+            "阅读候选文件并检查 diff",
+            verification_step,
             "根据 reward 写入 replay buffer 并在线更新 Q-table",
         ]
 

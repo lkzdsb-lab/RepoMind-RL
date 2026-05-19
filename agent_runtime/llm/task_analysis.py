@@ -10,6 +10,7 @@ from agent_runtime.llm.llm_nodes import LLMJsonNode
 from config import LLMConfig
 from model.agent.graph import AgentState
 from model.llm import TaskAnalysisResponse
+from prompts.templates import load_prompt, render_prompt
 
 
 TASK_TYPES = {"BUG_FIX", "FEATURE_IMPL", "DIAGNOSE"}
@@ -44,11 +45,7 @@ class LLMTaskAnalyzer:
         self.node = LLMJsonNode(
             name="task_analyzer",
             llm_config=self.llm_config,
-            system_prompt=(
-                "You classify and structure a debugging or implementation task for an agent. "
-                "Return only JSON matching the requested schema. "
-                "Do not invent repository facts."
-            ),
+            system_prompt=load_prompt("system/task_analyzer.md"),
             build_prompt=_task_analysis_prompt,
             fallback=None,
             response_model=TaskAnalysisResponse,
@@ -61,17 +58,14 @@ class LLMTaskAnalyzer:
 
 
 def _task_analysis_prompt(state: AgentState, context: dict[str, Any]) -> str:
-    return (
-        "Return JSON with keys: task_type, task_category, entities, acceptance_criteria, "
-        "risk_notes, search_hints.\n"
-        "task_type must be one of BUG_FIX, FEATURE_IMPL, DIAGNOSE.\n"
-        "entities and search_hints should come from the user's actual task wording only. "
-        "If a field is uncertain, use an empty list/string instead of guessing.\n\n"
-        f"title={state.get('title', '')}\n"
-        f"description={state.get('description', '')}\n"
-        f"current_task_type={state.get('task_type', '')}\n"
-        f"verify_command={state.get('verify_command', '')}\n"
-        f"registry_snapshot={json.dumps(state.get('registry_snapshot', {}), ensure_ascii=False)}\n"
+    return render_prompt(
+        "user/task_analyzer.md",
+        title=state.get("title", ""),
+        description=state.get("description", ""),
+        current_task_type=state.get("task_type", ""),
+        review_only=json.dumps(bool(state.get("review_only"))),
+        verify_command=state.get("verify_command", ""),
+        registry_snapshot=json.dumps(state.get("registry_snapshot", {}), ensure_ascii=False),
     )
 
 

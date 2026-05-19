@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/lee-agent/config.schema.json",
+  "title": "Lee-Agent runtime config",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string" },
+        "issue": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    },
+    "repo_path": { "type": "string" },
+    "repo": { "type": "string" },
+    "review_only": { "type": "boolean" },
+    "review-only": { "type": "boolean" },
+    "verify_command": { "type": "string" },
+    "verify": { "type": "string" },
+    "max_loops": { "type": "integer", "minimum": 1 },
+    "env_file": { "type": ["string", "null"] },
+    "env_override": { "type": "boolean" },
+    "manifest_dir": { "type": ["string", "null"] },
+    "logging": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "type": "string",
+          "enum": ["TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"]
+        },
+        "file": { "type": ["string", "null"] },
+        "json": { "type": "boolean" },
+        "to_console": { "type": "boolean" }
+      }
+    },
+    "llm": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "$ref": "#/$defs/provider" },
+        "model": { "type": "string" },
+        "api_base": { "type": "string" },
+        "api_key_env": { "type": "string" },
+        "timeout": { "type": "integer", "minimum": 1 },
+        "temperature": { "type": "number" },
+        "max_output_chars": { "type": "integer", "minimum": 1 },
+        "context_compressor": { "$ref": "#/$defs/llmConfig" },
+        "context": { "$ref": "#/$defs/llmConfig" },
+        "plan": { "$ref": "#/$defs/llmConfig" },
+        "planner": { "$ref": "#/$defs/llmConfig" },
+        "action": { "$ref": "#/$defs/llmConfig" },
+        "action_policy": { "$ref": "#/$defs/llmConfig" },
+        "task_analysis": { "$ref": "#/$defs/llmConfig" },
+        "observer": { "$ref": "#/$defs/llmConfig" },
+        "memory_query": { "$ref": "#/$defs/llmConfig" },
+        "memory_rerank": { "$ref": "#/$defs/llmConfig" },
+        "code_context_query": { "$ref": "#/$defs/llmConfig" },
+        "code_context_rerank": { "$ref": "#/$defs/llmConfig" },
+        "skill_selector": { "$ref": "#/$defs/llmConfig" },
+        "final_reporter": { "$ref": "#/$defs/llmConfig" }
+      }
+    },
+    "modes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "planner": { "enum": ["heuristic", "llm"] },
+        "context_compressor": { "enum": ["disabled", "rule_based", "llm"] },
+        "action_policy": { "enum": ["heuristic", "rl", "llm"] },
+        "task_analyzer": { "enum": ["disabled", "llm"] },
+        "observer": { "enum": ["disabled", "llm"] },
+        "memory_query_planner": { "enum": ["disabled", "llm"] },
+        "memory_reranker": { "enum": ["disabled", "llm"] },
+        "code_context_query_planner": { "enum": ["disabled", "llm"] },
+        "code_context_reranker": { "enum": ["disabled", "llm"] },
+        "skill_selector": { "enum": ["disabled", "llm"] },
+        "final_reporter": { "enum": ["rule_based", "llm"] }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string" },
+        "mid_path": { "type": "string" },
+        "long_path": { "type": "string" },
+        "skill_dir": { "type": "string" },
+        "redis_url": { "type": ["string", "null"] },
+        "semantic_threshold": { "type": "number" },
+        "procedural_threshold": { "type": "number" },
+        "skill_consolidation_threshold": { "type": "number" },
+        "query_limit": { "type": "integer", "minimum": 1 },
+        "selected_limit": { "type": "integer", "minimum": 1 },
+        "rerank_candidate_limit": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "compression_enabled": { "type": "boolean" },
+        "compressor_mode": { "enum": ["disabled", "rule_based", "llm"] },
+        "max_tokens": { "type": "integer", "minimum": 1 },
+        "compression_threshold": { "type": "number", "exclusiveMinimum": 0 },
+        "recent_items": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "code_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "index_path": { "type": "string" },
+        "query_limit": { "type": "integer", "minimum": 1 },
+        "selected_limit": { "type": "integer", "minimum": 1 },
+        "rerank_candidate_limit": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "skill": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "selected_limit": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "rl": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "q_table_path": { "type": "string" },
+        "replay_path": { "type": "string" },
+        "epsilon": { "type": "number", "minimum": 0 },
+        "learning_rate": { "type": "number", "minimum": 0 },
+        "discount": { "type": "number", "minimum": 0 },
+        "replay_max_size": { "type": "integer", "minimum": 1 },
+        "train_batch_size": { "type": "integer", "minimum": 1 }
+      }
+    }
+  },
+  "$defs": {
+    "llmConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "$ref": "#/$defs/provider" },
+        "model": { "type": "string" },
+        "api_base": { "type": "string" },
+        "api_key_env": { "type": "string" },
+        "timeout": { "type": "integer", "minimum": 1 },
+        "temperature": { "type": "number" },
+        "max_output_chars": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "provider": {
+      "type": "string",
+      "enum": ["", "disabled", "none", "openai", "openai_compatible", "openai-compatible", "enable"]
+    }
+  }
+}

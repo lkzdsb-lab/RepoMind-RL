@@ -30,6 +30,7 @@ class StateEncoder:
         max_loops = max(int(state.get("max_loops", 1)), 1)
         return {
             "status": state.get("status", "created"),
+            "review_only": bool(state.get("review_only")),
             # agent 的阶段记录，为了区分失败的性质，当进入高位 bucket 时，系统可以强制介入
             "loop_bucket": self._bucket(loop_count, [0, 1, 2, 4, max_loops]),
             # agent 的相对记录，控制成本和防止死循环。它让 Agent 意识到“预算有限”，从而在接近终点时变得更加谨慎或果断。

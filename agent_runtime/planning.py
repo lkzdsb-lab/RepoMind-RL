@@ -10,6 +10,7 @@ from agent_runtime.llm.llm_nodes import LLMJsonNode
 from config import LLMConfig
 from model.agent.graph import AgentState
 from model.llm import PlanResponse
+from prompts.templates import load_prompt, render_prompt
 
 
 class Planner(Protocol):
@@ -21,11 +22,17 @@ class Planner(Protocol):
 class HeuristicPlanner:
     def make_plan(self, state: AgentState) -> list[str]:
         verify_command = state.get("verify_command") or "pytest"
+        review_only = bool(state.get("review_only"))
+        verification_step = (
+            "跳过验证命令（review-only）"
+            if review_only
+            else f"运行验证命令：{verify_command}"
+        )
         return [
             "解析 issue，提取代码搜索关键词",
             "读取仓库结构并搜索相关代码",
             "阅读候选文件建立上下文",
-            f"运行验证命令：{verify_command}",
+            verification_step,
             "查看 git diff 并汇总当前补丁状态",
             "按 reward gate 写入分层记忆，必要时沉淀到 skill",
         ]
@@ -41,11 +48,7 @@ class LLMPlanner:
         self.node = LLMJsonNode(
             name="planner",
             llm_config=self.llm_config,
-            system_prompt=(
-                "You are planning the next debugging workflow for an agent. "
-                "Return only JSON matching the requested schema. "
-                "Do not output prose outside JSON."
-            ),
+            system_prompt=load_prompt("system/planner.md"),
             build_prompt=_planner_node_prompt,
             fallback=lambda state, context: {
                 "plan": self.fallback.make_plan(state) if self.fallback else []
@@ -65,17 +68,18 @@ class LLMPlanner:
 
 def _planner_node_prompt(state: AgentState, context: dict) -> str:
     fallback_plan = context.get("fallback_plan") or HeuristicPlanner().make_plan(state)
-    return (
-        f"title={state.get('title', '')}\n"
-        f"description={state.get('description', '')}\n"
-        f"task_analysis={json.dumps(state.get('task_analysis', {}), ensure_ascii=False)}\n"
-        f"current_step={state.get('current_step', '')}\n"
-        f"candidate_files={state.get('candidate_files', [])}\n"
-        f"memory_context={state.get('memory_context', '')[:3000]}\n"
-        f"compressed_context={state.get('compressed_context', '')[:3000]}\n"
-        f"verify_command={state.get('verify_command', '')}\n"
-        f"default_plan={json.dumps(fallback_plan, ensure_ascii=False)}\n"
-        "Return JSON like {\"plan\": [\"...\", \"...\"]}."
+    return render_prompt(
+        "user/planner.md",
+        title=state.get("title", ""),
+        description=state.get("description", ""),
+        task_analysis=json.dumps(state.get("task_analysis", {}), ensure_ascii=False),
+        current_step=state.get("current_step", ""),
+        candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),
+        memory_context=str(state.get("memory_context", ""))[:3000],
+        compressed_context=str(state.get("compressed_context", ""))[:3000],
+        review_only=json.dumps(bool(state.get("review_only"))),
+        verify_command=state.get("verify_command", ""),
+        default_plan=json.dumps(fallback_plan, ensure_ascii=False),
     )
 
 
