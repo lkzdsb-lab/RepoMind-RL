@@ -14,17 +14,19 @@ from agent_runtime.search_query import SearchQueryPlanner
 from model.agent.actions import Action
 from model.agent.graph import AgentState
 
-"""
-    llm 启发式学习策略
-"""
+
 @dataclass
 class HeuristicDebugPolicy:
+    """
+        启发式学习策略
+        为 llm 失效后的降级策略
+        fallback 后续考虑删除
+    """
     default_query: str = "TODO"
 
     def __post_init__(self) -> None:
         self.query_planner = SearchQueryPlanner(default_query=self.default_query)
 
-    # plan 阶段，todo 后续也是用一个 skill 形式实现
     def make_initial_plan(self, state: AgentState) -> list[str]:
         verify_command = state.get("verify_command") or "pytest"
         return [

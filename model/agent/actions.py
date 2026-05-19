@@ -13,6 +13,7 @@ class Action:
     name: str
     args: Dict[str, Any] = field(default_factory=dict)
     thought: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 # 每个动作的语义
 @dataclass(frozen=True)

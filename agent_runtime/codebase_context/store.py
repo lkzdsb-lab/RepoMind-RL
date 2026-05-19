@@ -9,6 +9,7 @@ from agent_runtime.codebase_context.models import CodebaseContextIndex
 from config import CodeBaseConig
 
 config = CodeBaseConig()
+DEFAULT_INDEX_PATH = config.DEFAULT_INDEX_PATH
 
 class CodebaseContextStore:
     def __init__(self, repo_path: str | Path, index_path: str = config.DEFAULT_INDEX_PATH) -> None:

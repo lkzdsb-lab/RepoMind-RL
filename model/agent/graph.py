@@ -39,6 +39,7 @@ class AgentState(TypedDict, total=False):
     registry_snapshot: Dict[str, List[str]]
     # 引入 skill
     task_category: str
+    task_analysis: Dict[str, Any]
     selected_skills: list[str]
     skill_context: list[dict]
 
@@ -52,6 +53,7 @@ class AgentState(TypedDict, total=False):
     candidate_files: List[str] # llm 想要调用的 files
     code_context: Dict[str, Any]
     observations: List[Dict[str, Any]] # 执行流程记录
+    llm_observations: List[Dict[str, Any]]
     tool_calls: List[ToolCall] # llm 使用过的 tools
     test_results: List[TestResult]
     trajectory: List[TrajectoryStep] # 整个任务的结果集
@@ -75,6 +77,7 @@ class AgentState(TypedDict, total=False):
     rl_enabled: bool
     rl_transitions: List[Dict[str, Any]]
     rl_last_reward: Dict[str, Any]
+    llm_guard_events: List[Dict[str, Any]]
 
     patch: Optional[str] # 修改文件的块
     patch_summary: Optional[str]

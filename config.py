@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 class FileConfig(object):
@@ -24,6 +24,16 @@ class GraphConfig(object):
     TESTING = False
     MAX_LOOP_COUNT = 10
 
+@dataclass
+class LLMConfig:
+    provider: str = "disabled"
+    model: str = ""
+    api_base: str = ""
+    api_key_env: str = "LLM_API_KEY"
+    timeout: int = 60
+    temperature: float = 0.0
+    max_output_chars: int = 12000
+
 
 @dataclass
 class DebugAgentConfig:
@@ -31,7 +41,7 @@ class DebugAgentConfig:
         agent 相关配置
     """
     # 仓库路径
-    repo_path: str
+    repo_path: str = ""
     verify_command: str = "pytest"
     max_loops: int = 8
 
@@ -61,13 +71,15 @@ class DebugAgentConfig:
     context_recent_items: int = 8
 
     # llm 配置
-    context_llm_provider: str = "disabled"
-    context_llm_model: str = ""
-    context_llm_api_base: str = ""
-    context_llm_api_key_env: str = "LLM_API_KEY"
-    context_llm_timeout: int = 60
-    context_llm_temperature: float = 0.0
-    context_llm_max_output_chars: int = 12000
+    llm_config: LLMConfig = field(default_factory=LLMConfig)
+    plan_llm_config: LLMConfig = field(default_factory=LLMConfig)
+    action_llm_config: LLMConfig = field(default_factory=LLMConfig)
+    task_analysis_llm_config: LLMConfig = field(default_factory=LLMConfig)
+    observer_llm_config: LLMConfig = field(default_factory=LLMConfig)
+    planner_mode: str = "heuristic"
+    action_policy_mode: str = "heuristic"
+    task_analyzer_mode: str = "disabled"
+    observer_mode: str = "disabled"
 
     # 代码索引库
     code_context_index_path: str = ".repomind/codebase_context/index.json"

@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from agent_runtime.context.cards import ContextDigest, ContextItem
 from agent_runtime.context.token_counter import estimate_context_tokens
-from agent_runtime.llm import LLMConfig, LLMMessage, LLMRequest, build_llm_client
+from agent_runtime.llm.llm_nodes import LLMJsonNode
 from model.agent.graph import AgentState
-from config import DebugAgentConfig
+from model.llm import ContextCompressionResponse
+from config import DebugAgentConfig, LLMConfig
 from loguru import logger
 
 # 抽象接口
@@ -85,57 +85,50 @@ class LLMContextCompressor:
         llm_config: LLMConfig,
         fallback: ContextCompressor | None = None,
     ) -> None:
-        self.client = build_llm_client(llm_config)
         self.llm_config = llm_config
         self.fallback = fallback or RuleBasedContextCompressor()
+        self.node = LLMJsonNode(
+            name="context_compressor",
+            llm_config=llm_config,
+            system_prompt=(
+                "You compress long agent context into a faithful JSON digest. "
+                "Do not invent facts. Preserve current goal, constraints, "
+                "open tasks, completed tasks, key observations, tool results, "
+                "code changes, and memory references."
+            ),
+            build_prompt=_build_llm_compression_prompt,
+            fallback=_context_compression_fallback,
+            response_model=ContextCompressionResponse,
+            normalize=_normalize_context_compression,
+        )
 
     def compress(self, items: list[ContextItem], state: AgentState) -> ContextDigest:
         fallback_digest = self.fallback.compress(items, state)
-        try:
-            logger.bind(task_id=state.get("task_id")).info(
-                "llm context compression requested items={} model={} provider={}",
-                len(items),
-                self.llm_config.model,
-                self.llm_config.provider,
+        logger.bind(task_id=state.get("task_id")).info(
+            "llm context compression requested items={} model={} provider={}",
+            len(items),
+            self.llm_config.model,
+            self.llm_config.provider,
+        )
+        data = self.node.run(
+            state,
+            {
+                "items": items,
+                "fallback_digest": fallback_digest,
+            },
+        )
+        if data.get("source") == "fallback":
+            return fallback_digest.with_error(
+                str(data.get("fallback_reason") or "llm_context_compression_failed")
             )
-            response = self.client.complete(
-                LLMRequest(
-                    model=self.llm_config.model,
-                    temperature=self.llm_config.temperature,
-                    response_format={"type": "json_object"},
-                    messages=[
-                        LLMMessage(
-                            role="system",
-                            content=(
-                                "You compress long agent context into a faithful JSON digest. "
-                                "Do not invent facts. Preserve current goal, constraints, "
-                                "open tasks, completed tasks, key observations, tool results, "
-                                "code changes, and memory references."
-                            ),
-                        ),
-                        LLMMessage(
-                            role="user",
-                            content=_build_llm_compression_prompt(items, state, fallback_digest),
-                        ),
-                    ],
-                )
-            )
-            data = _parse_json_object(response.content)
-            digest = ContextDigest.from_dict(
-                {
-                    **fallback_digest.to_dict(),
-                    **data,
-                    "compression_method": "llm",
-                    "source_item_ids": fallback_digest.source_item_ids,
-                }
-            )
-            return digest
-        except Exception as exc:
-            logger.bind(task_id=state.get("task_id")).warning(
-                "llm context compression failed; using fallback error={}",
-                exc,
-            )
-            return fallback_digest.with_error(str(exc))
+        return ContextDigest.from_dict(
+            {
+                **fallback_digest.to_dict(),
+                **data,
+                "compression_method": "llm",
+                "source_item_ids": fallback_digest.source_item_ids,
+            }
+        )
 
 
 class ContextCompressionManager:
@@ -155,24 +148,16 @@ class ContextCompressionManager:
             threshold=config.context_compression_threshold,
             recent_items=config.context_recent_items,
         )
-        llm_config = LLMConfig(
-            provider=config.context_llm_provider,
-            model=config.context_llm_model,
-            api_base=config.context_llm_api_base,
-            api_key_env=config.context_llm_api_key_env,
-            timeout=config.context_llm_timeout,
-            temperature=config.context_llm_temperature,
-            max_output_chars=config.context_llm_max_output_chars,
-        )
+        llm_config = config.llm_config
         compressor: ContextCompressor
-        if config.context_llm_provider.strip().lower() in {"", "disabled", "none"}:
+        if llm_config.provider.strip().lower() in {"", "disabled", "none"}:
             compressor = RuleBasedContextCompressor()
         else:
             compressor = LLMContextCompressor(llm_config)
         logger.info(
             "context compression configured enabled={} provider={} threshold={} max_tokens={}",
             policy.enabled,
-            config.context_llm_provider,
+            llm_config.provider,
             policy.threshold,
             policy.max_context_tokens,
         )
@@ -265,6 +250,17 @@ def collect_context_items(state: AgentState) -> list[ContextItem]:
                 item_id="task:current",
             )
         )
+    if state.get("task_analysis"):
+        items.append(
+            ContextItem(
+                role="system",
+                item_type="task_analysis",
+                content=json.dumps(state["task_analysis"], ensure_ascii=False, default=str),
+                pinned=True,
+                metadata={"source": "task_analysis"},
+                item_id="task:analysis",
+            )
+        )
     if state.get("memory_context"):
         items.append(
             ContextItem(
@@ -274,6 +270,16 @@ def collect_context_items(state: AgentState) -> list[ContextItem]:
                 pinned=True,
                 metadata={"source": "memory"},
                 item_id="memory:context",
+            )
+        )
+    for index, observation in enumerate(state.get("llm_observations", [])):
+        items.append(
+            ContextItem(
+                role="assistant",
+                item_type="llm_observation",
+                content=json.dumps(observation, ensure_ascii=False, default=str),
+                metadata={"source": "llm_observation", "tool": observation.get("latest_tool")},
+                item_id=f"llm_observation:{index}:{observation.get('latest_tool', 'unknown')}",
             )
         )
     for index, step in enumerate(state.get("trajectory", [])):
@@ -320,10 +326,13 @@ def collect_context_items(state: AgentState) -> list[ContextItem]:
 
 
 def _build_llm_compression_prompt(
-    items: list[ContextItem],
     state: AgentState,
-    fallback_digest: ContextDigest,
+    context: dict[str, Any],
 ) -> str:
+    items = context.get("items") or []
+    fallback_digest = context.get("fallback_digest")
+    if not isinstance(fallback_digest, ContextDigest):
+        fallback_digest = RuleBasedContextCompressor().compress(items, state)
     item_text = "\n\n".join(
         f"[{idx}] role={item.role} type={item.item_type} pinned={item.pinned}\n{item.content[:4000]}"
         for idx, item in enumerate(items, start=1)
@@ -343,11 +352,79 @@ def _build_llm_compression_prompt(
     )
 
 
-def _parse_json_object(text: str) -> dict:
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if match:
-        text = match.group(1)
-    return json.loads(text)
+def _context_compression_fallback(
+    state: AgentState,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    fallback_digest = context.get("fallback_digest")
+    if isinstance(fallback_digest, ContextDigest):
+        return fallback_digest.to_dict()
+    items = context.get("items") or []
+    return RuleBasedContextCompressor().compress(items, state).to_dict()
+
+
+def _normalize_context_compression(
+    data: dict[str, Any],
+    state: AgentState,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    fallback = _context_compression_fallback(state, context)
+    return {
+        "summary": str(data.get("summary") or fallback.get("summary") or "").strip()[:1000],
+        "current_goal": str(data.get("current_goal") or fallback.get("current_goal") or "").strip()[:600],
+        "constraints": _clean_str_list(data.get("constraints"), fallback.get("constraints", []), 12),
+        "decisions": _clean_str_list(data.get("decisions"), fallback.get("decisions", []), 12),
+        "open_tasks": _clean_str_list(data.get("open_tasks"), fallback.get("open_tasks", []), 12),
+        "completed_tasks": _clean_str_list(
+            data.get("completed_tasks"),
+            fallback.get("completed_tasks", []),
+            12,
+        ),
+        "key_observations": _clean_str_list(
+            data.get("key_observations"),
+            fallback.get("key_observations", []),
+            16,
+        ),
+        "tool_results": _clean_tool_results(
+            data.get("tool_results"),
+            fallback.get("tool_results", []),
+            16,
+        ),
+        "code_changes": _clean_str_list(data.get("code_changes"), fallback.get("code_changes", []), 12),
+        "memory_refs": _clean_str_list(data.get("memory_refs"), fallback.get("memory_refs", []), 12),
+    }
+
+
+def _clean_str_list(value: Any, fallback: list[str], limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return [str(item) for item in fallback[:limit]]
+    cleaned: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if text and text not in cleaned:
+            cleaned.append(text[:500])
+        if len(cleaned) >= limit:
+            break
+    return cleaned or [str(item) for item in fallback[:limit]]
+
+
+def _clean_tool_results(value: Any, fallback: list[dict], limit: int) -> list[dict]:
+    if not isinstance(value, list):
+        return list(fallback)[:limit]
+    cleaned: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        cleaned.append(
+            {
+                "name": str(item.get("name", "unknown"))[:120],
+                "status": str(item.get("status", "unknown"))[:80],
+                "summary": str(item.get("summary", ""))[:500],
+            }
+        )
+        if len(cleaned) >= limit:
+            break
+    return cleaned or list(fallback)[:limit]
 
 
 def _summarize_tool_call(call: dict) -> dict:

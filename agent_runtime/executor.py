@@ -15,8 +15,11 @@ from uuid import uuid4
 
 from agent_runtime.context import ContextCompressionManager
 from agent_runtime.logging_config import configure_from_agent_config
+from agent_runtime.llm.llm_policy import LLMActionPolicy
 from agent_runtime.memory.manager import LayeredMemoryManager
 from agent_runtime.memory.store import JsonlMemoryStore
+from llm.observation import DisabledObserver, LLMObserver, Observer
+from agent_runtime.planning import HeuristicPlanner, LLMPlanner, Planner
 from agent_runtime.policy import HeuristicDebugPolicy
 from agent_runtime.registry import RegistryManager, RegistrySnapshot
 from agent_runtime.rl import (
@@ -31,9 +34,10 @@ from agent_runtime.rl import (
 from agent_runtime.rl.trainer import QTableStore
 from agent_runtime.tool_registry import ToolRegistry
 from agent_runtime.trajectory import TrajectoryRecorder
+from llm.task_analysis import DisabledTaskAnalyzer, LLMTaskAnalyzer, TaskAnalyzer
 from model.agent.graph import AgentState, AgentRunResult
 from model.agent.actions import Action
-from config import DebugAgentConfig
+from config import DebugAgentConfig, LLMConfig
 from loguru import logger
 
 
@@ -46,6 +50,9 @@ class DebugAgent:
         self,
         config: DebugAgentConfig,
         policy: HeuristicDebugPolicy | None = None,
+        planner: Planner | None = None,
+        task_analyzer: TaskAnalyzer | None = None,
+        observer: Observer | None = None,
         tools: ToolRegistry | None = None,
         registry: RegistryManager | None = None,
         memory_manager: LayeredMemoryManager | None = None,
@@ -61,7 +68,11 @@ class DebugAgent:
         self.rl_reward = RewardFunction()
         repo_path = Path(config.repo_path)
         self.rl_q_store = QTableStore(repo_path / config.rl_q_table_path)
-        self.rl_q_table = self.rl_q_store.load() if self.rl_enabled else {}
+        self.rl_q_table = (
+            self.rl_q_store.load()
+            if self.rl_enabled or (config.action_policy_mode or "").strip().lower() == "llm"
+            else {}
+        )
         self.rl_replay = (
             ReplayBuffer(repo_path / config.rl_replay_path, max_size=config.rl_replay_max_size)
             if self.rl_enabled
@@ -78,6 +89,9 @@ class DebugAgent:
             else None
         )
         self.policy = policy or self._default_policy()
+        self.planner = planner or self._default_planner()
+        self.task_analyzer = task_analyzer or self._default_task_analyzer()
+        self.observer = observer or self._default_observer()
         self.registry_manager = registry or RegistryManager(
             tools=tools,
             manifest_dir=config.manifest_dir,
@@ -107,6 +121,14 @@ class DebugAgent:
             bool(description),
         )
         state = self._understand_task(state)
+        if state.get("status") == "failed":
+            trace_path = self.recorder.save(state, self.config.trace_dir)
+            run_logger.error(
+                "agent run aborted during task analysis error={} trace_path={}",
+                state.get("error"),
+                trace_path.as_posix(),
+            )
+            return AgentRunResult(state=state, trace_path=trace_path.as_posix())
         state = self._retrieve_memories(state)
         state = self._prepare_context(state)
         state = self._make_plan(state)
@@ -124,6 +146,8 @@ class DebugAgent:
 
             state = self._execute_action(state, action)
             state = self._observe(state)
+            if state.get("status") == "failed":
+                break
 
         else:
             state = {
@@ -169,11 +193,13 @@ class DebugAgent:
             repo_path=self.config.repo_path,
             branch="",
             verify_command=self.config.verify_command,
+            task_analysis={},
             plan=[],
             current_step="created",
             candidate_files=[],
             code_context={},
             observations=[],
+            llm_observations=[],
             tool_calls=[],
             test_results=[],
             trajectory=[],
@@ -191,6 +217,7 @@ class DebugAgent:
             rl_enabled=self.rl_enabled,
             rl_transitions=[],
             rl_last_reward={},
+            llm_guard_events=[],
             patch=None,
             patch_summary=None,
             next_action=None,
@@ -202,15 +229,69 @@ class DebugAgent:
         )
 
     def _understand_task(self, state: AgentState) -> AgentState:
-        state = {**state, "status": "running", "current_step": "understand_task"}
+        try:
+            analysis = self.task_analyzer.analyze(state)
+        except Exception as exc:
+            logger.bind(task_id=state.get("task_id")).exception(
+                "task analysis failed without fallback"
+            )
+            failed_state = {
+                **state,
+                "status": "failed",
+                "current_step": "understand_task",
+                "error": f"Task analysis failed: {exc}",
+            }
+            return self.recorder.append(
+                failed_state,
+                node="understand_task",
+                thought="任务分析失败，未启用降级策略。",
+                observation={"error": str(exc), "fallback": False},
+            )
+        task_type = str(analysis.get("task_type") or state.get("task_type") or "BUG_FIX").upper()
+        if task_type not in {"BUG_FIX", "FEATURE_IMPL", "DIAGNOSE"}:
+            task_type = "BUG_FIX"
+        task_category = str(analysis.get("task_category") or state.get("task_category") or "")
+        observations = state.get("observations", []) + [
+            {"type": "task_analysis", "content": analysis}
+        ]
+        state = {
+            **state,
+            "status": "running",
+            "current_step": "understand_task",
+            "task_type": task_type,
+            "task_category": task_category,
+            "task_analysis": analysis,
+            "observations": observations,
+        }
+        logger.bind(task_id=state.get("task_id")).info(
+            "task analyzed type={} category={} entities={} source={}",
+            task_type,
+            task_category,
+            analysis.get("entities", []),
+            analysis.get("source"),
+        )
         return self.recorder.append(
             state,
             node="understand_task",
             thought=f"理解任务：{state.get('title', '')}",
+            observation={"task_analysis": analysis},
         )
 
     def _retrieve_memories(self, state: AgentState) -> AgentState:
-        query = f"{state.get('title', '')} {state.get('description', '')}"
+        analysis = state.get("task_analysis") or {}
+        query_parts = [
+            str(state.get("title", "")),
+            str(state.get("description", "")),
+        ]
+        if isinstance(analysis, dict):
+            query_parts.extend(
+                [
+                    str(analysis.get("task_category", "")),
+                    " ".join(str(item) for item in _list_values(analysis.get("entities"))[:8]),
+                    " ".join(str(item) for item in _list_values(analysis.get("search_hints"))[:8]),
+                ]
+            )
+        query = " ".join(part for part in query_parts if part).strip()
         memory_pack = self.memory_manager.retrieve(query, state, self._registry())
         memories = memory_pack.to_dict()
         memory_context = memory_pack.render_for_prompt()
@@ -273,7 +354,7 @@ class DebugAgent:
         return new_state
 
     def _make_plan(self, state: AgentState) -> AgentState:
-        plan = self.policy.make_initial_plan(state)
+        plan = self.planner.make_plan(state)
         state = {
             **state,
             "plan": plan,
@@ -304,9 +385,13 @@ class DebugAgent:
             thought=action.thought,
             action=action.name,
             action_input=action.args,
+            observation=action.metadata or None,
         )
 
     def _execute_action(self, state: AgentState, action: Action) -> AgentState:
+        """
+            执行
+        """
         action_logger = logger.bind(task_id=state.get("task_id"), action=action.name)
         started_at = time.perf_counter()
         action_logger.info("action execution started")
@@ -407,11 +492,49 @@ class DebugAgent:
 
     def _observe(self, state: AgentState) -> AgentState:
         latest = state.get("tool_calls", [{}])[-1]
+        try:
+            observation = self.observer.observe(state)
+        except Exception as exc:
+            logger.bind(task_id=state.get("task_id")).exception(
+                "observation failed without fallback"
+            )
+            failed_state = {
+                **state,
+                "status": "failed",
+                "current_step": "observe",
+                "error": f"Observation failed: {exc}",
+            }
+            return self.recorder.append(
+                failed_state,
+                node="observe",
+                thought="观察结果生成失败，未启用降级策略。",
+                observation={
+                    "latest_tool": latest.get("name"),
+                    "error": str(exc),
+                    "fallback": False,
+                },
+            )
+        llm_observations = state.get("llm_observations", [])
+        observations = state.get("observations", [])
+        if observation.get("source") != "disabled":
+            llm_observations = llm_observations + [observation]
+            observations = observations + [observation]
+        state = {
+            **state,
+            "llm_observations": llm_observations,
+            "observations": observations,
+        }
+        logger.bind(task_id=state.get("task_id")).info(
+            "observation synthesized latest_tool={} status={} confidence={}",
+            observation.get("latest_tool"),
+            observation.get("status"),
+            observation.get("confidence"),
+        )
         return self.recorder.append(
             state,
             node="observe",
             thought=f"整理 `{latest.get('name', 'unknown')}` 的结果。",
-            observation={"latest_tool": latest.get("name"), "error": latest.get("error")},
+            observation=observation,
         )
 
     def _write_memory(self, state: AgentState) -> dict:
@@ -524,7 +647,16 @@ class DebugAgent:
         return self._active_registry
 
     def _default_policy(self):
-        if not self.rl_enabled:
+        mode = (self.config.action_policy_mode or "").strip().lower()
+        if mode == "llm":
+            return LLMActionPolicy(
+                llm_config=_resolve_llm_config(self.config.llm_config, self.config.action_llm_config),
+                action_space=self.rl_action_space,
+                q_table=self.rl_q_table,
+                encoder=self.rl_encoder,
+                fallback=HeuristicDebugPolicy(),
+            )
+        if not self.rl_enabled and mode not in {"rl"}:
             return HeuristicDebugPolicy()
         return QLearningDebugPolicy(
             q_table=self.rl_q_table,
@@ -532,3 +664,69 @@ class DebugAgent:
             encoder=self.rl_encoder,
             action_space=self.rl_action_space,
         )
+
+    def _default_planner(self) -> Planner:
+        mode = (self.config.planner_mode or "").strip().lower()
+        if mode == "llm":
+            return LLMPlanner(
+                llm_config=_resolve_llm_config(self.config.llm_config, self.config.plan_llm_config),
+                fallback=HeuristicPlanner(),
+            )
+        return HeuristicPlanner()
+
+    def _default_task_analyzer(self) -> TaskAnalyzer:
+        mode = (self.config.task_analyzer_mode or "").strip().lower()
+        if mode == "llm":
+            return LLMTaskAnalyzer(
+                llm_config=_resolve_llm_config(
+                    self.config.llm_config,
+                    self.config.task_analysis_llm_config,
+                ),
+            )
+        return DisabledTaskAnalyzer()
+
+    def _default_observer(self) -> Observer:
+        mode = (self.config.observer_mode or "").strip().lower()
+        if mode == "llm":
+            return LLMObserver(
+                llm_config=_resolve_llm_config(
+                    self.config.llm_config,
+                    self.config.observer_llm_config,
+                ),
+            )
+        return DisabledObserver()
+
+
+def _resolve_llm_config(base: LLMConfig, override: LLMConfig) -> LLMConfig:
+    default = LLMConfig()
+
+    def resolve_str(field: str) -> str:
+        value = getattr(override, field)
+        default_value = getattr(default, field)
+        return value if value and value != default_value else getattr(base, field)
+
+    return LLMConfig(
+        provider=resolve_str("provider"),
+        model=resolve_str("model"),
+        api_base=resolve_str("api_base"),
+        api_key_env=resolve_str("api_key_env"),
+        timeout=override.timeout if override.timeout != default.timeout else base.timeout,
+        temperature=(
+            override.temperature
+            if override.temperature != default.temperature
+            else base.temperature
+        ),
+        max_output_chars=(
+            override.max_output_chars
+            if override.max_output_chars != default.max_output_chars
+            else base.max_output_chars
+        ),
+    )
+
+
+def _list_values(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if value in (None, ""):
+        return []
+    return [value]
