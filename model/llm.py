@@ -42,6 +42,14 @@ class FinalReportResponse(BaseModel):
     next_steps: list[str] = Field(default_factory=list)
 
 
+class CompletionJudgeResponse(BaseModel):
+    decision: Literal["complete", "needs_user_input", "continue"] = "complete"
+    reason: str = ""
+    questions: list[str] = Field(default_factory=list)
+    suggested_next_action: str = ""
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
 class MemoryQueryPlanResponse(BaseModel):
     queries: list[str]
     rationale: str = ""

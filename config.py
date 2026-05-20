@@ -82,6 +82,7 @@ class DebugAgentConfig:
     code_context_rerank_llm_config: LLMConfig = field(default_factory=LLMConfig)
     skill_selector_llm_config: LLMConfig = field(default_factory=LLMConfig)
     final_reporter_llm_config: LLMConfig = field(default_factory=LLMConfig)
+    completion_judge_llm_config: LLMConfig = field(default_factory=LLMConfig)
     planner_mode: str = "heuristic"
     action_policy_mode: str = "heuristic"
     task_analyzer_mode: str = "disabled"
@@ -92,6 +93,7 @@ class DebugAgentConfig:
     code_context_reranker_mode: str = "disabled"
     skill_selector_mode: str = "disabled"
     final_reporter_mode: str = "rule_based"
+    completion_judge_mode: str = "auto"
     memory_query_limit: int = 5
     memory_selected_limit: int = 12
     memory_rerank_candidate_limit: int = 24
@@ -158,6 +160,7 @@ def default_config_payload() -> dict[str, Any]:
             "code_context_rerank": {},
             "skill_selector": {},
             "final_reporter": {},
+            "completion_judge": {},
         },
         "modes": {
             "planner": config.planner_mode,
@@ -171,6 +174,7 @@ def default_config_payload() -> dict[str, Any]:
             "code_context_reranker": config.code_context_reranker_mode,
             "skill_selector": config.skill_selector_mode,
             "final_reporter": config.final_reporter_mode,
+            "completion_judge": config.completion_judge_mode,
         },
         "memory": {
             "path": config.memory_path,
@@ -360,6 +364,7 @@ def apply_debug_agent_config(config: DebugAgentConfig, data: dict[str, Any]) -> 
             "code_context_reranker": "code_context_reranker_mode",
             "skill_selector": "skill_selector_mode",
             "final_reporter": "final_reporter_mode",
+            "completion_judge": "completion_judge_mode",
         },
     )
     _apply_section(
@@ -447,6 +452,7 @@ def _apply_llm_section(config: DebugAgentConfig, section: Any) -> None:
         "code_context_rerank": "code_context_rerank_llm_config",
         "skill_selector": "skill_selector_llm_config",
         "final_reporter": "final_reporter_llm_config",
+        "completion_judge": "completion_judge_llm_config",
     }
     for raw_key, value in section.items():
         target = component_fields.get(_normalize_key(raw_key))
@@ -463,6 +469,7 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
     )
     _validate_choice("action_policy_mode", config.action_policy_mode, {"heuristic", "rl", "llm"})
     _validate_choice("final_reporter_mode", config.final_reporter_mode, {"rule_based", "llm"})
+    _validate_choice("completion_judge_mode", config.completion_judge_mode, {"auto", "rule_based", "llm"})
     for field_name in (
         "task_analyzer_mode",
         "observer_mode",
@@ -487,6 +494,7 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         "code_context_rerank_llm_config",
         "skill_selector_llm_config",
         "final_reporter_llm_config",
+        "completion_judge_llm_config",
     ):
         _validate_llm_config(field_name, getattr(config, field_name))
 
@@ -561,6 +569,11 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         "modes.final_reporter",
         config.final_reporter_mode == "llm",
         resolve_llm_config(config.llm_config, config.final_reporter_llm_config),
+    )
+    _require_llm_config(
+        "modes.completion_judge",
+        config.completion_judge_mode == "llm",
+        resolve_llm_config(config.llm_config, config.completion_judge_llm_config),
     )
 
 
@@ -778,6 +791,20 @@ class CompressionConfig(object):
         ".yaml": "yaml",
         ".yml": "yaml",
         ".json": "json",
+        ".rs": "rust",
+        ".c": "c",
+        ".h": "c",
+        ".cc": "cpp",
+        ".cpp": "cpp",
+        ".hpp": "cpp",
+        ".cs": "csharp",
+        ".php": "php",
+        ".rb": "ruby",
+        ".kt": "kotlin",
+        ".kts": "kotlin",
+        ".swift": "swift",
+        ".scala": "scala",
+        ".sh": "shell",
     }
     CALL_EXCLUDE = {
         "if",

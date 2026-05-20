@@ -11,6 +11,7 @@ from config import LLMConfig
 from model.agent.graph import AgentState
 from model.llm import ObservationResponse
 from prompts.templates import load_prompt, render_prompt
+from utils import _clamp_float
 
 
 OBSERVATION_STATUSES = {"ok", "error", "inconclusive", "complete"}
@@ -102,7 +103,7 @@ def _normalize_observation(
         "hypotheses": _clean_list(data.get("hypotheses"), 6),
         "missing_context": _clean_list(data.get("missing_context"), 6),
         "next_search_terms": _clean_list(data.get("next_search_terms"), 10),
-        "confidence": _clamp_float(data.get("confidence")),
+        "confidence": _clamp_float(data.get("confidence"), "invalid observer confidence from LLM"),
     }
 
 
@@ -153,10 +154,3 @@ def _clean_list(value: Any, limit: int) -> list[str]:
             break
     return cleaned
 
-
-def _clamp_float(value: Any) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"invalid observer confidence from LLM: {value}")
-    return max(0.0, min(1.0, parsed))

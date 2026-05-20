@@ -12,6 +12,7 @@ from model.agent.graph import AgentState
 from model.llm import SkillSelectorResponse
 from model.skill import SkillSpec
 from prompts.templates import load_prompt, render_prompt
+from utils import _truncate_text, _clamp_float
 
 
 @dataclass
@@ -95,7 +96,7 @@ class LLMSkillSelector:
             payloads.append(
                 {
                     "skill_name": skill_name,
-                    "relevance": _clamp_float(item.get("relevance")),
+                    "relevance": _clamp_float(item.get("relevance"), "invalid skill relevance from LLM"),
                     "reason": str(item.get("reason", "")).strip()[:300],
                 }
             )
@@ -129,7 +130,7 @@ class LLMSkillSelector:
             selected.append(
                 {
                     "skill_name": skill_name,
-                    "relevance": _clamp_float(item.get("relevance")),
+                    "relevance": _clamp_float(item.get("relevance"), "invalid skill relevance from LLM"),
                     "reason": str(item.get("reason", "")).strip()[:300],
                 }
             )
@@ -151,6 +152,7 @@ def _skill_selector_prompt(state: AgentState, context: dict[str, Any]) -> str:
         selected_limit=selected_limit,
         title=state.get("title", ""),
         description=state.get("description", ""),
+        project_profile=json.dumps(state.get("project_profile", {}), ensure_ascii=False),
         task_analysis=json.dumps(state.get("task_analysis", {}), ensure_ascii=False),
         current_step=state.get("current_step", ""),
         memory_context=_truncate_text(str(state.get("memory_context", "")), 3000),
@@ -183,17 +185,3 @@ def _dedupe_names(values: Any, skills: Mapping[str, SkillSpec]) -> list[str]:
         if name in skills and name not in selected:
             selected.append(name)
     return selected
-
-
-def _truncate_text(value: str, max_chars: int) -> str:
-    if len(value) <= max_chars:
-        return value
-    return value[:max_chars] + "...[truncated]"
-
-
-def _clamp_float(value: Any) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"invalid skill relevance from LLM: {value}")
-    return max(0.0, min(1.0, parsed))

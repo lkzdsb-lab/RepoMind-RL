@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from agent_runtime.executor import DebugAgent
 from agent_runtime.logging_config import configure_logging
@@ -26,6 +27,21 @@ def parse_args() -> argparse.Namespace:
         description="RepoMind-RL first-version debug agent harness."
     )
     parser.add_argument("issue", nargs="?", help="Bug/issue title or short description.")
+    parser.add_argument(
+        "--resume-trace",
+        default="",
+        help="Resume an agent run from a saved trace JSON.",
+    )
+    parser.add_argument(
+        "--answer",
+        default="",
+        help="User clarification answer used when resuming an awaiting run.",
+    )
+    parser.add_argument(
+        "--answer-file",
+        default="",
+        help="File containing the user clarification answer for --resume-trace.",
+    )
     parser.add_argument(
         "--config",
         default=DEFAULT_CONFIG_PATH,
@@ -141,6 +157,12 @@ def parse_args() -> argparse.Namespace:
         default="rule_based",
         choices=["rule_based", "llm"],
         help="Final user-facing report implementation.",
+    )
+    parser.add_argument(
+        "--completion-judge-mode",
+        default="auto",
+        choices=["auto", "rule_based", "llm"],
+        help="Completion judgement before finalizing.",
     )
     parser.add_argument("--plan-llm-provider", default="", help="Planner-specific LLM provider.")
     parser.add_argument("--plan-llm-model", default="", help="Planner-specific LLM model.")
@@ -298,6 +320,26 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Final-reporter-specific API key environment variable.",
     )
+    parser.add_argument(
+        "--completion-judge-llm-provider",
+        default="",
+        help="Completion-judge-specific LLM provider.",
+    )
+    parser.add_argument(
+        "--completion-judge-llm-model",
+        default="",
+        help="Completion-judge-specific LLM model.",
+    )
+    parser.add_argument(
+        "--completion-judge-llm-api-base",
+        default="",
+        help="Completion-judge-specific LLM API base.",
+    )
+    parser.add_argument(
+        "--completion-judge-llm-api-key-env",
+        default="",
+        help="Completion-judge-specific API key environment variable.",
+    )
     parser.add_argument("--memory-query-limit", type=int, default=5, help="Per-query memory retrieval limit.")
     parser.add_argument("--memory-selected-limit", type=int, default=12, help="Maximum selected memories.")
     parser.add_argument(
@@ -370,10 +412,16 @@ def main() -> None:
         )
     except Exception as exc:
         args._parser.error(str(exc))
+    try:
+        resume_state = _load_trace_state(args.resume_trace) if args.resume_trace else {}
+    except Exception as exc:
+        args._parser.error(str(exc))
 
     # 将配置的参数加载到 agent
     config = debug_agent_config_from_dict(config_payload)
     _apply_cli_overrides(config, args, provided)
+    if resume_state.get("repo_path") and "repo" not in provided:
+        config.repo_path = str(resume_state["repo_path"])
     try:
         validate_debug_agent_config(config)
     except Exception as exc:
@@ -382,13 +430,17 @@ def main() -> None:
     task_config = config_payload.get("task", {})
     if not isinstance(task_config, dict):
         task_config = {}
-    issue = args.issue or str(task_config.get("title") or task_config.get("issue") or "").strip()
+    issue = (
+        args.issue
+        or str(task_config.get("title") or task_config.get("issue") or "").strip()
+        or str(resume_state.get("title") or "").strip()
+    )
     if not issue:
-        args._parser.error("issue is required unless config.json defines task.title.")
+        args._parser.error("issue is required unless config.json or --resume-trace defines a title.")
     description = (
         args.description
         if "description" in provided
-        else str(task_config.get("description") or "")
+        else str(task_config.get("description") or resume_state.get("description") or "")
     )
 
     if not config.repo_path:
@@ -417,7 +469,7 @@ def main() -> None:
     )
 
     logger.info(
-        "starting agent cli repo_path={} issue={} config_path={} config_loaded={} planner_mode={} context_compressor_mode={} action_policy_mode={} task_analyzer_mode={} observer_mode={} memory_query_mode={} memory_reranker_mode={} code_context_query_mode={} code_context_reranker_mode={} skill_selector_mode={} final_reporter_mode={} rl_enabled={}",
+        "starting agent cli repo_path={} issue={} config_path={} config_loaded={} planner_mode={} context_compressor_mode={} action_policy_mode={} task_analyzer_mode={} observer_mode={} memory_query_mode={} memory_reranker_mode={} code_context_query_mode={} code_context_reranker_mode={} skill_selector_mode={} final_reporter_mode={} completion_judge_mode={} rl_enabled={}",
         repo_path.as_posix(),
         issue,
         None if args.no_config else args.config,
@@ -433,9 +485,19 @@ def main() -> None:
         config.code_context_reranker_mode,
         config.skill_selector_mode,
         config.final_reporter_mode,
+        config.completion_judge_mode,
         config.rl_enabled,
     )
-    result = DebugAgent(config).run(title=issue, description=description)
+    try:
+        resume_answer = _load_resume_answer(args)
+    except Exception as exc:
+        args._parser.error(str(exc))
+    if resume_state:
+        if resume_state.get("status") == "awaiting_user_input" and not resume_answer:
+            args._parser.error("--answer or --answer-file is required for an awaiting run.")
+        result = DebugAgent(config).resume(resume_state, user_answer=resume_answer)
+    else:
+        result = DebugAgent(config).run(title=issue, description=description)
 
     state = result.state
     summary = {
@@ -460,8 +522,13 @@ def main() -> None:
         "code_context_reranker_mode": config.code_context_reranker_mode,
         "skill_selector_mode": config.skill_selector_mode,
         "final_reporter_mode": config.final_reporter_mode,
+        "completion_judge_mode": config.completion_judge_mode,
         "verification_required": state.get("verification_required", True),
         "verification_reason": state.get("verification_reason", ""),
+        "completion_judgement": state.get("completion_judgement", {}),
+        "pending_user_questions": state.get("pending_user_questions", []),
+        "needs_user_input_reason": state.get("needs_user_input_reason", ""),
+        "user_inputs": state.get("user_inputs", []),
         "final_report": state.get("final_report", {}),
         "memory_query_plan": state.get("memory_query_plan", {}),
         "code_context_query_plan": state.get("code_context_query_plan", {}),
@@ -506,6 +573,7 @@ def _apply_cli_overrides(
         "code_context_reranker_mode": "code_context_reranker_mode",
         "skill_selector_mode": "skill_selector_mode",
         "final_reporter_mode": "final_reporter_mode",
+        "completion_judge_mode": "completion_judge_mode",
         "memory_query_limit": "memory_query_limit",
         "memory_selected_limit": "memory_selected_limit",
         "memory_rerank_candidate_limit": "memory_rerank_candidate_limit",
@@ -548,6 +616,7 @@ def _apply_cli_overrides(
         "code_context_rerank": "code_context_rerank_llm_config",
         "skill_selector": "skill_selector_llm_config",
         "final_reporter": "final_reporter_llm_config",
+        "completion_judge": "completion_judge_llm_config",
     }.items():
         _apply_llm_cli_overrides(getattr(config, field_name), args, provided, prefix)
 
@@ -611,6 +680,31 @@ def _resolve_config_path(config_path: str | None, value: str | None) -> Path | N
     if not base.is_absolute():
         base = Path.cwd() / base
     return base.parent / path
+
+
+def _load_trace_state(path_value: str) -> dict[str, Any]:
+    path = Path(path_value)
+    if not path.exists():
+        raise FileNotFoundError(f"Trace file does not exist: {path}")
+    if not path.is_file():
+        raise IsADirectoryError(f"Trace path is not a file: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Trace file must contain a JSON object: {path}")
+    return data
+
+
+def _load_resume_answer(args: argparse.Namespace) -> str:
+    if args.answer and args.answer_file:
+        raise ValueError("Use only one of --answer or --answer-file.")
+    if args.answer_file:
+        path = Path(args.answer_file)
+        if not path.exists():
+            raise FileNotFoundError(f"Answer file does not exist: {path}")
+        if not path.is_file():
+            raise IsADirectoryError(f"Answer path is not a file: {path}")
+        return path.read_text(encoding="utf-8").strip()
+    return str(args.answer or "").strip()
 
 
 if __name__ == "__main__":

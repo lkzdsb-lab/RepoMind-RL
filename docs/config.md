@@ -57,6 +57,7 @@ in `config.json`.
 | `modes.code_context_reranker` | `disabled`, `llm` | Codebase-context candidate reranking. |
 | `modes.skill_selector` | `disabled`, `llm` | Registered skill selection. |
 | `modes.final_reporter` | `rule_based`, `llm` | Final user-facing run summary. |
+| `modes.completion_judge` | `auto`, `rule_based`, `llm` | Finish-time judgement; `auto` uses LLM when configured and can pause with user questions when information is missing. |
 
 ## Per-Module LLM Overrides
 
@@ -97,6 +98,7 @@ Supported override blocks:
 - `llm.code_context_rerank`
 - `llm.skill_selector`
 - `llm.final_reporter`
+- `llm.completion_judge`
 
 ## Example: Enable Only Code Context LLM
 

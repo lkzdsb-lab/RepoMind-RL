@@ -7,8 +7,10 @@ verification_reason={{ verification_reason }}
 selected_skills={{ selected_skills }}
 skill_context={{ skill_context }}
 candidate_files={{ candidate_files }}
+read_files={{ read_files }}
 test_results={{ test_results }}
 patch_summary={{ patch_summary }}
+user_inputs={{ user_inputs }}
 memory_context={{ memory_context }}
 compressed_context={{ compressed_context }}
 legal_actions={{ legal_actions }}
@@ -22,6 +24,7 @@ Selection rules:
 - Choose the next tool that collects the smallest missing evidence needed for the task.
 - If candidate_files is empty and code_context is not available yet, prefer search_code_context.
 - If candidate_files contains unread files, prefer read_file.
+- If a candidate file is already present in read_files, use that evidence instead of requesting it again.
 - If verification_required is true and enough relevant code has been read, consider run_tests.
 - If verification_required is false, do not choose run_tests just to be safe.
 - If enough code evidence has been read and no verification is required, consider git_diff or finish.

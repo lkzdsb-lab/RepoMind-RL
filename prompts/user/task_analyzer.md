@@ -6,9 +6,14 @@ Set verification_required=false when the requested outcome can be satisfied by r
 verification_reason should briefly explain that decision.
 entities and search_hints should come from the user's actual task wording only.
 If a field is uncertain, use an empty list/string instead of guessing.
+First inspect project_profile to understand repository language evidence, then combine it with the user's natural language.
+Do not infer a programming language from the word "main" alone. It can refer to Python, Go, Java, Rust, C/C++, or a filename.
+Keep language-specific criteria out unless project_profile or the user explicitly supports that language.
+If project_profile has one clear primary_language and the user uses language-neutral terms, prefer that repository language.
 
 title={{ title }}
 description={{ description }}
 current_task_type={{ current_task_type }}
 verify_command={{ verify_command }}
+project_profile={{ project_profile }}
 registry_snapshot={{ registry_snapshot }}

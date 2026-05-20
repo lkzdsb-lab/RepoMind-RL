@@ -59,7 +59,8 @@
         "code_context_query": { "$ref": "#/$defs/llmConfig" },
         "code_context_rerank": { "$ref": "#/$defs/llmConfig" },
         "skill_selector": { "$ref": "#/$defs/llmConfig" },
-        "final_reporter": { "$ref": "#/$defs/llmConfig" }
+        "final_reporter": { "$ref": "#/$defs/llmConfig" },
+        "completion_judge": { "$ref": "#/$defs/llmConfig" }
       }
     },
     "modes": {
@@ -76,7 +77,8 @@
         "code_context_query_planner": { "enum": ["disabled", "llm"] },
         "code_context_reranker": { "enum": ["disabled", "llm"] },
         "skill_selector": { "enum": ["disabled", "llm"] },
-        "final_reporter": { "enum": ["rule_based", "llm"] }
+        "final_reporter": { "enum": ["rule_based", "llm"] },
+        "completion_judge": { "enum": ["auto", "rule_based", "llm"] }
       }
     },
     "memory": {

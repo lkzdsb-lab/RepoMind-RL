@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from agent_runtime.llm.llm_nodes import LLMJsonNode
+from agent_runtime.llm.tool_summaries import read_file_summaries
 from agent_runtime.policy import HeuristicDebugPolicy
 from agent_runtime.rl.action_space import ActionSpace
 from agent_runtime.rl.state_encoder import StateEncoder
@@ -16,6 +17,7 @@ from model.agent.actions import Action, ActionSpec
 from model.agent.graph import AgentState
 from model.llm import ActionChoiceResponse, GuardDecision
 from prompts.templates import load_prompt, render_prompt
+from utils import _truncate_text
 
 
 @dataclass
@@ -351,8 +353,14 @@ def _action_prompt(
             3500,
         ),
         candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),
+        read_files=json.dumps(
+            read_file_summaries(state, excerpt_chars=1200),
+            ensure_ascii=False,
+            default=str,
+        ),
         test_results=json.dumps(state.get("test_results", [])[-2:], ensure_ascii=False, default=str),
         patch_summary=state.get("patch_summary"),
+        user_inputs=json.dumps(state.get("user_inputs", []), ensure_ascii=False, default=str),
         memory_context=str(state.get("memory_context", ""))[:2500],
         compressed_context=str(state.get("compressed_context", ""))[:2500],
         legal_actions=json.dumps(legal, ensure_ascii=False),
@@ -400,7 +408,3 @@ def _dedupe(values: Any) -> list[str]:
         if item and item not in result:
             result.append(item)
     return result
-
-
-def _truncate_text(text: str, limit: int) -> str:
-    return text if len(text) <= limit else text[:limit] + "...[truncated]"

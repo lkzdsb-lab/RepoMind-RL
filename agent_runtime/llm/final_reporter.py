@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from agent_runtime.llm.llm_nodes import LLMJsonNode
+from agent_runtime.llm.tool_summaries import read_file_summaries, tool_call_summaries
 from config import LLMConfig
 from model.agent.graph import AgentState
 from model.llm import FinalReportResponse
@@ -92,15 +93,17 @@ def _final_report_prompt(state: AgentState, context: dict[str, Any]) -> str:
         verification_reason=state.get("verification_reason", ""),
         plan=json.dumps(state.get("plan", []), ensure_ascii=False),
         candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),
+        read_files=json.dumps(read_file_summaries(state), ensure_ascii=False, default=str),
         test_results=json.dumps(_test_result_summaries(state), ensure_ascii=False),
         patch_summary=state.get("patch_summary") or "",
         has_patch=json.dumps(bool(state.get("patch"))),
-        tool_calls=json.dumps(_tool_call_summaries(state), ensure_ascii=False, default=str),
+        tool_calls=json.dumps(tool_call_summaries(state), ensure_ascii=False, default=str),
         llm_observations=json.dumps(
             _trim_observations(state.get("llm_observations", [])),
             ensure_ascii=False,
             default=str,
         ),
+        user_inputs=json.dumps(state.get("user_inputs", []), ensure_ascii=False, default=str),
         fallback_report=json.dumps(context.get("fallback_report", {}), ensure_ascii=False),
     )
 
@@ -186,27 +189,6 @@ def _next_steps(state: AgentState, has_patch: bool) -> list[str]:
 
 def _verification_required(state: AgentState) -> bool:
     return bool(state.get("verification_required", True))
-
-
-def _tool_call_summaries(state: AgentState) -> list[dict[str, Any]]:
-    summaries = []
-    for call in state.get("tool_calls", [])[-12:]:
-        if not isinstance(call, dict):
-            continue
-        output = call.get("output")
-        if not isinstance(output, dict):
-            output = {}
-        summaries.append(
-            {
-                "name": call.get("name"),
-                "error": call.get("error"),
-                "input": call.get("input"),
-                "output_keys": sorted(output.keys()),
-                "exit_code": output.get("exit_code"),
-                "skipped": output.get("skipped"),
-            }
-        )
-    return summaries
 
 
 def _trim_observations(observations: Any) -> list[dict[str, Any]]:

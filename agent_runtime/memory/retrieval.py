@@ -12,6 +12,7 @@ from config import LLMConfig
 from model.agent.graph import AgentState
 from model.llm import MemoryQueryPlanResponse, MemoryRerankResponse
 from prompts.templates import load_prompt, render_prompt
+from utils import _clamp_float
 
 
 @dataclass
@@ -183,7 +184,7 @@ class LLMMemoryReranker:
             selected_payloads.append(
                 {
                     "memory_id": memory_id,
-                    "relevance": _clamp_float(item.get("relevance")),
+                    "relevance": _clamp_float(item.get("relevance"), "invalid memory relevance from LLM"),
                     "reason": str(item.get("reason", "")).strip()[:300],
                 }
             )
@@ -222,7 +223,7 @@ class LLMMemoryReranker:
             selected.append(
                 {
                     "memory_id": memory_id,
-                    "relevance": _clamp_float(item.get("relevance")),
+                    "relevance": _clamp_float(item.get("relevance"), "invalid memory relevance from LLM"),
                     "reason": str(item.get("reason", "")).strip()[:300],
                 }
             )
@@ -365,10 +366,3 @@ def _list_values(value: Any) -> list[Any]:
         return []
     return [value]
 
-
-def _clamp_float(value: Any) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"invalid memory relevance from LLM: {value}")
-    return max(0.0, min(1.0, parsed))

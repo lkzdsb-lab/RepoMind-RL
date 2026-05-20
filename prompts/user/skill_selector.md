@@ -5,6 +5,7 @@ Select none if no registered skill is relevant.
 
 title={{ title }}
 description={{ description }}
+project_profile={{ project_profile }}
 task_analysis={{ task_analysis }}
 current_step={{ current_step }}
 memory_context={{ memory_context }}

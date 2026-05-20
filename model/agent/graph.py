@@ -47,6 +47,7 @@ class AgentState(TypedDict, total=False):
     skill_context: list[dict]
 
     repo_path: str # 仓库路径
+    project_profile: Dict[str, Any] # 项目语言和文件概况
     branch: str # 仓库分支
     verify_command: str # 权限认证相关命令
 
@@ -63,6 +64,13 @@ class AgentState(TypedDict, total=False):
     tool_calls: List[ToolCall] # llm 使用过的 tools
     test_results: List[TestResult]
     trajectory: List[TrajectoryStep] # 整个任务的结果集
+
+    # 需要用户补充信息时的暂停/恢复状态
+    completion_judgement: Dict[str, Any]
+    pending_user_questions: List[str]
+    needs_user_input_reason: str
+    completion_judge_continue_count: int
+    user_inputs: List[Dict[str, Any]]
 
     # 查询过的记忆记录
     retrieved_memories: Dict[str, Any]
@@ -104,6 +112,7 @@ class AgentState(TypedDict, total=False):
         "need_more_context",
         "patching",
         "testing",
+        "awaiting_user_input",
         "finished",
         "failed",
     ]

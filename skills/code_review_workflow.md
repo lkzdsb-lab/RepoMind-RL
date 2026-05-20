@@ -10,9 +10,17 @@ smallest necessary dependency context.
 ## Workflow
 
 1. Determine the review scope from the user request.
+   - First identify the repository language from project evidence such as
+     `project_profile.primary_language`, dominant extensions, package manifests,
+     and candidate files.
+   - Combine repository language evidence with the user's natural language; do
+     not let either one override concrete evidence from the other without noting
+     uncertainty.
    - If the user names files, functions, APIs, or modules, start there.
    - If the scope is vague, use task analysis and `search_code_context` to find
      candidate files first.
+   - Treat names like `main`, `app`, `server`, or `index` as language-neutral
+     identifiers until repository evidence proves the language.
 2. Build the smallest necessary dependency closure before judging correctness:
    - target file or entrypoint
    - directly called functions or methods
@@ -52,6 +60,8 @@ smallest necessary dependency context.
 - Do not review only the first file when the behavior depends on callers, callees,
   interfaces, models, or configuration.
 - Do not read the entire repository by default.
+- Do not infer Go, Python, Java, Rust, or C/C++ solely from generic entrypoint
+  terms such as `main`.
 - Do not infer behavior from file names alone.
 - Do not claim a bug exists without a concrete code path or contract mismatch.
 - Do not bury findings under a long summary.

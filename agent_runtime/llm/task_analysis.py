@@ -66,6 +66,7 @@ def _task_analysis_prompt(state: AgentState, context: dict[str, Any]) -> str:
         description=state.get("description", ""),
         current_task_type=state.get("task_type", ""),
         verify_command=state.get("verify_command", ""),
+        project_profile=json.dumps(state.get("project_profile", {}), ensure_ascii=False),
         registry_snapshot=json.dumps(state.get("registry_snapshot", {}), ensure_ascii=False),
     )
 

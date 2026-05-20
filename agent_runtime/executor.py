@@ -9,6 +9,8 @@ layer can evolve independently.
 from __future__ import annotations
 
 import time
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 from uuid import uuid4
@@ -26,6 +28,11 @@ from agent_runtime.codebase_context.retrieval import (
 from agent_runtime.context import ContextCompressionManager
 from agent_runtime.logging_config import configure_from_agent_config
 from agent_runtime.llm.llm_policy import LLMActionPolicy
+from agent_runtime.llm.completion_judge import (
+    CompletionJudge,
+    LLMCompletionJudge,
+    RuleBasedCompletionJudge,
+)
 from agent_runtime.llm.final_reporter import (
     FinalReporter,
     LLMFinalReporter,
@@ -62,7 +69,7 @@ from agent_runtime.tool_registry import ToolRegistry
 from agent_runtime.trajectory import TrajectoryRecorder
 from model.agent.graph import AgentState, AgentRunResult
 from model.agent.actions import Action
-from config import DebugAgentConfig, LLMConfig
+from config import CompressionConfig, DebugAgentConfig, LLMConfig
 from loguru import logger
 
 
@@ -79,6 +86,7 @@ class DebugAgent:
         task_analyzer: TaskAnalyzer | None = None,
         observer: Observer | None = None,
         final_reporter: FinalReporter | None = None,
+        completion_judge: CompletionJudge | None = None,
         memory_query_planner: MemoryQueryPlanner | None = None,
         memory_reranker: MemoryReranker | None = None,
         code_context_query_planner: CodeContextQueryPlanner | None = None,
@@ -124,6 +132,7 @@ class DebugAgent:
         self.task_analyzer = task_analyzer or self._default_task_analyzer()
         self.observer = observer or self._default_observer()
         self.final_reporter = final_reporter or self._default_final_reporter()
+        self.completion_judge = completion_judge or self._default_completion_judge()
         self.memory_query_planner = memory_query_planner or self._default_memory_query_planner()
         self.memory_reranker = memory_reranker or self._default_memory_reranker()
         self.code_context_query_planner = (
@@ -192,6 +201,32 @@ class DebugAgent:
         state = self._prepare_context(state)
         state = self._make_plan(state)
 
+        return self._run_action_loop(state, started_at)
+
+    def resume(self, state: AgentState, user_answer: str = "") -> AgentRunResult:
+        started_at = time.perf_counter()
+        self._active_registry = self.registry_manager.snapshot()
+        if user_answer:
+            state = self._inject_user_input(state, user_answer)
+        else:
+            state = {
+                **state,
+                "status": "running",
+                "current_step": "select_action",
+            }
+        logger.bind(task_id=state.get("task_id"), repo_path=self.config.repo_path).info(
+            "agent run resumed user_answer_present={} prior_inputs={}",
+            bool(user_answer),
+            len(state.get("user_inputs", [])),
+        )
+        return self._run_action_loop(state, started_at)
+
+    def _run_action_loop(
+        self,
+        state: AgentState,
+        started_at: float,
+    ) -> AgentRunResult:
+        run_logger = logger.bind(task_id=state.get("task_id"), repo_path=self.config.repo_path)
         while state.get("loop_count", 0) < state.get("max_loops", self.config.max_loops):
             state = self._prepare_context(state)
             action = self.policy.next_action(state)
@@ -199,9 +234,11 @@ class DebugAgent:
 
             if action.name == "finish":
                 prev_state = state
-                state = self._finalize(state)
-                state = self._record_rl_transition(prev_state, action, state, {}, done=True)
-                break
+                state, should_stop, done, output = self._handle_finish_action(state)
+                state = self._record_rl_transition(prev_state, action, state, output, done=done)
+                if should_stop:
+                    break
+                continue
 
             state = self._execute_action(state, action)
             if state.get("status") == "failed":
@@ -221,7 +258,7 @@ class DebugAgent:
                 self.config.max_loops,
                 len(state.get("tool_calls", [])),
             )
-        if state.get("current_step") != "finished":
+        if state.get("status") != "awaiting_user_input" and state.get("current_step") != "finished":
             state = self._finalize(state)
 
         trace_path = self.recorder.save(state, self.config.trace_dir)
@@ -237,6 +274,7 @@ class DebugAgent:
 
     def _initial_state(self, title: str, description: str) -> AgentState:
         registry = self._registry()
+        project_profile = _build_project_profile(self.config.repo_path)
         return AgentState(
             task_id=str(uuid4()),
             task_type="BUG_FIX",
@@ -249,6 +287,7 @@ class DebugAgent:
                 "skills": registry.names("skills"),
             },
             repo_path=self.config.repo_path,
+            project_profile=project_profile,
             branch="",
             verification_required=True,
             verification_reason="Task analysis has not run yet.",
@@ -266,10 +305,14 @@ class DebugAgent:
             tool_calls=[],
             test_results=[],
             trajectory=[],
+            completion_judgement={},
+            pending_user_questions=[],
+            needs_user_input_reason="",
+            user_inputs=[],
             selected_skills=[],
             skill_selection={},
             skill_context=[],
-            retrieved_memories=[],
+            retrieved_memories={},
             selected_memories={},
             memory_query_plan={},
             memory_rerank={},
@@ -871,6 +914,146 @@ class DebugAgent:
             return f"{tool_name} returned {len(diff.splitlines())} diff lines."
         return f"{tool_name} output keys: {', '.join(sorted(output.keys()))}"
 
+    def _handle_finish_action(
+        self,
+        state: AgentState,
+    ) -> tuple[AgentState, bool, bool, Dict[str, Any]]:
+        """
+            处理终止状态，由 llm 判断是否结束，并且进行 loop 限制
+        """
+        judgement = self.completion_judge.judge(state)
+        output = {"completion_judgement": judgement}
+        state = self._record_completion_judgement(state, judgement)
+        decision = str(judgement.get("decision") or "complete").strip().lower()
+        if decision == "needs_user_input":
+            state = self._await_user_input(state, judgement)
+            return state, True, False, output
+        if decision == "continue":
+            attempts = int(state.get("completion_judge_continue_count", 0)) + 1
+            state = {
+                **state,
+                "current_step": "select_action",
+                "completion_judge_continue_count": attempts,
+            }
+            # todo 考虑配置化
+            if attempts >= 2:
+                logger.bind(task_id=state.get("task_id")).warning(
+                    "completion judge requested continue repeatedly; finalizing to avoid loop"
+                )
+                state = self._finalize(state)
+                return state, True, True, output
+            return state, False, False, output
+        state = self._finalize(state)
+        return state, True, True, output
+
+    def _record_completion_judgement(
+        self,
+        state: AgentState,
+        judgement: dict[str, Any],
+    ) -> AgentState:
+        observations = state.get("observations", []) + [
+            {
+                "type": "completion_judgement",
+                "content": judgement,
+            }
+        ]
+        state = {
+            **state,
+            "completion_judgement": judgement,
+            "observations": observations,
+        }
+        logger.bind(task_id=state.get("task_id")).info(
+            "completion judged decision={} confidence={} source={}",
+            judgement.get("decision"),
+            judgement.get("confidence"),
+            judgement.get("source"),
+        )
+        return self.recorder.append(
+            state,
+            node="completion_judge",
+            thought="判断当前状态是否足够结束，或是否需要用户补充信息。",
+            observation=judgement,
+        )
+
+    def _await_user_input(
+        self,
+        state: AgentState,
+        judgement: dict[str, Any],
+    ) -> AgentState:
+        questions = _clean_string_list(judgement.get("questions"), limit=3, max_chars=300)
+        reason = str(judgement.get("reason") or "").strip()
+        if not questions:
+            questions = ["请补充当前任务缺失的具体目标、约束或期望判断标准。"]
+        state = {
+            **state,
+            "status": "awaiting_user_input",
+            "current_step": "awaiting_user_input",
+            "pending_user_questions": questions,
+            "needs_user_input_reason": reason,
+        }
+        logger.bind(task_id=state.get("task_id")).info(
+            "agent awaiting user input questions={} reason={}",
+            questions,
+            reason,
+        )
+        return self.recorder.append(
+            state,
+            node="await_user_input",
+            thought="当前信息不足，暂停并等待用户补充。",
+            observation={
+                "reason": reason,
+                "questions": questions,
+            },
+        )
+
+    def _inject_user_input(self, state: AgentState, answer: str) -> AgentState:
+        text = str(answer or "").strip()
+        pending_questions = _clean_string_list(
+            state.get("pending_user_questions"),
+            limit=5,
+            max_chars=500,
+        )
+        input_item = {
+            "questions": pending_questions,
+            "answer": text,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        user_inputs = state.get("user_inputs", []) + [input_item]
+        observations = state.get("observations", []) + [
+            {
+                "type": "user_input",
+                "content": input_item,
+            }
+        ]
+        description = str(state.get("description") or "")
+        clarification = _render_user_clarification(input_item)
+        if clarification:
+            description = f"{description}\n\n{clarification}".strip()
+        loop_count = int(state.get("loop_count", 0))
+        max_loops = max(
+            int(state.get("max_loops", self.config.max_loops)),
+            loop_count + int(self.config.max_loops),
+        )
+        state = {
+            **state,
+            "description": description,
+            "status": "running",
+            "current_step": "user_input_received",
+            "pending_user_questions": [],
+            "needs_user_input_reason": "",
+            "user_inputs": user_inputs,
+            "observations": observations,
+            "final_report": {},
+            "error": None,
+            "max_loops": max_loops,
+        }
+        return self.recorder.append(
+            state,
+            node="user_input_received",
+            thought="收到用户补充信息，并写回当前 agent state。",
+            observation=input_item,
+        )
+
     def _finalize(self, state: AgentState) -> AgentState:
         status = "finished" if not state.get("error") else "failed"
         state = {**state, "status": status, "current_step": "finished"}
@@ -910,6 +1093,7 @@ class DebugAgent:
             self._active_registry = self.registry_manager.snapshot()
         return self._active_registry
 
+    # 后面都是降级策略，项目完全实现后考虑删除。
     def _default_policy(self):
         mode = (self.config.action_policy_mode or "").strip().lower()
         if mode == "llm":
@@ -969,6 +1153,22 @@ class DebugAgent:
                     self.config.llm_config,
                     self.config.final_reporter_llm_config,
                 ),
+                fallback=fallback,
+            )
+        return fallback
+
+    def _default_completion_judge(self) -> CompletionJudge:
+        mode = (self.config.completion_judge_mode or "").strip().lower()
+        fallback = RuleBasedCompletionJudge()
+        llm_config = _resolve_llm_config(
+            self.config.llm_config,
+            self.config.completion_judge_llm_config,
+        )
+        if mode == "auto" and not _llm_config_enabled(llm_config):
+            return fallback
+        if mode in {"auto", "llm"}:
+            return LLMCompletionJudge(
+                llm_config=llm_config,
                 fallback=fallback,
             )
         return fallback
@@ -1061,6 +1261,11 @@ def _resolve_llm_config(base: LLMConfig, override: LLMConfig) -> LLMConfig:
     )
 
 
+def _llm_config_enabled(value: LLMConfig) -> bool:
+    provider = str(value.provider).strip().lower()
+    return provider not in {"", "disabled", "none"} and bool(str(value.model).strip())
+
+
 def _verification_required(state: AgentState) -> bool:
     return bool(state.get("verification_required", True))
 
@@ -1145,3 +1350,90 @@ def _merge_unique(*groups: Any) -> list[str]:
             if value and value not in values:
                 values.append(value)
     return values
+
+
+def _build_project_profile(repo_path: str, max_files: int = 3000) -> dict[str, Any]:
+    """
+        启动时先统计项目使用语言分布情况
+    """
+    repo = Path(repo_path or ".").resolve()
+    config = CompressionConfig()
+    language_counts: Counter[str] = Counter()
+    extension_counts: Counter[str] = Counter()
+    language_extensions: dict[str, Counter[str]] = defaultdict(Counter)
+    sample_files: dict[str, list[str]] = defaultdict(list)
+    scanned = 0
+    if not repo.exists() or not repo.is_dir():
+        return {
+            "repo_path": repo.as_posix(),
+            "primary_language": "",
+            "languages": [],
+            "file_count": 0,
+            "truncated": False,
+            "error": "repo_path is not a directory",
+        }
+    for path in repo.rglob("*"):
+        if not path.is_file():
+            continue
+        rel_parts = path.relative_to(repo).parts
+        if set(rel_parts).intersection(config.IGNORED_DIRS):
+            continue
+        suffix = path.suffix.lower()
+        language = config.INDEXED_EXTENSIONS.get(suffix)
+        if not language:
+            continue
+        rel = path.relative_to(repo).as_posix()
+        language_counts[language] += 1
+        extension_counts[suffix] += 1
+        language_extensions[language][suffix] += 1
+        if len(sample_files[language]) < 5:
+            sample_files[language].append(rel)
+        scanned += 1
+        if scanned >= max_files:
+            break
+    total = sum(language_counts.values())
+    languages = []
+    for language, count in language_counts.most_common():
+        languages.append(
+            {
+                "language": language,
+                "file_count": count,
+                "ratio": round(count / total, 4) if total else 0.0,
+                "extensions": dict(language_extensions[language].most_common()),
+                "sample_files": sample_files[language],
+            }
+        )
+    primary_language = languages[0]["language"] if languages else ""
+    return {
+        "repo_path": repo.as_posix(),
+        "primary_language": primary_language,
+        "languages": languages[:8],
+        "file_count": total,
+        "extension_counts": dict(extension_counts.most_common(12)),
+        "truncated": scanned >= max_files,
+    }
+
+
+def _clean_string_list(value: Any, limit: int, max_chars: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    cleaned: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if text and text not in cleaned:
+            cleaned.append(text[:max_chars])
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def _render_user_clarification(input_item: dict[str, Any]) -> str:
+    answer = str(input_item.get("answer") or "").strip()
+    if not answer:
+        return ""
+    questions = _clean_string_list(input_item.get("questions"), limit=5, max_chars=500)
+    lines = ["User clarification:"]
+    for question in questions:
+        lines.append(f"- Question: {question}")
+    lines.append(f"- Answer: {answer}")
+    return "\n".join(lines)

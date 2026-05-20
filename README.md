@@ -21,6 +21,12 @@ python3 main.py "订单状态不会从 pending 更新到 paid"
 
 是否运行验证命令不是配置开关。启用 `modes.task_analyzer = "llm"` 后，LLM 会根据任务意图输出 `verification_required`；只有该值为 `true` 时，后续 policy 才会选择 `run_tests`。
 
+`modes.completion_judge` 默认是 `auto`：有可用 LLM 配置时，Agent 在 `finish` 前会判断当前证据是否足够结束；如果缺少只能由用户补充的信息，会把问题写入 trace 并以 `awaiting_user_input` 暂停。补充回答后可用原 trace 恢复：
+
+```bash
+python3 main.py --resume-trace /path/to/.repomind/traces/<task_id>.json --answer "这里的正确行为是 ..."
+```
+
 根 `llm` 只作为默认模型配置，不代表所有 LLM 模块都会启用。是否调用 LLM 由 `modes` 单独控制；比如 `modes.memory_reranker = "disabled"` 时，即使根 `llm` 已配置 key 和 model，memory reranker 也不会调用 LLM。
 
 运行产物按目标项目隔离。传入 `--repo /path/to/project-a` 时，trace、memory、log、code index、RL 数据都会写入 `/path/to/project-a/.repomind/`；调试另一个项目会写入另一个项目自己的 `.repomind/`。

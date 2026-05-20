@@ -12,6 +12,7 @@ from config import LLMConfig
 from model.agent.graph import AgentState
 from model.llm import CodeContextQueryPlanResponse, CodeContextRerankResponse
 from prompts.templates import load_prompt, render_prompt
+from utils import _truncate_text, _clamp_float
 
 
 CONTEXT_LIST_KEYS = (
@@ -228,7 +229,7 @@ class LLMCodeContextReranker:
                     "candidate_id": candidate_id,
                     "kind": available[candidate_id].get("kind", ""),
                     "file_path": available[candidate_id].get("file_path", ""),
-                    "relevance": _clamp_float(item.get("relevance")),
+                    "relevance": _clamp_float(item.get("relevance"), "invalid code context relevance from LLM"),
                     "reason": str(item.get("reason", "")).strip()[:300],
                 }
             )
@@ -267,7 +268,7 @@ class LLMCodeContextReranker:
             selected.append(
                 {
                     "candidate_id": candidate_id,
-                    "relevance": _clamp_float(item.get("relevance")),
+                    "relevance": _clamp_float(item.get("relevance"), "invalid code context relevance from LLM"),
                     "reason": str(item.get("reason", "")).strip()[:300],
                 }
             )
@@ -393,6 +394,7 @@ def _code_context_query_prompt(state: AgentState, context: dict[str, Any]) -> st
         default_query=context.get("default_query", ""),
         title=state.get("title", ""),
         description=state.get("description", ""),
+        project_profile=json.dumps(state.get("project_profile", {}), ensure_ascii=False),
         task_analysis=json.dumps(state.get("task_analysis", {}), ensure_ascii=False),
         selected_skills=json.dumps(state.get("selected_skills", []), ensure_ascii=False),
         skill_context=_truncate_text(json.dumps(state.get("skill_context", []), ensure_ascii=False), 3000),
@@ -412,6 +414,7 @@ def _code_context_rerank_prompt(state: AgentState, context: dict[str, Any]) -> s
         selected_limit=selected_limit,
         title=state.get("title", ""),
         description=state.get("description", ""),
+        project_profile=json.dumps(state.get("project_profile", {}), ensure_ascii=False),
         task_analysis=json.dumps(state.get("task_analysis", {}), ensure_ascii=False),
         selected_skills=json.dumps(state.get("selected_skills", []), ensure_ascii=False),
         queries=json.dumps(queries, ensure_ascii=False),
@@ -505,17 +508,3 @@ def _trim_value(value: Any, max_chars: int) -> Any:
     if isinstance(value, str):
         return _truncate_text(value, max_chars)
     return value
-
-
-def _truncate_text(value: str, max_chars: int) -> str:
-    if len(value) <= max_chars:
-        return value
-    return value[:max_chars] + "...[truncated]"
-
-
-def _clamp_float(value: Any) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"invalid code context relevance from LLM: {value}")
-    return max(0.0, min(1.0, parsed))
