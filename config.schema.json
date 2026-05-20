@@ -16,8 +16,6 @@
     },
     "repo_path": { "type": "string" },
     "repo": { "type": "string" },
-    "review_only": { "type": "boolean" },
-    "review-only": { "type": "boolean" },
     "verify_command": { "type": "string" },
     "verify": { "type": "string" },
     "max_loops": { "type": "integer", "minimum": 1 },

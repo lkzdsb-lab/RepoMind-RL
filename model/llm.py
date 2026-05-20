@@ -12,6 +12,8 @@ class PlanResponse(BaseModel):
 
 class TaskAnalysisResponse(BaseModel):
     task_type: Literal["BUG_FIX", "FEATURE_IMPL", "DIAGNOSE"]
+    verification_required: bool = True
+    verification_reason: str = ""
     task_category: str
     entities: list[str]
     acceptance_criteria: list[str]
@@ -84,6 +86,7 @@ class SkillSelectorResponse(BaseModel):
 
 class ActionChoiceResponse(BaseModel):
     action: str = ""
+    candidate_actions: list[str] = Field(default_factory=list)
     reason: str = ""
 
 

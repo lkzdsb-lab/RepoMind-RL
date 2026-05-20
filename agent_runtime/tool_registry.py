@@ -171,16 +171,16 @@ class ToolRegistry:
                 ),
             )
         )
-        self.register(
-            ToolSpec(
-                name="list_files",
-                description="List repository files with common generated directories ignored.",
-                runner=lambda repo, args: list_files(
-                    repo,
-                    max_files=int(args.get("max_files", FileConfig.MAX_READ_AMOUNT)),
-                ),
-            )
-        )
+        # self.register(
+        #     ToolSpec(
+        #         name="list_files",
+        #         description="List repository files with common generated directories ignored.",
+        #         runner=lambda repo, args: list_files(
+        #             repo,
+        #             max_files=int(args.get("max_files", FileConfig.MAX_READ_AMOUNT)),
+        #         ),
+        #     )
+        # )
         self.register(
             ToolSpec(
                 name="search_code",

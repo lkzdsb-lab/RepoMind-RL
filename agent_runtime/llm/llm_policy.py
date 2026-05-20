@@ -52,25 +52,20 @@ class LLMActionPolicy:
         if not legal_specs:
             return Action("finish", thought="LLM policy found no legal actions.")
 
-        guard = self._guard(legal_specs, state)
-        guarded_specs = [
-            spec
-            for spec in legal_specs
-            if spec.name in set(guard.allow_list)
-        ]
-        fallback_action = self._fallback_action(state, guarded_specs)
+        qtable_context = self._guard(legal_specs, state)
+        fallback_action = self._fallback_action(state, legal_specs)
         logger.bind(task_id=state.get("task_id")).info(
-            "llm action policy requested model={} provider={} legal_actions={} guarded_actions={}",
+            "llm action policy requested model={} provider={} legal_actions={} qtable_hard_denied={}",
             self.llm_config.model,
             self.llm_config.provider,
             [spec.name for spec in legal_specs],
-            [spec.name for spec in guarded_specs],
+            qtable_context.hard_denied,
         )
         data = self.node.run(
             state,
             {
                 "legal_specs": legal_specs,
-                "guard": guard,
+                "guard": qtable_context,
                 "fallback_action": fallback_action,
             },
         )
@@ -82,14 +77,21 @@ class LLMActionPolicy:
                 metadata={
                     "llm_policy_fallback": {
                         "error": data.get("fallback_reason"),
-                        "guard": guard.to_dict(),
+                        "guard": qtable_context.to_dict(),
                     }
                 },
             )
         action_name = str(data.get("action", "")).strip()
+        candidate_actions = _candidate_actions_from_response(data, action_name, fallback_action)
         reason = str(data.get("reason", "")).strip()
-        selected_spec = next((spec for spec in guarded_specs if spec.name == action_name), None)
-        # 如果 llm 没有选择，则降级使用人工匹配
+        guard = self._guard(legal_specs, state, candidate_actions)
+        legal_by_name = {spec.name: spec for spec in legal_specs}
+        guarded_specs = [
+            legal_by_name[name]
+            for name in guard.allow_list
+            if name in legal_by_name
+        ]
+        selected_spec = guarded_specs[0] if guarded_specs else None
         if selected_spec is None:
             rejection = self._record_guard_rejection(
                 state=state,
@@ -107,8 +109,23 @@ class LLMActionPolicy:
                 ),
                 metadata={"llm_guard_rejection": rejection},
             )
+        preferred_action = candidate_actions[0] if candidate_actions else action_name
+        rejection = None
+        if preferred_action and selected_spec.name != preferred_action:
+            rejection = self._record_guard_rejection(
+                state=state,
+                selected_action=preferred_action,
+                llm_reason=reason,
+                guard=guard,
+                fallback_action=self.action_space.to_action(selected_spec, state),
+            )
         action = self.action_space.to_action(selected_spec, state)
         thought = reason or action.thought or f"LLM selected `{selected_spec.name}`."
+        if selected_spec.name != preferred_action:
+            thought = (
+                f"{thought} q-table guard clipped preferred action "
+                f"`{preferred_action}` to `{selected_spec.name}`."
+            )
         return Action(
             action.name,
             action.args,
@@ -116,8 +133,10 @@ class LLMActionPolicy:
             metadata={
                 "llm_guard": {
                     "selected_action": action.name,
+                    "llm_candidate_actions": candidate_actions,
                     "guard": guard.to_dict(),
-                }
+                },
+                **({"llm_guard_rejection": rejection} if rejection else {}),
             },
         )
 
@@ -130,7 +149,12 @@ class LLMActionPolicy:
             return action
         return self.action_space.to_action(legal_specs[0], state)
 
-    def _guard(self, legal_specs: list[ActionSpec], state: AgentState) -> GuardDecision:
+    def _guard(
+        self,
+        legal_specs: list[ActionSpec],
+        state: AgentState,
+        candidate_actions: list[str] | None = None,
+    ) -> GuardDecision:
         """
             截断 reward 低于 threshold 的 action
             并记录到上下文中
@@ -139,11 +163,22 @@ class LLMActionPolicy:
         state_key = self.encoder.encode(state).key
         q_values = self.q_table.get(state_key, {})
         legal_actions = [spec.name for spec in legal_specs]
+        candidate_specs = _candidate_specs(legal_specs, candidate_actions)
+        candidate_names = [spec.name for spec in candidate_specs]
+        if not candidate_specs:
+            return GuardDecision(
+                state_key=state_key,
+                q_values={name: float(value) for name, value in q_values.items()},
+                legal_actions=legal_actions,
+                hard_denied={},
+                allow_list=[],
+                allow_scores={},
+            )
         if not q_values:
-            allowed = legal_actions[: self.q_top_k]
+            allowed = candidate_names[: self.q_top_k]
             logger.bind(task_id=state.get("task_id")).info(
                 "do not find the value in q-table",
-                state=state
+                # state=state
             )
             return GuardDecision(
                 state_key=state_key,
@@ -157,29 +192,28 @@ class LLMActionPolicy:
         # 过滤 spec
         passed_specs: list[tuple[ActionSpec, float]] = []
         hard_denied: dict[str, float] = {}
-        for spec in legal_specs:
+        for spec in candidate_specs:
             score = float(q_values.get(spec.name, 0.0))
             if score <= self.deny_threshold:
                 hard_denied[spec.name] = score
             else:
                 passed_specs.append((spec, score))
 
-        # 根据 reward 排序取 top_k 个
-        scored_and_sorted = sorted(passed_specs, key=lambda item: item[1], reverse=True)
-        allowed_scored = scored_and_sorted[: self.q_top_k]
+        # 保留 LLM 给出的候选顺序，只用 q-table 做截断，避免 guard 抢先替 LLM 排序。
+        allowed_scored = passed_specs[: self.q_top_k]
         fallback_forced = False
 
-        # 如果所有 legal actions 都低于阈值，至少放行一个，避免 agent 卡死。
-        if not allowed_scored and legal_specs:
+        # 如果 LLM 选出的候选都低于阈值，至少放行候选里的 least-bad，避免 agent 卡死。
+        if not allowed_scored and candidate_specs:
             all_scored = sorted(
-                ((spec, float(q_values.get(spec.name, 0.0))) for spec in legal_specs),
+                ((spec, float(q_values.get(spec.name, 0.0))) for spec in candidate_specs),
                 key=lambda item: item[1],
                 reverse=True
             )
             allowed_scored = [all_scored[0]]
             fallback_forced = True
             logger.bind(task_id=state.get("task_id")).warning(
-                "all legal actions hard-denied; allowing least-bad action state={} action={} q={:.3f}",
+                "all llm candidate actions hard-denied; allowing least-bad action state={} action={} q={:.3f}",
                 state_key,
                 allowed_scored[0][0].name,
                 allowed_scored[0][1],
@@ -261,6 +295,7 @@ def _action_fallback_payload(state: AgentState, context: dict[str, Any]) -> dict
         fallback_action = Action("finish", thought="Fallback action.")
     return {
         "action": fallback_action.name,
+        "candidate_actions": [fallback_action.name],
         "reason": fallback_action.thought,
     }
 
@@ -272,8 +307,21 @@ def _normalize_action_choice(
 ) -> dict[str, Any]:
     fallback = _action_fallback_payload(state, context)
     action = str(data.get("action") or fallback["action"]).strip()
+    raw_candidates = data.get("candidate_actions")
+    candidate_actions: list[str] = []
+    if isinstance(raw_candidates, list):
+        candidate_actions = [
+            str(item).strip()
+            for item in raw_candidates
+            if str(item).strip()
+        ]
+    if action and action not in candidate_actions:
+        candidate_actions.insert(0, action)
+    if not candidate_actions:
+        candidate_actions = list(fallback["candidate_actions"])
+        action = str(fallback["action"])
     reason = str(data.get("reason") or fallback["reason"]).strip()
-    return {"action": action, "reason": reason}
+    return {"action": action, "candidate_actions": candidate_actions, "reason": reason}
 
 
 def _action_prompt(
@@ -295,18 +343,64 @@ def _action_prompt(
         description=state.get("description", ""),
         current_step=state.get("current_step", ""),
         status=state.get("status", ""),
-        review_only=json.dumps(bool(state.get("review_only"))),
+        verification_required=json.dumps(bool(state.get("verification_required", True))),
+        verification_reason=state.get("verification_reason", ""),
+        selected_skills=json.dumps(state.get("selected_skills", []), ensure_ascii=False),
+        skill_context=_truncate_text(
+            json.dumps(state.get("skill_context", []), ensure_ascii=False),
+            3500,
+        ),
         candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),
         test_results=json.dumps(state.get("test_results", [])[-2:], ensure_ascii=False, default=str),
         patch_summary=state.get("patch_summary"),
         memory_context=str(state.get("memory_context", ""))[:2500],
         compressed_context=str(state.get("compressed_context", ""))[:2500],
         legal_actions=json.dumps(legal, ensure_ascii=False),
-        qtable_guard=json.dumps(guard.to_dict(), ensure_ascii=False),
-        allowed_actions=json.dumps(guard.allow_list, ensure_ascii=False),
-        hard_denied_actions=json.dumps(guard.hard_denied, ensure_ascii=False),
         fallback_action=json.dumps(
             {"name": fallback_action.name, "args": fallback_action.args},
             ensure_ascii=False,
         ),
     )
+
+
+def _candidate_actions_from_response(
+    data: dict[str, Any],
+    action_name: str,
+    fallback_action: Action,
+) -> list[str]:
+    raw_candidates = data.get("candidate_actions")
+    candidates: list[str] = []
+    if isinstance(raw_candidates, list):
+        candidates = [str(item).strip() for item in raw_candidates if str(item).strip()]
+    if action_name and action_name not in candidates:
+        candidates.insert(0, action_name)
+    if not candidates and fallback_action.name:
+        candidates = [fallback_action.name]
+    return _dedupe(candidates)
+
+
+def _candidate_specs(
+    legal_specs: list[ActionSpec],
+    candidate_actions: list[str] | None,
+) -> list[ActionSpec]:
+    legal_by_name = {spec.name: spec for spec in legal_specs}
+    names = [spec.name for spec in legal_specs] if candidate_actions is None else candidate_actions
+    specs: list[ActionSpec] = []
+    for name in _dedupe(str(item).strip() for item in names if str(item).strip()):
+        spec = legal_by_name.get(name)
+        if spec is not None:
+            specs.append(spec)
+    return specs
+
+
+def _dedupe(values: Any) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        item = str(value).strip()
+        if item and item not in result:
+            result.append(item)
+    return result
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit] + "...[truncated]"

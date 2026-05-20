@@ -81,9 +81,9 @@ class OpenAICompatibleLLMClient:
         if not content and parsed is not None:
             content = json.dumps(_parsed_to_plain(parsed), ensure_ascii=False)
         logger.info(
-            "llm request completed model={} content_chars={} parsed={}",
+            "llm request completed model={} content={} parsed={}",
             raw.get("model") or model,
-            len(content),
+            content,
             parsed is not None,
         )
         return LLMResponse(

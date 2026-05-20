@@ -7,7 +7,7 @@ RepoMind-RL 是一个能在真实代码仓库中自动定位 Bug、生成补丁�
 
 - `agent_runtime/executor.py`：负责编排任务生命周期。
 - `agent_runtime/policy.py`：第一版启发式 action policy，后续可替换为 LLM/RL policy。
-- `agent_runtime/tool_registry.py`：统一封装 `list_files`、`search_code`、`read_file`、`run_tests`、`git_diff`。
+- `agent_runtime/tool_registry.py`：统一封装 `search_code_context`、`search_code`、`read_file`、`run_tests`、`git_diff`。
 - `agent_runtime/trajectory.py`：记录可回放 trajectory，并落盘到 `.repomind/traces/`。
 - `agent_runtime/memory/`：第一版 JSONL memory card 存储，后续可替换为 SQLite/向量库。
 
@@ -17,21 +17,9 @@ RepoMind-RL 是一个能在真实代码仓库中自动定位 Bug、生成补丁�
 python3 main.py "订单状态不会从 pending 更新到 paid"
 ```
 
-如果只想让 agent 阅读并审查代码，不运行验证命令，可以开启 review-only：
+启动时会自动读取仓库根目录下的 `config.json`；如果文件不存在，会先生成一份默认模板再加载。常用运行参数、LLM API、mode、memory、code context、RL 和日志配置都可以放在这个文件里；`config.schema.json` 提供可选值校验，完整说明见 `docs/config.md`。命令行参数仍然保留，且只在显式传入时覆盖配置文件。
 
-```bash
-python3 main.py "检查订单状态流转有没有问题" --repo /path/to/repo --review-only
-```
-
-配置文件里等价写法：
-
-```json
-{
-  "review_only": true
-}
-```
-
-启动时会自动读取仓库根目录下的 `config.json`。常用运行参数、LLM API、mode、memory、code context、RL 和日志配置都可以放在这个文件里；`config.example.json` 是完整模板，`config.schema.json` 提供可选值校验，完整说明见 `docs/config.md`。命令行参数仍然保留，且只在显式传入时覆盖配置文件。
+是否运行验证命令不是配置开关。启用 `modes.task_analyzer = "llm"` 后，LLM 会根据任务意图输出 `verification_required`；只有该值为 `true` 时，后续 policy 才会选择 `run_tests`。
 
 根 `llm` 只作为默认模型配置，不代表所有 LLM 模块都会启用。是否调用 LLM 由 `modes` 单独控制；比如 `modes.memory_reranker = "disabled"` 时，即使根 `llm` 已配置 key 和 model，memory reranker 也不会调用 LLM。
 
@@ -150,6 +138,7 @@ resources = ["../../skills/go_bug_localization.md"]
 
 - `go_backend_debug`
 - `codebase_context_workflow`
+- `code_review_workflow`
 - `memory_consolidation`
 - `registry_extension`
 - `test_failure_triage`

@@ -28,6 +28,8 @@ class DisabledTaskAnalyzer:
     def analyze(self, state: AgentState) -> dict[str, Any]:
         return {
             "task_type": state.get("task_type", "BUG_FIX"),
+            "verification_required": True,
+            "verification_reason": "Task analyzer LLM is disabled; defaulting to verification.",
             "task_category": "",
             "entities": [],
             "acceptance_criteria": [],
@@ -63,7 +65,6 @@ def _task_analysis_prompt(state: AgentState, context: dict[str, Any]) -> str:
         title=state.get("title", ""),
         description=state.get("description", ""),
         current_task_type=state.get("task_type", ""),
-        review_only=json.dumps(bool(state.get("review_only"))),
         verify_command=state.get("verify_command", ""),
         registry_snapshot=json.dumps(state.get("registry_snapshot", {}), ensure_ascii=False),
     )
@@ -80,12 +81,27 @@ def _normalize_task_analysis(
 
     return {
         "task_type": task_type,
+        "verification_required": _normalize_bool(data.get("verification_required"), default=True),
+        "verification_reason": str(data.get("verification_reason") or "").strip()[:240],
         "task_category": str(data.get("task_category", "")).strip()[:120],
         "entities": _clean_list(data.get("entities"), limit=12),
         "acceptance_criteria": _clean_list(data.get("acceptance_criteria"), limit=8),
         "risk_notes": _clean_list(data.get("risk_notes"), limit=8),
         "search_hints": _clean_list(data.get("search_hints"), limit=12),
     }
+
+
+def _normalize_bool(value: Any, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "y"}:
+        return True
+    if text in {"false", "0", "no", "n"}:
+        return False
+    return default
 
 
 def _clean_list(value: Any, limit: int) -> list[str]:

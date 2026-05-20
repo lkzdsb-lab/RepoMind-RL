@@ -39,8 +39,8 @@ class RuleBasedFinalReporter:
             f"候选文件：{len(candidate_files)} 个",
             "有 patch" if has_patch else "没有 patch",
         ]
-        if state.get("review_only"):
-            summary_parts.append("review-only，已跳过验证命令")
+        if not _verification_required(state):
+            summary_parts.append("LLM 判定无需运行验证命令")
         elif test_results:
             summary_parts.append(f"验证结果：{test_results[-1]}")
         else:
@@ -88,7 +88,8 @@ def _final_report_prompt(state: AgentState, context: dict[str, Any]) -> str:
         description=state.get("description", ""),
         status=state.get("status", ""),
         error=state.get("error", ""),
-        review_only=json.dumps(bool(state.get("review_only"))),
+        verification_required=json.dumps(_verification_required(state)),
+        verification_reason=state.get("verification_reason", ""),
         plan=json.dumps(state.get("plan", []), ensure_ascii=False),
         candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),
         test_results=json.dumps(_test_result_summaries(state), ensure_ascii=False),
@@ -142,8 +143,9 @@ def _work_done_from_tools(tool_names: list[str]) -> list[str]:
 
 
 def _test_result_summaries(state: AgentState) -> list[str]:
-    if state.get("review_only"):
-        return ["跳过验证命令（review-only）"]
+    if not _verification_required(state):
+        reason = str(state.get("verification_reason") or "LLM decided verification is not required.")
+        return [f"跳过验证命令：{reason}"]
     results = []
     for item in state.get("test_results", [])[-5:]:
         if not isinstance(item, dict):
@@ -169,8 +171,8 @@ def _patch_status(state: AgentState) -> str:
 def _next_steps(state: AgentState, has_patch: bool) -> list[str]:
     if state.get("error"):
         return [f"先处理当前错误：{state.get('error')}"]
-    if state.get("review_only"):
-        steps = ["如需验证行为，关闭 review-only 后运行验证命令。"]
+    if not _verification_required(state):
+        steps = ["如需验证行为，调整任务目标并让 LLM 判定需要运行验证命令。"]
     else:
         steps = []
     if has_patch:
@@ -180,6 +182,10 @@ def _next_steps(state: AgentState, has_patch: bool) -> list[str]:
     if not state.get("candidate_files"):
         steps.append("补充更具体的任务描述或搜索关键词以扩大代码定位范围。")
     return steps[:5]
+
+
+def _verification_required(state: AgentState) -> bool:
+    return bool(state.get("verification_required", True))
 
 
 def _tool_call_summaries(state: AgentState) -> list[dict[str, Any]]:

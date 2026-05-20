@@ -16,6 +16,7 @@ from uuid import uuid4
 from agent_runtime.codebase_context.retrieval import (
     CodeContextQueryPlanner,
     CodeContextReranker,
+    CONTEXT_LIST_KEYS,
     DisabledCodeContextQueryPlanner,
     DisabledCodeContextReranker,
     LLMCodeContextQueryPlanner,
@@ -141,10 +142,9 @@ class DebugAgent:
         self.context_manager = context_manager or ContextCompressionManager.from_config(config)
         self.recorder = recorder or TrajectoryRecorder()
         logger.info(
-            "debug agent initialized repo_path={} max_loops={} review_only={} rl_enabled={} manifest_dir={}",
+            "debug agent initialized repo_path={} max_loops={} rl_enabled={} manifest_dir={}",
             config.repo_path,
             config.max_loops,
-            config.review_only,
             self.rl_enabled,
             config.manifest_dir,
         )
@@ -250,7 +250,8 @@ class DebugAgent:
             },
             repo_path=self.config.repo_path,
             branch="",
-            review_only=self.config.review_only,
+            verification_required=True,
+            verification_reason="Task analysis has not run yet.",
             verify_command=self.config.verify_command,
             task_analysis={},
             plan=[],
@@ -317,6 +318,8 @@ class DebugAgent:
         task_type = str(analysis.get("task_type") or state.get("task_type") or "BUG_FIX").upper()
         if task_type not in {"BUG_FIX", "FEATURE_IMPL", "DIAGNOSE"}:
             task_type = "BUG_FIX"
+        verification_required = bool(analysis.get("verification_required", True))
+        verification_reason = str(analysis.get("verification_reason") or "")
         task_category = str(analysis.get("task_category") or state.get("task_category") or "")
         observations = state.get("observations", []) + [
             {"type": "task_analysis", "content": analysis}
@@ -326,13 +329,16 @@ class DebugAgent:
             "status": "running",
             "current_step": "understand_task",
             "task_type": task_type,
+            "verification_required": verification_required,
+            "verification_reason": verification_reason,
             "task_category": task_category,
             "task_analysis": analysis,
             "observations": observations,
         }
         logger.bind(task_id=state.get("task_id")).info(
-            "task analyzed type={} category={} entities={} source={}",
+            "task analyzed type={} verification_required={} category={} entities={} source={}",
             task_type,
+            verification_required,
             task_category,
             analysis.get("entities", []),
             analysis.get("source"),
@@ -368,6 +374,10 @@ class DebugAgent:
             state.get("selected_skills", []),
             selection.selected_skills,
         )
+        skill_context = _merge_skill_context(
+            state.get("skill_context", []),
+            _selected_skill_context(selected_skills, self._registry().skills),
+        )
         selection_payload = selection.to_dict()
         observations = state.get("observations", []) + [
             {
@@ -379,6 +389,7 @@ class DebugAgent:
             **state,
             "current_step": "select_skills",
             "selected_skills": selected_skills,
+            "skill_context": skill_context,
             "skill_selection": selection_payload,
             "observations": observations,
         }
@@ -435,7 +446,10 @@ class DebugAgent:
         candidate_memories = candidate_pack.to_dict()
         selected_memories = memory_pack.to_dict()
         memory_context = memory_pack.render_for_prompt()
-        skill_context = [result.to_dict() for result in memory_pack.skill]
+        skill_context = _merge_skill_context(
+            state.get("skill_context", []),
+            [result.to_dict() for result in memory_pack.skill],
+        )
         memory_selected_skills = [
             result.card.skill_name
             for result in memory_pack.skill
@@ -553,11 +567,11 @@ class DebugAgent:
         started_at = time.perf_counter()
         action_logger.info("action execution started")
         try:
-            if action.name == "run_tests" and self.config.review_only:
+            if action.name == "run_tests" and not _verification_required(state):
                 output = {
                     "command": action.args.get("command", self.config.verify_command),
                     "skipped": True,
-                    "reason": "review_only",
+                    "reason": "verification_required=false",
                 }
             elif action.name == "write_memory":
                 output = self._write_memory(state)
@@ -638,6 +652,15 @@ class DebugAgent:
         if merged.get("error"):
             return merged
 
+        candidate_count = _code_context_candidate_count(merged)
+        if candidate_count == 0:
+            logger.bind(task_id=state.get("task_id")).warning(
+                "code context search returned no candidates queries={} query_plan_source={} base_query={}",
+                queries,
+                query_plan.source,
+                base_query,
+            )
+
         selected_context, rerank_decision = self.code_context_reranker.rerank(
             state,
             query_plan,
@@ -645,10 +668,21 @@ class DebugAgent:
         )
         merged["selected_code_context"] = selected_context
         merged["code_context_rerank"] = rerank_decision.to_dict()
+        selected_count = _code_context_candidate_count(selected_context)
+        if candidate_count > 0 and selected_count == 0:
+            logger.bind(task_id=state.get("task_id")).warning(
+                "code context reranker selected no candidates queries={} query_plan_source={} candidate_count={} reranker_source={}",
+                queries,
+                query_plan.source,
+                candidate_count,
+                rerank_decision.source,
+            )
         logger.bind(task_id=state.get("task_id")).info(
-            "code context searched queries={} candidates_files={} selected_ids={}",
+            "code context searched queries={} candidate_count={} candidates_files={} selected_count={} selected_ids={}",
             len(queries),
+            candidate_count,
             len(merged.get("files", []) or []),
+            selected_count,
             rerank_decision.selected_ids,
         )
         return merged
@@ -1025,6 +1059,80 @@ def _resolve_llm_config(base: LLMConfig, override: LLMConfig) -> LLMConfig:
             else base.max_output_chars
         ),
     )
+
+
+def _verification_required(state: AgentState) -> bool:
+    return bool(state.get("verification_required", True))
+
+
+def _code_context_candidate_count(context: Dict[str, Any]) -> int:
+    return sum(
+        len(items)
+        for key in CONTEXT_LIST_KEYS
+        for items in [context.get(key, [])]
+        if isinstance(items, list)
+    )
+
+
+def _selected_skill_context(
+    selected_skills: list[str],
+    skills: Any,
+    max_resource_chars: int = 4000,
+) -> list[dict[str, Any]]:
+    context: list[dict[str, Any]] = []
+    for skill_name in selected_skills:
+        spec = skills.get(skill_name) if hasattr(skills, "get") else None
+        if spec is None:
+            continue
+        resources = []
+        for resource_path in getattr(spec, "resources", [])[:2]:
+            path = Path(str(resource_path))
+            if not path.is_file():
+                resources.append({"path": str(resource_path), "error": "resource not found"})
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError as exc:
+                resources.append({"path": path.as_posix(), "error": str(exc)})
+                continue
+            resources.append(
+                {
+                    "path": path.as_posix(),
+                    "content": text[:max_resource_chars],
+                    "truncated": len(text) > max_resource_chars,
+                }
+            )
+        context.append(
+            {
+                "source": "registry",
+                "skill_name": skill_name,
+                "description": getattr(spec, "description", ""),
+                "resources": resources,
+            }
+        )
+    return context
+
+
+def _merge_skill_context(*groups: Any) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        for item in group:
+            if not isinstance(item, dict):
+                continue
+            key = str(
+                item.get("skill_name")
+                or item.get("memory_id")
+                or item.get("id")
+                or item
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+    return merged
 
 
 def _merge_unique(*groups: Any) -> list[str]:

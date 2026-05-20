@@ -38,7 +38,6 @@ class DebugAgentConfig:
     """
     # 仓库路径
     repo_path: str = ""
-    review_only: bool = False
     verify_command: str = "pytest"
     max_loops: int = 8
     env_file: str | None = ".env"
@@ -117,6 +116,115 @@ class DebugAgentConfig:
 
 
 DEFAULT_CONFIG_PATH = "config.json"
+
+
+def default_config_payload() -> dict[str, Any]:
+    config = DebugAgentConfig()
+    llm = LLMConfig()
+    return {
+        "$schema": "./config.schema.json",
+        "task": {
+            "title": "",
+            "description": "",
+        },
+        "repo_path": ".",
+        "verify_command": config.verify_command,
+        "max_loops": config.max_loops,
+        "env_file": config.env_file,
+        "env_override": config.env_override,
+        "manifest_dir": config.manifest_dir,
+        "logging": {
+            "level": config.log_level,
+            "file": config.log_file,
+            "json": config.log_json,
+            "to_console": config.log_to_console,
+        },
+        "llm": {
+            "provider": llm.provider,
+            "model": llm.model,
+            "api_base": llm.api_base,
+            "api_key_env": llm.api_key_env,
+            "timeout": llm.timeout,
+            "temperature": llm.temperature,
+            "max_output_chars": llm.max_output_chars,
+            "context_compressor": {},
+            "plan": {},
+            "action": {},
+            "task_analysis": {},
+            "observer": {},
+            "memory_query": {},
+            "memory_rerank": {},
+            "code_context_query": {},
+            "code_context_rerank": {},
+            "skill_selector": {},
+            "final_reporter": {},
+        },
+        "modes": {
+            "planner": config.planner_mode,
+            "context_compressor": config.context_compressor_mode,
+            "action_policy": config.action_policy_mode,
+            "task_analyzer": config.task_analyzer_mode,
+            "observer": config.observer_mode,
+            "memory_query_planner": config.memory_query_planner_mode,
+            "memory_reranker": config.memory_reranker_mode,
+            "code_context_query_planner": config.code_context_query_planner_mode,
+            "code_context_reranker": config.code_context_reranker_mode,
+            "skill_selector": config.skill_selector_mode,
+            "final_reporter": config.final_reporter_mode,
+        },
+        "memory": {
+            "path": config.memory_path,
+            "mid_path": config.mid_memory_path,
+            "long_path": config.long_memory_path,
+            "skill_dir": config.skill_memory_dir,
+            "redis_url": config.memory_redis_url,
+            "semantic_threshold": config.semantic_promotion_threshold,
+            "procedural_threshold": config.procedural_promotion_threshold,
+            "skill_consolidation_threshold": config.skill_consolidation_threshold,
+            "query_limit": config.memory_query_limit,
+            "selected_limit": config.memory_selected_limit,
+            "rerank_candidate_limit": config.memory_rerank_candidate_limit,
+        },
+        "context": {
+            "enabled": config.context_compression_enabled,
+            "compressor_mode": config.context_compressor_mode,
+            "max_tokens": config.context_max_tokens,
+            "compression_threshold": config.context_compression_threshold,
+            "recent_items": config.context_recent_items,
+        },
+        "code_context": {
+            "index_path": config.code_context_index_path,
+            "query_limit": config.code_context_query_limit,
+            "selected_limit": config.code_context_selected_limit,
+            "rerank_candidate_limit": config.code_context_rerank_candidate_limit,
+        },
+        "skill": {
+            "selected_limit": config.skill_selected_limit,
+        },
+        "rl": {
+            "enabled": config.rl_enabled,
+            "q_table_path": config.rl_q_table_path,
+            "replay_path": config.rl_replay_path,
+            "epsilon": config.rl_epsilon,
+            "learning_rate": config.rl_learning_rate,
+            "discount": config.rl_discount,
+            "replay_max_size": config.rl_replay_max_size,
+            "train_batch_size": config.rl_train_batch_size,
+        },
+    }
+
+
+def ensure_default_config_file(path: str | Path = DEFAULT_CONFIG_PATH) -> Path:
+    config_path = Path(path)
+    if config_path.exists():
+        return config_path
+    if config_path.parent != Path("."):
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(default_config_payload(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return config_path
 
 
 def load_config_payload(

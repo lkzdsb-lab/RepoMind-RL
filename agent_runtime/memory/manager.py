@@ -480,9 +480,9 @@ class LayeredMemoryManager:
 
     def _procedural_content(self, state: AgentState) -> str:
         command = state.get("verify_command", "pytest")
-        if state.get("review_only"):
+        if not state.get("verification_required", True):
             return (
-                f"Procedure for similar review-only tasks: search using task-specific keywords, "
+                f"Procedure for similar inspection tasks: search using task-specific keywords, "
                 f"read the top candidate files, skip `{command}`, inspect `git_diff`, and keep "
                 f"the memory as draft unless separate verification evidence is present."
             )

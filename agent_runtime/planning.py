@@ -22,15 +22,14 @@ class Planner(Protocol):
 class HeuristicPlanner:
     def make_plan(self, state: AgentState) -> list[str]:
         verify_command = state.get("verify_command") or "pytest"
-        review_only = bool(state.get("review_only"))
         verification_step = (
-            "跳过验证命令（review-only）"
-            if review_only
+            "跳过验证命令（LLM 判定本任务不需要命令验证）"
+            if not _verification_required(state)
             else f"运行验证命令：{verify_command}"
         )
         return [
             "解析 issue，提取代码搜索关键词",
-            "读取仓库结构并搜索相关代码",
+            "使用结构化代码上下文搜索候选文件",
             "阅读候选文件建立上下文",
             verification_step,
             "查看 git diff 并汇总当前补丁状态",
@@ -77,7 +76,8 @@ def _planner_node_prompt(state: AgentState, context: dict) -> str:
         candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),
         memory_context=str(state.get("memory_context", ""))[:3000],
         compressed_context=str(state.get("compressed_context", ""))[:3000],
-        review_only=json.dumps(bool(state.get("review_only"))),
+        verification_required=json.dumps(_verification_required(state)),
+        verification_reason=state.get("verification_reason", ""),
         verify_command=state.get("verify_command", ""),
         default_plan=json.dumps(fallback_plan, ensure_ascii=False),
     )
@@ -92,3 +92,7 @@ def _normalize_plan_response(data: dict, state: AgentState, context: dict) -> di
     if not plan:
         plan = fallback_plan
     return {"plan": plan[:8]}
+
+
+def _verification_required(state: AgentState) -> bool:
+    return bool(state.get("verification_required", True))

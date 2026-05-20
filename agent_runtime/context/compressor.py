@@ -52,7 +52,7 @@ class RuleBasedContextCompressor:
         latest_error = state.get("error")
         constraints = [
             f"repo_path={state.get('repo_path', '')}",
-            f"review_only={bool(state.get('review_only'))}",
+            f"verification_required={bool(state.get('verification_required', True))}",
             f"verify_command={state.get('verify_command', '')}",
         ]
         if latest_error:

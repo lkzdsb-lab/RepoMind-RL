@@ -62,6 +62,33 @@ class SkillRegistry(BaseRegistry):
                 metadata={"priority": 2, "category": "code_context"},
             ),
             SkillSpec(
+                name="code_review_workflow",
+                description=(
+                    "Review code by reading the smallest necessary dependency closure "
+                    "before producing evidence-based findings."
+                ),
+                version="0.1.0",
+                triggers=[
+                    "review",
+                    "code review",
+                    "代码审查",
+                    "审查",
+                    "检查代码",
+                    "看代码",
+                    "有没有问题",
+                    "是否正确",
+                    "找 bug",
+                    "找风险",
+                    "find bugs",
+                    "risk",
+                    "correctness",
+                    "implementation quality",
+                ],
+                resources=[(skill_root / "code_review_workflow.md").as_posix()],
+                entrypoints={"workflow": "code_review_workflow"},
+                metadata={"priority": 2, "category": "review"},
+            ),
+            SkillSpec(
                 name="memory_consolidation",
                 description=(
                     "Promote useful memories across episodic, semantic, procedural, "

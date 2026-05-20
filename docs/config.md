@@ -1,32 +1,19 @@
 # Runtime Config Reference
 
-`config.json` is loaded automatically on startup. CLI flags are still supported,
-but only explicitly provided flags override the file.
-
-## Runtime Behavior
-
-Use `review_only` when you want the agent to read and analyze code without
-running the configured verification command.
-
-```json
-{
-  "review_only": true
-}
-```
-
-The same switch is available on the CLI:
-
-```bash
-python3 main.py "review the payment flow" --repo /path/to/repo --review-only
-```
-
-When `review_only` is enabled, the agent skips `run_tests`; `verify_command`
-can be omitted and the default `pytest` will not be executed.
+`config.json` is loaded automatically on startup. If the configured file does
+not exist, the CLI creates a default template first and then loads it. CLI flags
+are still supported, but only explicitly provided flags override the file.
 
 ## LLM Rules
 
 `llm` at the root is only the default LLM config. It does not mean every LLM
 module is enabled.
+
+Whether the agent should run `verify_command` is not a config switch. When
+`modes.task_analyzer` is `llm`, the task analyzer returns
+`verification_required`; the action policy only offers `run_tests` when that
+LLM decision is true. If task analysis is disabled, verification defaults to
+required.
 
 Each module is enabled by `modes`. If a mode is `disabled`, that module will not
 call the LLM even when the root `llm` provider/model/key are configured.

@@ -17,7 +17,6 @@ class ActionSpace:
         self.action_names = list(
             action_names
             or [
-                "list_files",
                 "search_code_context",
                 "read_file",
                 "run_tests",
@@ -32,33 +31,34 @@ class ActionSpace:
             return [ActionSpec("finish", "Finish terminal task.")]
 
         specs: list[ActionSpec] = []
+        available = self._available_action_names(state)
         called = [call.get("name") for call in state.get("tool_calls", [])]
         candidate_files = state.get("candidate_files") or []
         unread = [path for path in candidate_files if path not in self._read_files(state)]
-        review_only = bool(state.get("review_only"))
+        verification_required = bool(state.get("verification_required", True))
 
         # 根据动作名称列表补充 action spec
-        if "list_files" in self.action_names and "list_files" not in called:
+        if "list_files" in available and "list_files" not in called:
             specs.append(ActionSpec("list_files", "List repository files."))
 
-        if "search_code_context" in self.action_names and not state.get("code_context"):
+        if "search_code_context" in available and not state.get("code_context"):
             specs.append(ActionSpec("search_code_context", "Search structured code context."))
 
-        if "read_file" in self.action_names and unread:
+        if "read_file" in available and unread:
             specs.append(ActionSpec("read_file", "Read the next unread candidate file."))
 
-        if "run_tests" in self.action_names and not review_only and not state.get("test_results"):
+        if "run_tests" in available and verification_required and not state.get("test_results"):
             specs.append(ActionSpec("run_tests", "Run verification command."))
 
         if (
-            "git_diff" in self.action_names
-            and (review_only or state.get("test_results"))
+            "git_diff" in available
+            and (not verification_required or state.get("test_results"))
             and state.get("patch_summary") is None
         ):
             specs.append(ActionSpec("git_diff", "Inspect current git diff."))
 
         if (
-            "write_memory" in self.action_names
+            "write_memory" in available
             and state.get("patch_summary") is not None
             and not state.get("memory_written")
         ):
@@ -125,3 +125,14 @@ class ActionSpace:
             or bool(state.get("error"))
             or int(state.get("loop_count", 0)) >= int(state.get("max_loops", 8)) - 1
         )
+
+    def _available_action_names(self, state: AgentState) -> set[str]:
+        """
+            从快照加载需要的工具
+        """
+        registry = state.get("registry_snapshot") or {}
+        registered_tools = set(registry.get("tools") or [])
+        if not registered_tools:
+            return set(self.action_names)
+        internal_actions = {"finish", "write_memory"}
+        return set(self.action_names).intersection(registered_tools | internal_actions)

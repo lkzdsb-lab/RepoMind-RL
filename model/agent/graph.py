@@ -39,6 +39,8 @@ class AgentState(TypedDict, total=False):
     registry_snapshot: Dict[str, List[str]]
     # 引入 skill
     task_category: str
+    verification_required: bool
+    verification_reason: str
     task_analysis: Dict[str, Any]
     selected_skills: list[str]
     skill_selection: Dict[str, Any]
@@ -46,7 +48,6 @@ class AgentState(TypedDict, total=False):
 
     repo_path: str # 仓库路径
     branch: str # 仓库分支
-    review_only: bool # 只做代码审查，不运行验证命令
     verify_command: str # 权限认证相关命令
 
     plan: List[str] # llm 给的 plan

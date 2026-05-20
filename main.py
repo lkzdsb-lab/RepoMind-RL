@@ -12,6 +12,7 @@ from config import (
     DebugAgentConfig,
     LLMConfig,
     debug_agent_config_from_dict,
+    ensure_default_config_file,
     load_config_payload,
     load_env_file,
     normalize_project_runtime_paths,
@@ -38,11 +39,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--description", default="", help="Detailed issue description.")
     parser.add_argument("--repo", default=".", help="Target repository path.")
     parser.add_argument("--verify", default="pytest", help="Verification command.")
-    parser.add_argument(
-        "--review-only",
-        action="store_true",
-        help="Analyze and review code without running the verification command.",
-    )
     parser.add_argument("--max-loops", type=int, default=8, help="Maximum agent action loops.")
     parser.add_argument("--env-file", default=".env", help="Local env file containing secrets.")
     parser.add_argument(
@@ -365,6 +361,8 @@ def main() -> None:
     provided = set(getattr(args, "_provided_dests", set()))
     config_path_provided = "config" in provided
     try:
+        if not args.no_config:
+            ensure_default_config_file(args.config)
         config_payload = (
             {}
             if args.no_config
@@ -419,12 +417,11 @@ def main() -> None:
     )
 
     logger.info(
-        "starting agent cli repo_path={} issue={} config_path={} config_loaded={} review_only={} planner_mode={} context_compressor_mode={} action_policy_mode={} task_analyzer_mode={} observer_mode={} memory_query_mode={} memory_reranker_mode={} code_context_query_mode={} code_context_reranker_mode={} skill_selector_mode={} final_reporter_mode={} rl_enabled={}",
+        "starting agent cli repo_path={} issue={} config_path={} config_loaded={} planner_mode={} context_compressor_mode={} action_policy_mode={} task_analyzer_mode={} observer_mode={} memory_query_mode={} memory_reranker_mode={} code_context_query_mode={} code_context_reranker_mode={} skill_selector_mode={} final_reporter_mode={} rl_enabled={}",
         repo_path.as_posix(),
         issue,
         None if args.no_config else args.config,
         bool(config_payload),
-        config.review_only,
         config.planner_mode,
         config.context_compressor_mode,
         config.action_policy_mode,
@@ -463,7 +460,8 @@ def main() -> None:
         "code_context_reranker_mode": config.code_context_reranker_mode,
         "skill_selector_mode": config.skill_selector_mode,
         "final_reporter_mode": config.final_reporter_mode,
-        "review_only": config.review_only,
+        "verification_required": state.get("verification_required", True),
+        "verification_reason": state.get("verification_reason", ""),
         "final_report": state.get("final_report", {}),
         "memory_query_plan": state.get("memory_query_plan", {}),
         "code_context_query_plan": state.get("code_context_query_plan", {}),
@@ -490,7 +488,6 @@ def _apply_cli_overrides(
     field_overrides = {
         "repo": "repo_path",
         "verify": "verify_command",
-        "review_only": "review_only",
         "max_loops": "max_loops",
         "env_file": "env_file",
         "env_override": "env_override",
@@ -531,8 +528,6 @@ def _apply_cli_overrides(
 
     if "disable_context_compression" in provided:
         config.context_compression_enabled = False
-    if "review_only" in provided:
-        config.review_only = True
     if "rl_enabled" in provided:
         config.rl_enabled = True
     if "log_json" in provided:

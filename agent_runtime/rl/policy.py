@@ -30,10 +30,9 @@ class QLearningDebugPolicy:
 
     def make_initial_plan(self, state: AgentState) -> list[str]:
         verify_command = state.get("verify_command") or "pytest"
-        review_only = bool(state.get("review_only"))
         verification_step = (
-            "跳过验证命令（review-only）"
-            if review_only
+            "跳过验证命令（LLM 判定本任务不需要命令验证）"
+            if not _verification_required(state)
             else f"验证命令：{verify_command}"
         )
         return [
@@ -99,3 +98,7 @@ class QLearningDebugPolicy:
                 f"state={encoded.key}"
             ),
         )
+
+
+def _verification_required(state: AgentState) -> bool:
+    return bool(state.get("verification_required", True))
