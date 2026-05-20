@@ -10,6 +10,8 @@ def run_command(repo_path: str, command: str = "pytest", timeout: int = 120) -> 
             cwd=repo_path,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
 

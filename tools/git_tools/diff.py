@@ -8,6 +8,8 @@ def git_diff(repo_path: str) -> Dict[str, Any]:
         cwd=repo_path,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=20,
     )
 

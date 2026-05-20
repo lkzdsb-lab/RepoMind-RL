@@ -1,7 +1,7 @@
 """Memory schemas for layered, reward-gated agent memory."""
 
 from __future__ import annotations
-
+from utils import utc_now
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Literal
@@ -26,7 +26,7 @@ class MemoryCard:
     evidence: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     reward_credit: float = 0.0
-    """ 得分，影响后续能否晋升 """
+    """ 得分，影响后续能否晋升? """
     reuse_success: int = 0
     reuse_failure: int = 0
     conflict_score: float = 0.0
@@ -65,7 +65,7 @@ class MemoryCard:
 
     def promotion_score(self) -> float:
         """
-        计算当前卡片的 推荐值
+        计算当前卡片�? 推荐�?
         """
         reuse_score = 0.15 * self.reuse_success - 0.25 * self.reuse_failure
         age_penalty = min(max(self.conflict_score, 0.0), 1.0)

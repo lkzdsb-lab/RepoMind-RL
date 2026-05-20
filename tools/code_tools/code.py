@@ -17,6 +17,8 @@ def search_code(repo_path: str, query: str, max_results: int = 30) -> Dict[str, 
             cwd=repo_path,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=20,
         )
 
