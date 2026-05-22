@@ -1,4 +1,6 @@
 .repomind/
 __pycache__/
 *.py[cod]
-
+/config.json
+/.env
+/.env.local

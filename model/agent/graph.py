@@ -39,10 +39,15 @@ class AgentState(TypedDict, total=False):
     registry_snapshot: Dict[str, List[str]]
     # 引入 skill
     task_category: str
+    verification_required: bool
+    verification_reason: str
+    task_analysis: Dict[str, Any]
     selected_skills: list[str]
+    skill_selection: Dict[str, Any]
     skill_context: list[dict]
 
     repo_path: str # 仓库路径
+    project_profile: Dict[str, Any] # 项目语言和文件概况
     branch: str # 仓库分支
     verify_command: str # 权限认证相关命令
 
@@ -51,13 +56,27 @@ class AgentState(TypedDict, total=False):
 
     candidate_files: List[str] # llm 想要调用的 files
     code_context: Dict[str, Any]
+    selected_code_context: Dict[str, Any]
+    code_context_query_plan: Dict[str, Any]
+    code_context_rerank: Dict[str, Any]
     observations: List[Dict[str, Any]] # 执行流程记录
+    llm_observations: List[Dict[str, Any]]
     tool_calls: List[ToolCall] # llm 使用过的 tools
     test_results: List[TestResult]
     trajectory: List[TrajectoryStep] # 整个任务的结果集
 
+    # 需要用户补充信息时的暂停/恢复状态
+    completion_judgement: Dict[str, Any]
+    pending_user_questions: List[str]
+    needs_user_input_reason: str
+    completion_judge_continue_count: int
+    user_inputs: List[Dict[str, Any]]
+
     # 查询过的记忆记录
-    retrieved_memories: List[Dict[str, Any]]
+    retrieved_memories: Dict[str, Any]
+    selected_memories: Dict[str, Any]
+    memory_query_plan: Dict[str, Any]
+    memory_rerank: Dict[str, Any]
     memory_context: str
 
     # 上下文压缩
@@ -75,9 +94,11 @@ class AgentState(TypedDict, total=False):
     rl_enabled: bool
     rl_transitions: List[Dict[str, Any]]
     rl_last_reward: Dict[str, Any]
+    llm_guard_events: List[Dict[str, Any]]
 
     patch: Optional[str] # 修改文件的块
     patch_summary: Optional[str]
+    final_report: Dict[str, Any]
 
     next_action: Optional[str] # 下一个步骤
     next_action_input: Optional[Dict[str, Any]]
@@ -91,6 +112,7 @@ class AgentState(TypedDict, total=False):
         "need_more_context",
         "patching",
         "testing",
+        "awaiting_user_input",
         "finished",
         "failed",
     ]
