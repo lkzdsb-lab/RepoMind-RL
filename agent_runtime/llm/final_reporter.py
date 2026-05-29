@@ -12,6 +12,7 @@ from config import LLMConfig
 from model.agent.graph import AgentState
 from model.llm import FinalReportResponse
 from prompts.templates import load_prompt, render_prompt
+from utils import _clean_string_list
 
 
 class FinalReporter(Protocol):
@@ -30,14 +31,21 @@ class RuleBasedFinalReporter:
             if isinstance(call, dict) and call.get("name")
         ]
         work_done = _work_done_from_tools(tool_names)
-        candidate_files = _clean_list(state.get("candidate_files"), 12, 260)
+        candidate_files = _clean_string_list(state.get("candidate_files"), 12, 260)
         test_results = _test_result_summaries(state)
-        has_patch = bool(state.get("patch"))
+        verification_commands = _verification_command_summaries(state)
+        edited_files = _clean_string_list(state.get("edited_files"), 12, 260)
+        has_patch = bool(
+            state.get("patch")
+            or state.get("edited_files")
+            or state.get("last_change_summary")
+        )
         patch_status = _patch_status(state)
         next_steps = _next_steps(state, has_patch)
         summary_parts = [
             f"任务状态：{state.get('status', 'unknown')}",
             f"候选文件：{len(candidate_files)} 个",
+            f"已编辑文件：{len(edited_files)} 个",
             "有 patch" if has_patch else "没有 patch",
         ]
         if not _verification_required(state):
@@ -46,11 +54,19 @@ class RuleBasedFinalReporter:
             summary_parts.append(f"验证结果：{test_results[-1]}")
         else:
             summary_parts.append("验证未运行")
+        if state.get("verification_stale"):
+            summary_parts.append("最新修改尚未通过验证")
+        llm_errors = state.get("llm_errors")
+        if isinstance(llm_errors, list) and llm_errors:
+            latest_error = llm_errors[-1] if isinstance(llm_errors[-1], dict) else {}
+            category = str(latest_error.get("category") or "unknown")
+            summary_parts.append(f"LLM 调用异常：{category}")
         return {
             "summary": "；".join(summary_parts) + "。",
             "work_done": work_done,
             "candidate_files": candidate_files,
             "test_results": test_results,
+            "verification_commands": verification_commands,
             "has_patch": has_patch,
             "patch_status": patch_status,
             "next_steps": next_steps,
@@ -91,12 +107,37 @@ def _final_report_prompt(state: AgentState, context: dict[str, Any]) -> str:
         error=state.get("error", ""),
         verification_required=json.dumps(_verification_required(state)),
         verification_reason=state.get("verification_reason", ""),
+        verification_stale=json.dumps(bool(state.get("verification_stale", False))),
+        verification_commands=json.dumps(
+            _verification_command_summaries(state),
+            ensure_ascii=False,
+        ),
+        command_results=json.dumps(
+            _command_result_summaries(state),
+            ensure_ascii=False,
+        ),
+        plan_mode=json.dumps(bool(state.get("plan_mode", False))),
+        plan_mode_approved=json.dumps(bool(state.get("plan_mode_approved", False))),
+        debug_technical_plan=state.get("debug_technical_plan", ""),
+        plan_mode_evaluation=state.get("plan_mode_evaluation", ""),
         plan=json.dumps(state.get("plan", []), ensure_ascii=False),
         candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),
         read_files=json.dumps(read_file_summaries(state), ensure_ascii=False, default=str),
         test_results=json.dumps(_test_result_summaries(state), ensure_ascii=False),
+        edit_results=json.dumps(state.get("edit_results", [])[-5:], ensure_ascii=False, default=str),
+        change_summaries=json.dumps(
+            state.get("change_summaries", [])[-5:],
+            ensure_ascii=False,
+            default=str,
+        ),
         patch_summary=state.get("patch_summary") or "",
-        has_patch=json.dumps(bool(state.get("patch"))),
+        has_patch=json.dumps(
+            bool(
+                state.get("patch")
+                or state.get("edited_files")
+                or state.get("last_change_summary")
+            )
+        ),
         tool_calls=json.dumps(tool_call_summaries(state), ensure_ascii=False, default=str),
         llm_observations=json.dumps(
             _trim_observations(state.get("llm_observations", [])),
@@ -118,22 +159,35 @@ def _normalize_final_report(
         fallback = RuleBasedFinalReporter().report(state)
     return {
         "summary": str(data.get("summary") or fallback.get("summary") or "").strip()[:1000],
-        "work_done": _clean_list(data.get("work_done") or fallback.get("work_done"), 8, 280),
-        "candidate_files": _clean_list(state.get("candidate_files"), 12, 260),
-        "test_results": _clean_list(data.get("test_results") or fallback.get("test_results"), 8, 320),
-        "has_patch": bool(state.get("patch")),
+        "work_done": _clean_string_list(data.get("work_done") or fallback.get("work_done"), 8, 280),
+        "candidate_files": _clean_string_list(state.get("candidate_files"), 12, 260),
+        "test_results": _clean_string_list(data.get("test_results") or fallback.get("test_results"), 8, 320),
+        "has_patch": bool(
+            state.get("patch")
+            or state.get("edited_files")
+            or state.get("last_change_summary")
+        ),
         "patch_status": str(data.get("patch_status") or fallback.get("patch_status") or "").strip()[:500],
-        "next_steps": _clean_list(data.get("next_steps") or fallback.get("next_steps"), 8, 280),
+        "next_steps": _clean_string_list(data.get("next_steps") or fallback.get("next_steps"), 8, 280),
     }
 
 
 def _work_done_from_tools(tool_names: list[str]) -> list[str]:
+    """
+        整理工具调用记录
+    """
     labels = {
         "list_files": "读取仓库文件结构",
         "search_code": "搜索相关代码",
         "search_code_context": "搜索结构化代码上下文",
+        "search_text": "使用文本搜索定位代码",
         "read_file": "阅读候选文件",
+        "EnterPlanMode": "进入 Plan Mode 并记录技术方案",
+        "ExitPlanMode": "评估方案并退出 Plan Mode",
+        "apply_code_patch": "应用受限代码修改",
+        "request_user_input": "向用户询问缺失信息",
         "run_tests": "处理验证命令",
+        "run_shell_command": "执行受限终端命令",
         "git_diff": "检查工作区 diff",
         "write_memory": "写入任务记忆",
     }
@@ -163,15 +217,54 @@ def _test_result_summaries(state: AgentState) -> list[str]:
     return results
 
 
+def _verification_command_summaries(state: AgentState) -> list[str]:
+    """
+        收集校验命令的结果集合
+    """
+    results: list[str] = []
+    for item in state.get("verification_commands", [])[-5:]:
+        if not isinstance(item, dict):
+            continue
+        command = str(item.get("command") or "").strip()
+        exit_code = item.get("exit_code")
+        label = "passed" if exit_code == 0 else "failed"
+        results.append(f"{command or 'verification command'} {label} with exit_code={exit_code}")
+    return results
+
+
+def _command_result_summaries(state: AgentState) -> list[str]:
+    """
+        收集命令行执行的结果
+    """
+    results: list[str] = []
+    for item in state.get("command_results", [])[-5:]:
+        if not isinstance(item, dict):
+            continue
+        command = str(item.get("command") or "").strip()
+        purpose = str(item.get("purpose") or "diagnostic")
+        exit_code = item.get("exit_code")
+        results.append(f"{purpose}: {command} exit_code={exit_code}")
+    return results
+
+
 def _patch_status(state: AgentState) -> str:
+    """
+        展示修改前后的状态差异
+    """
     if state.get("patch_summary"):
         return str(state["patch_summary"])
+    last_change = state.get("last_change_summary")
+    if isinstance(last_change, dict) and last_change.get("summary"):
+        return str(last_change["summary"])
     if state.get("patch"):
         return "工作区存在 patch。"
     return "未发现工作区 patch。"
 
 
 def _next_steps(state: AgentState, has_patch: bool) -> list[str]:
+    """
+        根据结果返回给用户注意点
+    """
     if state.get("error"):
         return [f"先处理当前错误：{state.get('error')}"]
     if not _verification_required(state):
@@ -203,21 +296,8 @@ def _trim_observations(observations: Any) -> list[dict[str, Any]]:
                 "latest_tool": item.get("latest_tool"),
                 "status": item.get("status"),
                 "summary": str(item.get("summary") or "")[:500],
-                "new_findings": _clean_list(item.get("new_findings"), 5, 220),
-                "missing_context": _clean_list(item.get("missing_context"), 5, 220),
+                "new_findings": _clean_string_list(item.get("new_findings"), 5, 220),
+                "missing_context": _clean_string_list(item.get("missing_context"), 5, 220),
             }
         )
     return trimmed
-
-
-def _clean_list(value: Any, limit: int, max_chars: int) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    cleaned: list[str] = []
-    for item in value:
-        text = str(item).strip()
-        if text and text not in cleaned:
-            cleaned.append(text[:max_chars])
-        if len(cleaned) >= limit:
-            break
-    return cleaned

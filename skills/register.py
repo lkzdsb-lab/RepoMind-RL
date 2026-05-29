@@ -89,6 +89,30 @@ class SkillRegistry(BaseRegistry):
                 metadata={"priority": 2, "category": "review"},
             ),
             SkillSpec(
+                name="code_edit_workflow",
+                description=(
+                    "Modify repository code using guarded exact-replacement edits, "
+                    "with mandatory user questions for uncertain behavior."
+                ),
+                version="0.1.0",
+                triggers=[
+                    "fix",
+                    "patch",
+                    "modify",
+                    "implement",
+                    "change code",
+                    "edit code",
+                    "apply_code_patch",
+                    "改代码",
+                    "修改",
+                    "修复",
+                    "实现",
+                ],
+                resources=[(skill_root / "code_edit_workflow.md").as_posix()],
+                entrypoints={"workflow": "code_edit_workflow"},
+                metadata={"priority": 2, "category": "editing"},
+            ),
+            SkillSpec(
                 name="memory_consolidation",
                 description=(
                     "Promote useful memories across episodic, semantic, procedural, "

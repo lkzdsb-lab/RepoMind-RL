@@ -8,6 +8,8 @@ layer can evolve independently.
 
 from __future__ import annotations
 
+import json
+import subprocess
 import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -67,10 +69,13 @@ from agent_runtime.skill_selection import DisabledSkillSelector, LLMSkillSelecto
 from agent_runtime.rl.trainer import QTableStore
 from agent_runtime.tool_registry import ToolRegistry
 from agent_runtime.trajectory import TrajectoryRecorder
+from agent_runtime.user_updates import UserUpdateSink, set_user_update_sink
 from model.agent.graph import AgentState, AgentRunResult
 from model.agent.actions import Action
 from config import CompressionConfig, DebugAgentConfig, LLMConfig
 from loguru import logger
+from model.agent.tools import tool_spec_prompt_dict
+from utils import _clean_string_list
 
 
 class DebugAgent:
@@ -98,9 +103,12 @@ class DebugAgent:
         context_manager: ContextCompressionManager | None = None,
         memory_store: JsonlMemoryStore | None = None,
         recorder: TrajectoryRecorder | None = None,
+        user_update_sink: UserUpdateSink | None = None,
     ) -> None:
         configure_from_agent_config(config)
         self.config = config
+        self.user_update_sink = user_update_sink
+        set_user_update_sink(user_update_sink)
         self.rl_enabled = config.rl_enabled
         self.rl_encoder = StateEncoder()
         self.rl_action_space = ActionSpace()
@@ -204,8 +212,54 @@ class DebugAgent:
         return self._run_action_loop(state, started_at)
 
     def resume(self, state: AgentState, user_answer: str = "") -> AgentRunResult:
+        """
+            回顾对话，更新参数
+        """
         started_at = time.perf_counter()
         self._active_registry = self.registry_manager.snapshot()
+        state = {
+            **state,
+            "llm_action_inputs_enabled": _llm_action_inputs_enabled(self.config),
+            "is_git_repo": bool(state.get("is_git_repo", _is_git_repo(self.config.repo_path))),
+            "tool_manifest": _registry_tool_manifest(self._active_registry),
+            "plan_mode": bool(state.get("plan_mode", False)),
+            "plan_mode_entered": bool(state.get("plan_mode_entered", False)),
+            "plan_mode_approved": bool(state.get("plan_mode_approved", False)),
+            "debug_technical_plan": state.get("debug_technical_plan", ""),
+            "plan_mode_evaluation": state.get("plan_mode_evaluation", ""),
+            "plan_mode_events": state.get("plan_mode_events", []),
+            "user_updates": state.get("user_updates", []),
+            "last_user_update": state.get("last_user_update"),
+            "llm_calls": state.get("llm_calls", []),
+            "llm_token_usage": state.get("llm_token_usage", _empty_llm_token_usage()),
+            "llm_errors": state.get("llm_errors", []),
+            "editing_enabled": self.config.editing_enabled,
+            "editing_config": _editing_config_dict(self.config),
+            "edit_results": state.get("edit_results", []),
+            "edited_files": state.get("edited_files", []),
+            "change_summaries": state.get("change_summaries", []),
+            "last_change_summary": state.get("last_change_summary", {}),
+            "command_results": state.get("command_results", []),
+            "verification_commands": state.get("verification_commands", []),
+            "verification_stale": bool(state.get("verification_stale", False)),
+            "last_edit_at_loop": int(state.get("last_edit_at_loop", -1)),
+            "last_verified_edit_loop": int(state.get("last_verified_edit_loop", -1)),
+            "require_step_approval": self.config.require_step_approval,
+            "pending_step_approval": state.get("pending_step_approval", {}),
+            "step_approval_history": state.get("step_approval_history", []),
+        }
+        if user_answer and _has_pending_step_approval(state):
+            state, approved_action = self._handle_step_approval_response(state, user_answer)
+            if approved_action is not None:
+                state, should_stop = self._run_approved_action_once(state, approved_action)
+                if should_stop:
+                    if (
+                        state.get("status") != "awaiting_user_input"
+                        and state.get("current_step") != "finished"
+                    ):
+                        state = self._finalize(state)
+                    return self._finish_run(state, started_at)
+            return self._run_action_loop(state, started_at)
         if user_answer:
             state = self._inject_user_input(state, user_answer)
         else:
@@ -226,11 +280,18 @@ class DebugAgent:
         state: AgentState,
         started_at: float,
     ) -> AgentRunResult:
+        """
+            运行 pipeline
+        """
         run_logger = logger.bind(task_id=state.get("task_id"), repo_path=self.config.repo_path)
         while state.get("loop_count", 0) < state.get("max_loops", self.config.max_loops):
             state = self._prepare_context(state)
             action = self.policy.next_action(state)
             state = self._record_action_selection(state, action)
+
+            if self._requires_step_approval(state, action):
+                state = self._await_step_approval(state, action)
+                break
 
             if action.name == "finish":
                 prev_state = state
@@ -243,24 +304,40 @@ class DebugAgent:
             state = self._execute_action(state, action)
             if state.get("status") == "failed":
                 break
-            state = self._observe(state)
-            if state.get("status") == "failed":
+            if state.get("status") == "awaiting_user_input":
                 break
+            if action.name == "write_memory" and not state.get("error"):
+                state = self._finalize(state)
+                break
+            if self._should_observe_latest_tool(state):
+                state = self._observe(state)
+                if state.get("status") == "failed":
+                    break
 
         else:
-            state = {
-                **state,
-                "status": "failed",
-                "error": "Reached max_loops before finishing.",
-            }
-            run_logger.warning(
-                "agent run reached max loops max_loops={} tool_calls={}",
-                self.config.max_loops,
-                len(state.get("tool_calls", [])),
-            )
+            if _can_finalize_at_loop_limit(state):
+                run_logger.warning(
+                    "agent run reached max loops but state is finalizable max_loops={} tool_calls={}",
+                    self.config.max_loops,
+                    len(state.get("tool_calls", [])),
+                )
+            else:
+                state = {
+                    **state,
+                    "status": "failed",
+                    "error": "Reached max_loops before finishing.",
+                }
+                run_logger.warning(
+                    "agent run reached max loops max_loops={} tool_calls={}",
+                    self.config.max_loops,
+                    len(state.get("tool_calls", [])),
+                )
         if state.get("status") != "awaiting_user_input" and state.get("current_step") != "finished":
             state = self._finalize(state)
 
+        return self._finish_run(state, started_at)
+
+    def _finish_run(self, state: AgentState, started_at: float) -> AgentRunResult:
         trace_path = self.recorder.save(state, self.config.trace_dir)
         logger.bind(task_id=state.get("task_id")).info(
             "agent run finished status={} loops={} tool_calls={} trace_path={} elapsed_ms={:.1f}",
@@ -286,7 +363,9 @@ class DebugAgent:
                 "prompts": registry.names("prompts"),
                 "skills": registry.names("skills"),
             },
+            tool_manifest=_registry_tool_manifest(registry),
             repo_path=self.config.repo_path,
+            is_git_repo=_is_git_repo(self.config.repo_path),
             project_profile=project_profile,
             branch="",
             verification_required=True,
@@ -302,8 +381,18 @@ class DebugAgent:
             code_context_rerank={},
             observations=[],
             llm_observations=[],
+            llm_calls=[],
+            llm_token_usage=_empty_llm_token_usage(),
+            llm_errors=[],
+            user_updates=[],
+            last_user_update=None,
             tool_calls=[],
             test_results=[],
+            command_results=[],
+            verification_commands=[],
+            verification_stale=False,
+            last_edit_at_loop=-1,
+            last_verified_edit_loop=-1,
             trajectory=[],
             completion_judgement={},
             pending_user_questions=[],
@@ -328,6 +417,22 @@ class DebugAgent:
             rl_transitions=[],
             rl_last_reward={},
             llm_guard_events=[],
+            llm_action_inputs_enabled=_llm_action_inputs_enabled(self.config),
+            plan_mode=False,
+            plan_mode_entered=False,
+            plan_mode_approved=False,
+            debug_technical_plan="",
+            plan_mode_evaluation="",
+            plan_mode_events=[],
+            editing_enabled=self.config.editing_enabled,
+            editing_config=_editing_config_dict(self.config),
+            edit_results=[],
+            edited_files=[],
+            change_summaries=[],
+            last_change_summary={},
+            require_step_approval=self.config.require_step_approval,
+            pending_step_approval={},
+            step_approval_history=[],
             patch=None,
             patch_summary=None,
             final_report={},
@@ -604,7 +709,7 @@ class DebugAgent:
 
     def _execute_action(self, state: AgentState, action: Action) -> AgentState:
         """
-            执行
+            执行 action
         """
         action_logger = logger.bind(task_id=state.get("task_id"), action=action.name)
         started_at = time.perf_counter()
@@ -618,16 +723,49 @@ class DebugAgent:
                 }
             elif action.name == "write_memory":
                 output = self._write_memory(state)
+            elif action.name == "request_user_input":
+                questions = _clean_string_list(
+                    action.args.get("questions"), limit=3, max_chars=300
+                )
+                reason = str(action.args.get("reason") or "").strip()
+                if questions:
+                    output = {
+                        "needs_user_input": True,
+                        "reason": reason,
+                        "questions": questions,
+                    }
+                else:
+                    output = {
+                        "needs_user_input": False,
+                        "needs_more_context": True,
+                        "skipped": True,
+                        "reason": reason,
+                        "questions": [],
+                        "message": (
+                            "request_user_input skipped because no concrete "
+                            "questions were provided."
+                        ),
+                    }
             elif action.name == "search_code_context":
                 output = self._search_code_context(state, action)
+            elif self._is_blocked_by_plan_mode(state, action):
+                output = {
+                    "error": "Code-changing actions require an approved plan. Call EnterPlanMode, then ExitPlanMode after the plan is evaluated.",
+                    "needs_more_context": True,
+                    "plan_mode": state.get("plan_mode"),
+                    "plan_mode_approved": state.get("plan_mode_approved"),
+                }
             else:
                 action_args = dict(action.args)
                 if action.name == "build_codebase_context":
                     action_args.setdefault("index_path", self.config.code_context_index_path)
+                if action.name == "apply_code_patch":
+                    action_args["_guard"] = self._edit_guard(state)
                 output = self._registry().run_tool(
                     action.name,
                     self.config.repo_path,
                     action_args,
+                    allowed_permissions=self._allowed_tool_permissions(),
                 )
         except Exception as exc:
             action_logger.exception("action execution raised exception")
@@ -654,7 +792,7 @@ class DebugAgent:
             "loop_count": state.get("loop_count", 0) + 1,
         }
         state = self._record_rl_transition(prev_state, action, state, output, done=False)
-        return self.recorder.append(
+        state = self.recorder.append(
             state,
             node="execute_action",
             thought=f"执行动作：{action.name}",
@@ -662,6 +800,171 @@ class DebugAgent:
             action_input=action.args,
             observation=output,
         )
+        if output.get("needs_user_input"):
+            state = self._await_user_input(state, output)
+        return state
+
+    def _requires_step_approval(self, state: AgentState, action: Action) -> bool:
+        if not bool(self.config.require_step_approval):
+            return False
+        if not bool(state.get("require_step_approval", self.config.require_step_approval)):
+            return False
+        if _has_pending_step_approval(state):
+            return False
+        return action.name != "request_user_input"
+
+    def _await_step_approval(self, state: AgentState, action: Action) -> AgentState:
+        pending = {
+            "action": action.name,
+            "args": dict(action.args),
+            "thought": action.thought,
+            "metadata": dict(action.metadata),
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+            "loop_count": state.get("loop_count", 0),
+        }
+        question = (
+            f"是否批准执行下一步 `{action.name}`？回复 `approve`/`yes`/`同意` 执行；"
+            "输入其他内容会作为补充说明写回上下文并重新规划。"
+        )
+        reason = _render_step_approval_reason(action)
+        state = {
+            **state,
+            "status": "awaiting_user_input",
+            "current_step": "awaiting_step_approval",
+            "pending_user_questions": [question],
+            "needs_user_input_reason": reason,
+            "pending_step_approval": pending,
+        }
+        logger.bind(task_id=state.get("task_id"), action=action.name).info(
+            "agent awaiting step approval"
+        )
+        return self.recorder.append(
+            state,
+            node="await_step_approval",
+            thought="等待用户批准下一步 action。",
+            action=action.name,
+            action_input=action.args,
+            observation={
+                "reason": reason,
+                "questions": [question],
+                "pending_step_approval": pending,
+            },
+        )
+
+    def _handle_step_approval_response(
+        self,
+        state: AgentState,
+        answer: str,
+    ) -> tuple[AgentState, Action | None]:
+        """
+            如果 step_approvel_response == true
+        """
+        pending = state.get("pending_step_approval")
+        if not isinstance(pending, dict) or not pending.get("action"):
+            return self._inject_user_input(state, answer), None
+
+        # 1. 获取用户反馈以及断电前的上下文
+        approved = _approval_answer_is_approved(answer)
+        state = _record_step_approval_response(state, answer, approved)
+        if approved:
+            action = _action_from_pending_step_approval(pending)
+            state = {
+                **state,
+                "status": "running",
+                "current_step": "step_approval_approved",
+                "pending_user_questions": [],
+                "needs_user_input_reason": "",
+                "pending_step_approval": {},
+                "error": None,
+            }
+            logger.bind(task_id=state.get("task_id"), action=action.name).info(
+                "step approval granted"
+            )
+            return self.recorder.append(
+                state,
+                node="step_approval_approved",
+                thought="用户批准执行下一步 action。",
+                action=action.name,
+                action_input=action.args,
+                observation={"approved": True, "answer": str(answer or "").strip()},
+            ), action
+
+        # 2. 如果用户输入了附加的 feature，则注入到 state 中
+        state = self._inject_user_input(state, answer)
+        state = {
+            **state,
+            "pending_step_approval": {},
+            "current_step": "step_approval_feedback_received",
+        }
+        logger.bind(task_id=state.get("task_id"), action=pending.get("action")).info(
+            "step approval not granted; treating response as user feedback"
+        )
+        return self.recorder.append(
+            state,
+            node="step_approval_feedback",
+            thought="用户未批准下一步，反馈已写回上下文。",
+            action=str(pending.get("action") or ""),
+            action_input=pending.get("args") if isinstance(pending.get("args"), dict) else {},
+            observation={"approved": False, "answer": str(answer or "").strip()},
+        ), None
+
+    def _run_approved_action_once(
+        self,
+        state: AgentState,
+        action: Action,
+    ) -> tuple[AgentState, bool]:
+        if action.name == "finish":
+            prev_state = state
+            state, should_stop, done, output = self._handle_finish_action(state)
+            state = self._record_rl_transition(prev_state, action, state, output, done=done)
+            return state, should_stop
+
+        state = self._execute_action(state, action)
+        if state.get("status") in {"failed", "awaiting_user_input"}:
+            return state, True
+        if action.name == "write_memory" and not state.get("error"):
+            return self._finalize(state), True
+        if self._should_observe_latest_tool(state):
+            state = self._observe(state)
+            if state.get("status") == "failed":
+                return state, True
+        return state, False
+
+    def _edit_guard(self, state: AgentState) -> dict[str, Any]:
+        """
+            获取 llm calls 操作过的所有文件后的回复
+        """
+        read_contents: dict[str, str] = {}
+        for call in state.get("tool_calls", []):
+            if not isinstance(call, dict) or call.get("name") != "read_file":
+                continue
+            output = call.get("output")
+            if not isinstance(output, dict) or output.get("error"):
+                continue
+            file_path = str(output.get("file_path") or "").strip()
+            content = output.get("content")
+            if file_path and isinstance(content, str):
+                read_contents[file_path] = content
+        return {
+            "editing_enabled": self.config.editing_enabled,
+            "allowed_files": sorted(read_contents),
+            "read_contents": read_contents,
+            "max_files": self.config.editing_max_files,
+            "max_changed_lines": self.config.editing_max_changed_lines,
+            "max_file_bytes": self.config.editing_max_file_bytes,
+            "require_read_before_write": self.config.editing_require_read_before_write,
+            "confidence_threshold": self.config.editing_confidence_threshold,
+            "allow_create": self.config.editing_allow_create,
+        }
+
+    def _allowed_tool_permissions(self) -> list[str]:
+        """
+            限制 llm action
+        """
+        permissions = {"repo:read", "repo:command", "agent:plan"}
+        if self.config.editing_enabled:
+            permissions.add("repo:write")
+        return sorted(permissions)
 
     def _search_code_context(self, state: AgentState, action: Action) -> Dict[str, Any]:
         action_args = dict(action.args)
@@ -685,6 +988,7 @@ class DebugAgent:
                     action.name,
                     self.config.repo_path,
                     query_args,
+                    allowed_permissions=self._allowed_tool_permissions(),
                 )
             )
 
@@ -763,13 +1067,21 @@ class DebugAgent:
         ]
 
         if output.get("error"):
-            updates["error"] = output["error"]
+            if output.get("needs_more_context"):
+                updates["status"] = "need_more_context"
+            else:
+                updates["error"] = output["error"]
             if output.get("fatal"):
                 updates["status"] = "failed"
             logger.bind(task_id=state.get("task_id"), action=action.name).warning(
                 "tool output contains error error={}",
                 output["error"],
             )
+        elif _tool_output_is_success(output):
+            if state.get("error"):
+                updates["error"] = None
+            if state.get("status") == "need_more_context" and "status" not in updates:
+                updates["status"] = "running"
 
         new_state = {
             **state,
@@ -897,6 +1209,9 @@ class DebugAgent:
         if tool_name == "search_code":
             matches = output.get("matches", [])
             return f"{tool_name} returned {len(matches)} matches."
+        if tool_name == "search_text":
+            matches = output.get("matches", [])
+            return f"{tool_name} pattern={output.get('pattern')} matches={len(matches)}."
         if tool_name == "search_code_context":
             return (
                 f"{tool_name} returned {len(output.get('files', []))} files, "
@@ -909,24 +1224,126 @@ class DebugAgent:
             if output.get("skipped"):
                 return f"{tool_name} skipped reason={output.get('reason')}"
             return f"{tool_name} exit_code={output.get('exit_code')} command={output.get('command')}"
+        if tool_name == "run_shell_command":
+            return (
+                f"{tool_name} purpose={output.get('purpose')} "
+                f"exit_code={output.get('exit_code')} command={output.get('command')}"
+            )
+        if tool_name == "apply_code_patch":
+            return (
+                f"{tool_name} applied={output.get('applied')} "
+                f"files={output.get('changed_files', [])} "
+                f"changed_lines={output.get('changed_line_count', 0)}"
+            )
+        if tool_name == "request_user_input":
+            return f"{tool_name} questions={output.get('questions', [])}"
+        if tool_name == "EnterPlanMode":
+            return f"{tool_name} entered={output.get('entered')} plan_chars={len(str(output.get('technical_plan') or ''))}"
+        if tool_name == "ExitPlanMode":
+            return f"{tool_name} exited={output.get('exited')} approved={output.get('approved')}"
         if tool_name == "git_diff":
+            if output.get("skipped"):
+                return f"{tool_name} skipped reason={output.get('reason')}"
             diff = output.get("diff", "")
             return f"{tool_name} returned {len(diff.splitlines())} diff lines."
         return f"{tool_name} output keys: {', '.join(sorted(output.keys()))}"
+
+    def _should_observe_latest_tool(self, state: AgentState) -> bool:
+        mode = (self.config.observer_mode or "").strip().lower()
+        if mode == "disabled":
+            return False
+        calls = state.get("tool_calls") or []
+        if not calls:
+            return False
+        latest = calls[-1]
+        if not isinstance(latest, dict):
+            return False
+        output = latest.get("output")
+        if not isinstance(output, dict):
+            return False
+        tool_name = str(latest.get("name") or "")
+
+        if output.get("needs_user_input"):
+            return False
+        if output.get("fatal"):
+            return True
+        if output.get("error"):
+            return not bool(output.get("unsupported") or output.get("skipped"))
+        if output.get("needs_more_context"):
+            return True
+        if tool_name in {"run_shell_command", "run_tests"}:
+            return output.get("exit_code") not in (None, 0)
+        if tool_name == "search_code_context":
+            return _code_context_candidate_count(output) == 0
+        if tool_name == "search_text":
+            return not output.get("matches")
+        return False
 
     def _handle_finish_action(
         self,
         state: AgentState,
     ) -> tuple[AgentState, bool, bool, Dict[str, Any]]:
         """
-            处理终止状态，由 llm 判断是否结束，并且进行 loop 限制
+            处理终止状态，由 llm 判断是否结束并总结，并且进行 loop 限制
         """
+        if state.get("plan_mode"):
+            judgement = {
+                "decision": "continue",
+                "reason": "Agent is still in Plan Mode and must call ExitPlanMode before finishing.",
+                "questions": [],
+                "suggested_next_action": "ExitPlanMode",
+                "confidence": 1.0,
+                "source": "rule_gate",
+            }
+            output = {"completion_judgement": judgement}
+            state = self._record_completion_judgement(state, judgement)
+            state = {
+                **state,
+                "current_step": "select_action",
+                "completion_judge_continue_count": int(
+                    state.get("completion_judge_continue_count", 0)
+                )
+                + 1,
+                "loop_count": int(state.get("loop_count", 0)) + 1,
+            }
+            return state, False, False, output
+        if _requires_post_edit_verification(state):
+            judgement = {
+                "decision": "continue",
+                "reason": "Code changes have not been verified after the latest edit.",
+                "questions": [],
+                "suggested_next_action": "run_shell_command",
+                "confidence": 1.0,
+                "source": "rule_gate",
+            }
+            output = {"completion_judgement": judgement}
+            state = self._record_completion_judgement(state, judgement)
+            state = {
+                **state,
+                "current_step": "select_action",
+                "completion_judge_continue_count": int(
+                    state.get("completion_judge_continue_count", 0)
+                )
+                + 1,
+                "loop_count": int(state.get("loop_count", 0)) + 1,
+            }
+            return state, False, False, output
         judgement = self.completion_judge.judge(state)
         output = {"completion_judgement": judgement}
         state = self._record_completion_judgement(state, judgement)
         decision = str(judgement.get("decision") or "complete").strip().lower()
         if decision == "needs_user_input":
             state = self._await_user_input(state, judgement)
+            if state.get("status") != "awaiting_user_input":
+                state = {
+                    **state,
+                    "current_step": "select_action",
+                    "completion_judge_continue_count": int(
+                        state.get("completion_judge_continue_count", 0)
+                    )
+                    + 1,
+                }
+                return state, False, False, output
             return state, True, False, output
         if decision == "continue":
             attempts = int(state.get("completion_judge_continue_count", 0)) + 1
@@ -983,7 +1400,27 @@ class DebugAgent:
         questions = _clean_string_list(judgement.get("questions"), limit=3, max_chars=300)
         reason = str(judgement.get("reason") or "").strip()
         if not questions:
-            questions = ["请补充当前任务缺失的具体目标、约束或期望判断标准。"]
+            state = {
+                **state,
+                "status": "need_more_context",
+                "current_step": "select_action",
+                "pending_user_questions": [],
+                "needs_user_input_reason": reason,
+            }
+            logger.bind(task_id=state.get("task_id")).warning(
+                "skipped awaiting user input because no concrete questions were provided reason={}",
+                reason,
+            )
+            return self.recorder.append(
+                state,
+                node="await_user_input_skipped",
+                thought="没有明确问题，跳过用户询问并继续收集上下文。",
+                observation={
+                    "reason": reason,
+                    "questions": [],
+                    "skipped": True,
+                },
+            )
         state = {
             **state,
             "status": "awaiting_user_input",
@@ -1007,6 +1444,9 @@ class DebugAgent:
         )
 
     def _inject_user_input(self, state: AgentState, answer: str) -> AgentState:
+        """
+            将用户附加 feature 注入对话
+        """
         text = str(answer or "").strip()
         pending_questions = _clean_string_list(
             state.get("pending_user_questions"),
@@ -1030,6 +1470,7 @@ class DebugAgent:
         if clarification:
             description = f"{description}\n\n{clarification}".strip()
         loop_count = int(state.get("loop_count", 0))
+        # 这一步是在去除因为用户行为影响整个的 max_loop
         max_loops = max(
             int(state.get("max_loops", self.config.max_loops)),
             loop_count + int(self.config.max_loops),
@@ -1055,8 +1496,13 @@ class DebugAgent:
         )
 
     def _finalize(self, state: AgentState) -> AgentState:
+        """
+            对话结束流程
+        """
         status = "finished" if not state.get("error") else "failed"
         state = {**state, "status": status, "current_step": "finished"}
+        if status == "finished":
+            state = self._write_memory_on_finalize(state)
         if self.rl_enabled:
             terminal = self.rl_reward.terminal_reward(state)
             state = {
@@ -1069,6 +1515,7 @@ class DebugAgent:
             logger.bind(task_id=state.get("task_id")).exception("final report generation failed")
             final_report = RuleBasedFinalReporter().report(state)
             final_report["fallback_reason"] = str(exc)
+        final_report = _attach_runtime_usage_to_report(final_report, state)
         state = {**state, "final_report": final_report}
         logger.bind(task_id=state.get("task_id")).info(
             "finalizing run status={} error={} final_report_source={}",
@@ -1085,13 +1532,63 @@ class DebugAgent:
                 "candidate_files": state.get("candidate_files", []),
                 "patch_summary": state.get("patch_summary"),
                 "final_report": final_report,
+                "llm_token_usage": state.get("llm_token_usage", {}),
+                "llm_errors": state.get("llm_errors", [])[-5:],
             },
         )
+
+    def _write_memory_on_finalize(self, state: AgentState) -> AgentState:
+        if state.get("memory_written") or not _has_meaningful_task_result(state):
+            return state
+        try:
+            output = self._write_memory(state)
+        except Exception as exc:
+            logger.bind(task_id=state.get("task_id")).warning(
+                "finalize memory write failed error={}",
+                exc,
+            )
+            observations = state.get("observations", []) + [
+                {
+                    "type": "memory_write_failed",
+                    "tool": "write_memory",
+                    "content": {"error": str(exc)},
+                }
+            ]
+            return {**state, "observations": observations}
+
+        tool_calls = state.get("tool_calls", []) + [
+            {
+                "name": "write_memory",
+                "input": {"trigger": "finalize"},
+                "output": output,
+                "error": output.get("error") if isinstance(output, dict) else None,
+            }
+        ]
+        observations = state.get("observations", []) + [
+            {
+                "type": "tool_output",
+                "tool": "write_memory",
+                "content": output,
+            }
+        ]
+        return {
+            **state,
+            "memory_written": True,
+            "promoted_memories": output.get("promoted", []) if isinstance(output, dict) else [],
+            "consolidated_skills": output.get("consolidated", []) if isinstance(output, dict) else [],
+            "tool_calls": tool_calls,
+            "observations": observations,
+        }
 
     def _registry(self) -> RegistrySnapshot:
         if self._active_registry is None:
             self._active_registry = self.registry_manager.snapshot()
         return self._active_registry
+
+    def _is_blocked_by_plan_mode(self, state: AgentState, action: Action) -> bool:
+        if action.name != "apply_code_patch":
+            return False
+        return bool(state.get("plan_mode")) or not bool(state.get("plan_mode_approved"))
 
     # 后面都是降级策略，项目完全实现后考虑删除。
     def _default_policy(self):
@@ -1270,6 +1767,48 @@ def _verification_required(state: AgentState) -> bool:
     return bool(state.get("verification_required", True))
 
 
+def _requires_post_edit_verification(state: AgentState) -> bool:
+    if state.get("error"):
+        return False
+    if not state.get("edited_files"):
+        return False
+    return bool(state.get("verification_stale", False))
+
+
+def _has_meaningful_task_result(state: AgentState) -> bool:
+    """
+        判断是否有必要写 memory
+    """
+    return bool(
+        state.get("edited_files")
+        or state.get("patch_summary") is not None
+        or state.get("test_results")
+        or state.get("verification_commands")
+    )
+
+
+def _can_finalize_at_loop_limit(state: AgentState) -> bool:
+    if state.get("error") or state.get("plan_mode"):
+        return False
+    if _requires_post_edit_verification(state):
+        return False
+    return _has_meaningful_task_result(state)
+
+
+def _is_git_repo(repo_path: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=repo_path or ".",
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and result.stdout.strip().lower() == "true"
+
+
 def _code_context_candidate_count(context: Dict[str, Any]) -> int:
     return sum(
         len(items)
@@ -1277,6 +1816,182 @@ def _code_context_candidate_count(context: Dict[str, Any]) -> int:
         for items in [context.get(key, [])]
         if isinstance(items, list)
     )
+
+
+def _tool_output_is_success(output: Dict[str, Any]) -> bool:
+    if output.get("error") or output.get("fatal"):
+        return False
+    if output.get("needs_more_context") or output.get("needs_user_input"):
+        return False
+    if output.get("skipped"):
+        return False
+    if "ok" in output:
+        return bool(output.get("ok"))
+    exit_code = output.get("exit_code")
+    if isinstance(exit_code, int):
+        return exit_code == 0
+    status = str(output.get("status") or "").strip().lower()
+    if status:
+        return status in {"success", "complete", "finished"}
+    return True
+
+
+def _empty_llm_token_usage() -> dict[str, Any]:
+    return {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "request_count": 0,
+        "by_node": {},
+    }
+
+
+def _attach_runtime_usage_to_report(
+    final_report: dict[str, Any],
+    state: AgentState,
+) -> dict[str, Any]:
+    """
+        上报 token usage 等信息
+    """
+    report = dict(final_report or {})
+    usage = state.get("llm_token_usage")
+    if isinstance(usage, dict):
+        report["llm_token_usage"] = usage
+    errors = state.get("llm_errors")
+    if isinstance(errors, list) and errors:
+        report["llm_errors"] = errors[-5:]
+    return report
+
+
+def _has_pending_step_approval(state: AgentState) -> bool:
+    pending = state.get("pending_step_approval")
+    return isinstance(pending, dict) and bool(pending.get("action"))
+
+
+def _approval_answer_is_approved(answer: str) -> bool:
+    """
+        阶段性
+        获取 user 的指令
+    """
+    text = str(answer or "").strip().lower()
+    if not text:
+        return False
+    text = text.strip(" .!！。")
+    approvals = {
+        "approve",
+        "approved",
+        "yes",
+        "y",
+        "ok",
+        "okay",
+        "go",
+        "go ahead",
+        "continue",
+        "run",
+        "execute",
+        "同意",
+        "批准",
+        "确认",
+        "可以",
+        "继续",
+        "执行",
+        "好的",
+        "好",
+        "是",
+        "允许",
+    }
+    if text in approvals:
+        return True
+    prefixes = (
+        "approve",
+        "approved",
+        "yes",
+        "ok",
+        "go ahead",
+        "continue",
+        "run it",
+        "execute",
+        "同意",
+        "批准",
+        "确认",
+        "可以",
+        "继续",
+        "执行",
+    )
+    return text.startswith(prefixes)
+
+
+def _action_from_pending_step_approval(pending: dict[str, Any]) -> Action:
+    args = pending.get("args")
+    metadata = pending.get("metadata")
+    return Action(
+        name=str(pending.get("action") or ""),
+        args=args if isinstance(args, dict) else {},
+        thought=str(pending.get("thought") or ""),
+        metadata=metadata if isinstance(metadata, dict) else {},
+    )
+
+
+def _record_step_approval_response(
+    state: AgentState,
+    answer: str,
+    approved: bool,
+) -> AgentState:
+    pending = state.get("pending_step_approval")
+    if not isinstance(pending, dict):
+        pending = {}
+    item = {
+        "pending_step_approval": pending,
+        "answer": str(answer or "").strip(),
+        "approved": approved,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    history = state.get("step_approval_history")
+    if not isinstance(history, list):
+        history = []
+    observations = state.get("observations", []) + [
+        {
+            "type": "step_approval_response",
+            "content": item,
+        }
+    ]
+    return {
+        **state,
+        "step_approval_history": history + [item],
+        "observations": observations,
+    }
+
+
+def _render_step_approval_reason(action: Action) -> str:
+    args = _compact_action_args(action.args)
+    if args:
+        return f"下一步准备执行 `{action.name}`，参数：{args}"
+    return f"下一步准备执行 `{action.name}`。"
+
+
+def _compact_action_args(args: dict[str, Any], max_chars: int = 800) -> str:
+    if not args:
+        return ""
+    try:
+        text = json.dumps(args, ensure_ascii=False, default=str)
+    except TypeError:
+        text = str(args)
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3] + "..."
+
+
+def _registry_tool_manifest(registry: Any) -> list[dict[str, Any]]:
+    if registry is None:
+        return []
+    names = registry.names("tools") if hasattr(registry, "names") else []
+    manifest: list[dict[str, Any]] = []
+    for name in names:
+        spec = registry.get_tool(name) if hasattr(registry, "get_tool") else None
+        if spec is None:
+            continue
+        manifest.append(tool_spec_prompt_dict(spec))
+    return manifest
 
 
 def _selected_skill_context(
@@ -1414,17 +2129,20 @@ def _build_project_profile(repo_path: str, max_files: int = 3000) -> dict[str, A
     }
 
 
-def _clean_string_list(value: Any, limit: int, max_chars: int) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    cleaned: list[str] = []
-    for item in value:
-        text = str(item).strip()
-        if text and text not in cleaned:
-            cleaned.append(text[:max_chars])
-        if len(cleaned) >= limit:
-            break
-    return cleaned
+def _editing_config_dict(config: DebugAgentConfig) -> dict[str, Any]:
+    return {
+        "enabled": config.editing_enabled,
+        "max_files": config.editing_max_files,
+        "max_changed_lines": config.editing_max_changed_lines,
+        "max_file_bytes": config.editing_max_file_bytes,
+        "require_read_before_write": config.editing_require_read_before_write,
+        "confidence_threshold": config.editing_confidence_threshold,
+        "allow_create": config.editing_allow_create,
+    }
+
+
+def _llm_action_inputs_enabled(config: DebugAgentConfig) -> bool:
+    return (config.action_policy_mode or "").strip().lower() == "llm"
 
 
 def _render_user_clarification(input_item: dict[str, Any]) -> str:

@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 class PlanResponse(BaseModel):
     plan: list[str] = Field(default_factory=list)
+    user_update: str = ""
 
 
 class TaskAnalysisResponse(BaseModel):
@@ -19,6 +20,7 @@ class TaskAnalysisResponse(BaseModel):
     acceptance_criteria: list[str]
     risk_notes: list[str]
     search_hints: list[str]
+    user_update: str = ""
 
 
 class ObservationResponse(BaseModel):
@@ -30,6 +32,7 @@ class ObservationResponse(BaseModel):
     missing_context: list[str] = Field(default_factory=list)
     next_search_terms: list[str] = Field(default_factory=list)
     confidence: float = 0.5
+    user_update: str = ""
 
 
 class FinalReportResponse(BaseModel):
@@ -40,6 +43,7 @@ class FinalReportResponse(BaseModel):
     has_patch: bool = False
     patch_status: str = ""
     next_steps: list[str] = Field(default_factory=list)
+    user_update: str = ""
 
 
 class CompletionJudgeResponse(BaseModel):
@@ -48,11 +52,13 @@ class CompletionJudgeResponse(BaseModel):
     questions: list[str] = Field(default_factory=list)
     suggested_next_action: str = ""
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    user_update: str = ""
 
 
 class MemoryQueryPlanResponse(BaseModel):
     queries: list[str]
     rationale: str = ""
+    user_update: str = ""
 
 
 class MemorySelectionResponse(BaseModel):
@@ -63,11 +69,13 @@ class MemorySelectionResponse(BaseModel):
 
 class MemoryRerankResponse(BaseModel):
     selected: list[MemorySelectionResponse]
+    user_update: str = ""
 
 
 class CodeContextQueryPlanResponse(BaseModel):
     queries: list[str]
     rationale: str = ""
+    user_update: str = ""
 
 
 class CodeContextSelectionResponse(BaseModel):
@@ -79,6 +87,7 @@ class CodeContextSelectionResponse(BaseModel):
 class CodeContextRerankResponse(BaseModel):
     selected: list[CodeContextSelectionResponse]
     rationale: str = ""
+    user_update: str = ""
 
 
 class SkillSelectionResponse(BaseModel):
@@ -90,12 +99,17 @@ class SkillSelectionResponse(BaseModel):
 class SkillSelectorResponse(BaseModel):
     selected: list[SkillSelectionResponse]
     rationale: str = ""
+    user_update: str = ""
 
 
 class ActionChoiceResponse(BaseModel):
     action: str = ""
     candidate_actions: list[str] = Field(default_factory=list)
     reason: str = ""
+    action_input: dict[str, Any] = Field(default_factory=dict)
+    uncertainty_questions: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    user_update: str = ""
 
 
 class ToolResultResponse(BaseModel):
@@ -115,6 +129,7 @@ class ContextCompressionResponse(BaseModel):
     tool_results: list[ToolResultResponse] = Field(default_factory=list)
     code_changes: list[str] = Field(default_factory=list)
     memory_refs: list[str] = Field(default_factory=list)
+    user_update: str = ""
 
 
 @dataclass
@@ -123,6 +138,7 @@ class LLMResponse:
     model: str = ""
     raw: dict = field(default_factory=dict)
     parsed: Any = None
+    usage: dict[str, Any] = field(default_factory=dict)
     """ 后面需要通过 skill 的限制去保证 raw 内部的结构 """
 
 

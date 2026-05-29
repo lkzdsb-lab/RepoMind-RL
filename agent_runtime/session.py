@@ -1,0 +1,160 @@
+"""Conversation session wrapper for the debug agent."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from agent_runtime.executor import DebugAgent
+from model.agent.graph import AgentRunResult, AgentState
+from model.session import ChatResponse
+from utils import  _clean_string_list
+
+
+class AgentSession:
+    """
+        Stateful chat facade over DebugAgent.run/resume.
+        一个对话
+    """
+
+    def __init__(self, agent: DebugAgent) -> None:
+        self.agent = agent
+        self.state: AgentState | None = None
+        self.last_trace_path = ""
+
+    def send(self, message: str) -> ChatResponse:
+        text = str(message or "").strip()
+        if not text:
+            return ChatResponse(type="empty", message="Empty message ignored.")
+
+        if self.state and self.state.get("status") == "awaiting_user_input":
+            result = self.agent.resume(self.state, user_answer=text)
+        else:
+            result = self.agent.run(title=text, description="")
+        return self._record_result(result)
+
+    def load_state(self, state: AgentState, trace_path: str = "") -> ChatResponse:
+        self.state = state
+        self.last_trace_path = trace_path
+        return self._to_response(state, trace_path)
+
+    def reset(self) -> None:
+        self.state = None
+        self.last_trace_path = ""
+
+    def _record_result(self, result: AgentRunResult) -> ChatResponse:
+        self.state = result.state
+        self.last_trace_path = result.trace_path
+        return self._to_response(result.state, result.trace_path)
+
+    def _to_response(self, state: AgentState, trace_path: str) -> ChatResponse:
+        status = state.get("status")
+        if status == "awaiting_user_input":
+            questions = _clean_string_list(state.get("pending_user_questions"), limit=3, max_chars=300)
+            reason = str(state.get("needs_user_input_reason") or "").strip()
+            user_updates = _consume_user_updates(state)
+            return ChatResponse(
+                type="needs_user_input",
+                message="Agent needs more information before continuing.",
+                questions=questions,
+                reason=reason,
+                trace_path=trace_path,
+                state=state,
+                user_updates=user_updates,
+                llm_token_usage=_clean_token_usage(state.get("llm_token_usage")),
+                llm_errors=_clean_llm_errors(state.get("llm_errors")),
+            )
+
+        final_report = state.get("final_report") or {}
+        summary = ""
+        if isinstance(final_report, dict):
+            summary = str(final_report.get("summary") or "").strip()
+        if not summary:
+            summary = f"Run finished with status={status}."
+        return ChatResponse(
+            type="final" if status == "finished" else "failed" if status == "failed" else "status",
+            message=summary,
+            trace_path=trace_path,
+            state=state,
+            final_report=final_report if isinstance(final_report, dict) else {},
+            user_updates=_consume_user_updates(state),
+            edited_files=_clean_string_list(state.get("edited_files"), limit=20, max_chars=300),
+            candidate_files=_clean_string_list(state.get("candidate_files"), limit=20, max_chars=300),
+            test_results=[
+                item for item in state.get("test_results", []) if isinstance(item, dict)
+            ],
+            patch_summary=str(state.get("patch_summary") or ""),
+            change_summaries=[
+                item for item in state.get("change_summaries", []) if isinstance(item, dict)
+            ],
+            last_change_summary=(
+                state.get("last_change_summary")
+                if isinstance(state.get("last_change_summary"), dict)
+                else {}
+            ),
+            llm_token_usage=_clean_token_usage(state.get("llm_token_usage")),
+            llm_errors=_clean_llm_errors(state.get("llm_errors")),
+        )
+
+
+def _consume_user_updates(state: AgentState) -> list[dict[str, Any]]:
+    """
+        从 user_updates 获取还没有向用户展示的提问返回
+        并标记已访问
+    """
+    updates = state.get("user_updates")
+    if not isinstance(updates, list):
+        state["user_updates"] = []
+        state["last_user_update"] = None
+        return []
+
+    pending: list[dict[str, Any]] = []
+    marked: list[dict[str, Any]] = []
+    for item in updates:
+        if not isinstance(item, dict):
+            continue
+        message = str(item.get("message") or "").strip()
+        if not message:
+            continue
+        clean_item = {
+            "source": str(item.get("source") or "").strip(),
+            "message": message,
+            "level": str(item.get("level") or "info").strip() or "info",
+            "created_at": str(item.get("created_at") or "").strip(),
+            "shown": bool(item.get("shown")),
+        }
+        if not clean_item["shown"]:
+            pending.append({**clean_item, "shown": False})
+            clean_item["shown"] = True
+        marked.append(clean_item)
+
+    state["user_updates"] = marked
+    state["last_user_update"] = marked[-1] if marked else None
+    return pending
+
+
+def _clean_token_usage(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    cleaned = {
+        "prompt_tokens": _safe_int(value.get("prompt_tokens")),
+        "completion_tokens": _safe_int(value.get("completion_tokens")),
+        "total_tokens": _safe_int(value.get("total_tokens")),
+        "request_count": _safe_int(value.get("request_count")),
+    }
+    by_node = value.get("by_node")
+    if isinstance(by_node, dict):
+        cleaned["by_node"] = by_node
+    return cleaned
+
+
+def _clean_llm_errors(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value[-5:] if isinstance(item, dict)]
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0

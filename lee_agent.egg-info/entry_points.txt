@@ -1,0 +1,2 @@
+[console_scripts]
+lee-agent = interfaces.cli:main

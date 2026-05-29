@@ -5,3 +5,24 @@
 2026-05-19 18:50:38 - code_review_mcp - INFO - Local log files will be saved to ./log/ directory
 2026-05-19 18:50:38 - code_review_mcp - INFO - SQLite schema initialized at /Users/kunze.li/.skynet-review/review.db
 2026-05-19 18:50:38 - code_review_mcp - INFO - SQLite schema ready at /Users/kunze.li/.skynet-review/review.db
+2026-05-22 17:41:42 - code_review_mcp - INFO - Registered capability: sddl_check (SDDL database query analysis)
+2026-05-22 17:41:42 - code_review_mcp - INFO - Registered tools for capability: sddl_check
+2026-05-22 17:41:42 - code_review_mcp - INFO - Starting Code Review MCP Server...
+2026-05-22 17:41:42 - code_review_mcp - INFO - ARC_ENV=live  base_url=https://arc.shopee.io
+2026-05-22 17:41:42 - code_review_mcp - INFO - Local log files will be saved to ./log/ directory
+2026-05-22 17:41:42 - code_review_mcp - INFO - SQLite schema initialized at /Users/kunze.li/.skynet-review/review.db
+2026-05-22 17:41:42 - code_review_mcp - INFO - SQLite schema ready at /Users/kunze.li/.skynet-review/review.db
+2026-05-28 19:03:29 - code_review_mcp - INFO - Registered capability: sddl_check (SDDL database query analysis)
+2026-05-28 19:03:29 - code_review_mcp - INFO - Registered tools for capability: sddl_check
+2026-05-28 19:03:29 - code_review_mcp - INFO - Starting Code Review MCP Server...
+2026-05-28 19:03:29 - code_review_mcp - INFO - ARC_ENV=live  base_url=https://arc.shopee.io
+2026-05-28 19:03:29 - code_review_mcp - INFO - Local log files will be saved to ./log/ directory
+2026-05-28 19:03:29 - code_review_mcp - INFO - SQLite schema initialized at /Users/kunze.li/.skynet-review/review.db
+2026-05-28 19:03:29 - code_review_mcp - INFO - SQLite schema ready at /Users/kunze.li/.skynet-review/review.db
+2026-05-29 11:01:45 - code_review_mcp - INFO - Registered capability: sddl_check (SDDL database query analysis)
+2026-05-29 11:01:45 - code_review_mcp - INFO - Registered tools for capability: sddl_check
+2026-05-29 11:01:45 - code_review_mcp - INFO - Starting Code Review MCP Server...
+2026-05-29 11:01:45 - code_review_mcp - INFO - ARC_ENV=live  base_url=https://arc.shopee.io
+2026-05-29 11:01:45 - code_review_mcp - INFO - Local log files will be saved to ./log/ directory
+2026-05-29 11:01:45 - code_review_mcp - INFO - SQLite schema initialized at /Users/kunze.li/.skynet-review/review.db
+2026-05-29 11:01:45 - code_review_mcp - INFO - SQLite schema ready at /Users/kunze.li/.skynet-review/review.db

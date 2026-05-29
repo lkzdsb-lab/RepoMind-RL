@@ -41,8 +41,19 @@ class StateEncoder:
             "has_tests": bool(test_results),
             "tests_passed": latest_test.get("exit_code") == 0,
             "tests_failed": bool(test_results) and latest_test.get("exit_code") != 0,
+            "has_command_results": bool(state.get("command_results")),
+            "has_verification_commands": bool(state.get("verification_commands")),
+            "verification_stale": bool(state.get("verification_stale", False)),
+            "plan_mode": bool(state.get("plan_mode", False)),
+            "plan_mode_approved": bool(state.get("plan_mode_approved", False)),
             "has_patch_summary": state.get("patch_summary") is not None,
             "has_patch": bool(state.get("patch")),
+            "editing_enabled": bool(state.get("editing_enabled", False)),
+            "has_applied_edit": any(
+                bool(result.get("applied"))
+                for result in state.get("edit_results", [])
+                if isinstance(result, dict)
+            ),
             "memory_written": bool(state.get("memory_written")),
             "has_error": bool(state.get("error")),
             "has_memory_context": bool(state.get("memory_context")),

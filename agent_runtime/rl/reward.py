@@ -24,7 +24,7 @@ class RewardFunction:
         reward = -0.01
         reasons = ["step_cost=-0.01"]
 
-        if output.get("error") or next_state.get("error"):
+        if (output.get("error") and not output.get("needs_more_context")) or next_state.get("error"):
             reward -= 1.0
             reasons.append("error=-1.0")
 
@@ -49,6 +49,15 @@ class RewardFunction:
                 reward += 0.1
                 reasons.append("db_models=+0.1")
 
+        elif action.name == "search_text":
+            matches = output.get("matches") or []
+            if matches:
+                reward += min(0.4, 0.05 * len(matches))
+                reasons.append(f"text_matches=+{min(0.4, 0.05 * len(matches)):.2f}")
+            else:
+                reward -= 0.03
+                reasons.append("no_text_matches=-0.03")
+
         elif action.name == "read_file":
             if output.get("content"):
                 reward += 0.2
@@ -62,6 +71,50 @@ class RewardFunction:
             elif exit_code is not None:
                 reward -= 0.2
                 reasons.append("tests_failed=-0.2")
+
+        elif action.name == "run_shell_command":
+            exit_code = output.get("exit_code")
+            if output.get("purpose") == "verification":
+                if exit_code == 0:
+                    reward += 1.0
+                    reasons.append("verification_passed=+1.0")
+                elif exit_code is not None:
+                    reward -= 0.2
+                    reasons.append("verification_failed=-0.2")
+            elif exit_code == 0:
+                reward += 0.05
+                reasons.append("diagnostic_command_ok=+0.05")
+
+        elif action.name == "EnterPlanMode":
+            if output.get("entered"):
+                reward += 0.15
+                reasons.append("plan_mode_entered=+0.15")
+
+        elif action.name == "ExitPlanMode":
+            if output.get("approved") and output.get("exited"):
+                reward += 0.2
+                reasons.append("plan_mode_approved=+0.2")
+            elif output.get("needs_user_input"):
+                reward += 0.05
+                reasons.append("plan_uncertainty_escalated=+0.05")
+            else:
+                reward -= 0.05
+                reasons.append("plan_mode_not_ready=-0.05")
+
+        elif action.name == "apply_code_patch":
+            if output.get("applied"):
+                reward += 0.4
+                reasons.append("edit_applied=+0.4")
+            elif output.get("needs_user_input"):
+                reward += 0.05
+                reasons.append("asked_before_uncertain_edit=+0.05")
+            elif output.get("needs_more_context"):
+                reward -= 0.05
+                reasons.append("edit_needs_more_context=-0.05")
+
+        elif action.name == "request_user_input":
+            reward += 0.05
+            reasons.append("explicit_user_question=+0.05")
 
         elif action.name == "git_diff":
             if next_state.get("patch_summary") is not None:
@@ -88,6 +141,9 @@ class RewardFunction:
             if self._tests_passed(next_state):
                 reward += 1.0
                 reasons.append("finish_with_passing_tests=+1.0")
+            if next_state.get("verification_stale"):
+                reward -= 1.0
+                reasons.append("finish_with_stale_verification=-1.0")
             if next_state.get("memory_written"):
                 reward += 0.2
                 reasons.append("finish_after_memory=+0.2")
@@ -109,6 +165,9 @@ class RewardFunction:
         if self._tests_passed(state):
             reward += 1.0
             reasons.append("terminal_tests_passed=+1.0")
+        if state.get("verification_stale"):
+            reward -= 1.0
+            reasons.append("terminal_stale_verification=-1.0")
         if state.get("memory_written"):
             reward += 0.2
             reasons.append("terminal_memory_written=+0.2")

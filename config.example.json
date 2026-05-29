@@ -1,0 +1,108 @@
+{
+  "$schema": "./config.schema.json",
+  "task": {
+    "title": "",
+    "description": ""
+  },
+  "repo_path": ".",
+  "verify_command": "pytest",
+  "max_loops": 8,
+  "env_file": ".env",
+  "env_override": false,
+  "manifest_dir": null,
+  "logging": {
+    "level": "INFO",
+    "file": ".repomind/logs/agent.log",
+    "json": false,
+    "to_console": true
+  },
+  "llm": {
+    "provider": "openai_compatible",
+    "model": "<model-name>",
+    "api_base": "https://<host>/v1",
+    "api_key_env": "LLM_API_KEY",
+    "timeout": 60,
+    "temperature": 0.0,
+    "max_output_chars": 12000,
+    "context": {},
+    "context_compressor": {},
+    "planner": {},
+    "plan": {},
+    "action_policy": {},
+    "action": {},
+    "task_analysis": {},
+    "observer": {},
+    "memory_query": {},
+    "memory_rerank": {},
+    "code_context_query": {},
+    "code_context_rerank": {},
+    "skill_selector": {},
+    "final_reporter": {},
+    "completion_judge": {}
+  },
+  "modes": {
+    "planner": "llm",
+    "context_compressor": "rule_based",
+    "action_policy": "llm",
+    "task_analyzer": "llm",
+    "observer": "llm",
+    "memory_query_planner": "disabled",
+    "memory_reranker": "disabled",
+    "code_context_query_planner": "llm",
+    "code_context_reranker": "llm",
+    "skill_selector": "llm",
+    "final_reporter": "llm",
+    "completion_judge": "llm"
+  },
+  "memory": {
+    "path": ".repomind/memory.jsonl",
+    "mid_path": ".repomind/memory_mid.jsonl",
+    "long_path": ".repomind/memory_long.jsonl",
+    "skill_dir": ".repomind/skills",
+    "redis_url": null,
+    "semantic_threshold": 0.7,
+    "procedural_threshold": 1.2,
+    "skill_consolidation_threshold": 1.5,
+    "query_limit": 5,
+    "selected_limit": 12,
+    "rerank_candidate_limit": 24
+  },
+  "context": {
+    "enabled": true,
+    "compressor_mode": "rule_based",
+    "max_tokens": 32000,
+    "compression_threshold": 0.75,
+    "recent_items": 8
+  },
+  "code_context": {
+    "index_path": ".repomind/codebase_context/index.json",
+    "query_limit": 10,
+    "selected_limit": 12,
+    "rerank_candidate_limit": 40
+  },
+  "skill": {
+    "selected_limit": 5
+  },
+  "rl": {
+    "enabled": false,
+    "q_table_path": ".repomind/rl/q_table.json",
+    "replay_path": ".repomind/rl/replay.jsonl",
+    "epsilon": 0.15,
+    "learning_rate": 0.2,
+    "discount": 0.9,
+    "replay_max_size": 10000,
+    "train_batch_size": 32
+  },
+  "editing": {
+    "enabled": true,
+    "max_files": 5,
+    "max_changed_lines": 300,
+    "max_file_bytes": 200000,
+    "require_read_before_write": true,
+    "confidence_threshold": 0.75,
+    "allow_create": false
+  },
+  "approval": {
+    "require_step_approval": false
+  }
+}

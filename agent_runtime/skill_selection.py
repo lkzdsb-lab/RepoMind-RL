@@ -96,7 +96,7 @@ class LLMSkillSelector:
             payloads.append(
                 {
                     "skill_name": skill_name,
-                    "relevance": _clamp_float(item.get("relevance"), "invalid skill relevance from LLM"),
+                    "relevance": _clamp_float(item.get("relevance"), 1, "invalid skill relevance from LLM"),
                     "reason": str(item.get("reason", "")).strip()[:300],
                 }
             )
@@ -130,7 +130,7 @@ class LLMSkillSelector:
             selected.append(
                 {
                     "skill_name": skill_name,
-                    "relevance": _clamp_float(item.get("relevance"), "invalid skill relevance from LLM"),
+                    "relevance": _clamp_float(item.get("relevance"), 1, "invalid skill relevance from LLM"),
                     "reason": str(item.get("reason", "")).strip()[:300],
                 }
             )

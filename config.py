@@ -18,6 +18,8 @@ class FileConfig(object):
     DEBUG = False
     TESTING = False
     MAX_READ_AMOUNT = 200
+    MAX_LIST_FILE_LIMIT = 200
+    MAX_READ_FILE_LIMIT = 8000
 
 
 @dataclass
@@ -115,6 +117,18 @@ class DebugAgentConfig:
     rl_replay_max_size: int = 10000
     rl_train_batch_size: int = 32
     manifest_dir: str | None = None
+
+    # 受限代码编辑能力。默认关闭，避免现有 debug 流程意外写文件。
+    editing_enabled: bool = False
+    editing_max_files: int = 5
+    editing_max_changed_lines: int = 300
+    editing_max_file_bytes: int = 200000
+    editing_require_read_before_write: bool = True
+    editing_confidence_threshold: float = 0.75
+    editing_allow_create: bool = False
+
+    # 人工审批。开启后每个 agent action 执行前都会暂停等待用户批准。
+    require_step_approval: bool = False
 
 
 DEFAULT_CONFIG_PATH = "config.json"
@@ -215,6 +229,18 @@ def default_config_payload() -> dict[str, Any]:
             "replay_max_size": config.rl_replay_max_size,
             "train_batch_size": config.rl_train_batch_size,
         },
+        "editing": {
+            "enabled": config.editing_enabled,
+            "max_files": config.editing_max_files,
+            "max_changed_lines": config.editing_max_changed_lines,
+            "max_file_bytes": config.editing_max_file_bytes,
+            "require_read_before_write": config.editing_require_read_before_write,
+            "confidence_threshold": config.editing_confidence_threshold,
+            "allow_create": config.editing_allow_create,
+        },
+        "approval": {
+            "require_step_approval": config.require_step_approval,
+        },
     }
 
 
@@ -308,6 +334,8 @@ def apply_debug_agent_config(config: DebugAgentConfig, data: dict[str, Any]) -> 
         {
             "repo": "repo_path",
             "verify": "verify_command",
+            "step_approval": "require_step_approval",
+            "require_step_approval": "require_step_approval",
         },
     )
     _apply_section(
@@ -396,6 +424,28 @@ def apply_debug_agent_config(config: DebugAgentConfig, data: dict[str, Any]) -> 
             "discount": "rl_discount",
             "replay_max_size": "rl_replay_max_size",
             "train_batch_size": "rl_train_batch_size",
+        },
+    )
+    _apply_section(
+        config,
+        data.get("editing"),
+        {
+            "enabled": "editing_enabled",
+            "max_files": "editing_max_files",
+            "max_changed_lines": "editing_max_changed_lines",
+            "max_file_bytes": "editing_max_file_bytes",
+            "require_read_before_write": "editing_require_read_before_write",
+            "confidence_threshold": "editing_confidence_threshold",
+            "allow_create": "editing_allow_create",
+        },
+    )
+    _apply_section(
+        config,
+        data.get("approval"),
+        {
+            "require_step_approval": "require_step_approval",
+            "step_approval": "require_step_approval",
+            "each_step": "require_step_approval",
         },
     )
     _apply_llm_section(config, data.get("llm"))
@@ -511,9 +561,14 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         "skill_selected_limit",
         "rl_replay_max_size",
         "rl_train_batch_size",
+        "editing_max_files",
+        "editing_max_changed_lines",
+        "editing_max_file_bytes",
     ):
         if int(getattr(config, field_name)) <= 0:
             raise ValueError(f"{field_name} must be greater than 0")
+    if not 0.0 <= float(config.editing_confidence_threshold) <= 1.0:
+        raise ValueError("editing_confidence_threshold must be between 0 and 1")
 
     _require_llm_config(
         "modes.planner",

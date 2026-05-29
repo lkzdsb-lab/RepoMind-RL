@@ -17,7 +17,7 @@ from model.agent.actions import Action, ActionSpec
 from model.agent.graph import AgentState
 from model.llm import ActionChoiceResponse, GuardDecision
 from prompts.templates import load_prompt, render_prompt
-from utils import _truncate_text
+from utils import _truncate_text, _clamp_float, _as_bool, _clean_string_list
 
 
 @dataclass
@@ -122,6 +122,17 @@ class LLMActionPolicy:
                 fallback_action=self.action_space.to_action(selected_spec, state),
             )
         action = self.action_space.to_action(selected_spec, state)
+        action_args = action.args
+        if selected_spec.name in {
+            "apply_code_patch",
+            "request_user_input",
+            "read_file",
+            "search_text",
+            "run_shell_command",
+            "EnterPlanMode",
+            "ExitPlanMode",
+        }:
+            action_args = _action_input_for(selected_spec.name, data, reason, action.args)
         thought = reason or action.thought or f"LLM selected `{selected_spec.name}`."
         if selected_spec.name != preferred_action:
             thought = (
@@ -130,7 +141,7 @@ class LLMActionPolicy:
             )
         return Action(
             action.name,
-            action.args,
+            action_args,
             thought=thought,
             metadata={
                 "llm_guard": {
@@ -299,6 +310,9 @@ def _action_fallback_payload(state: AgentState, context: dict[str, Any]) -> dict
         "action": fallback_action.name,
         "candidate_actions": [fallback_action.name],
         "reason": fallback_action.thought,
+        "action_input": fallback_action.args,
+        "uncertainty_questions": [],
+        "confidence": 0.5,
     }
 
 
@@ -323,7 +337,19 @@ def _normalize_action_choice(
         candidate_actions = list(fallback["candidate_actions"])
         action = str(fallback["action"])
     reason = str(data.get("reason") or fallback["reason"]).strip()
-    return {"action": action, "candidate_actions": candidate_actions, "reason": reason}
+    raw_action_input = data.get("action_input")
+    if not isinstance(raw_action_input, dict):
+        raw_action_input = dict(fallback.get("action_input") or {})
+    uncertainty_questions = _clean_string_list(data.get("uncertainty_questions"))
+    confidence = _clamp_float(data.get("confidence"), float(fallback.get("confidence", 0.5)), "invalid confidence")
+    return {
+        "action": action,
+        "candidate_actions": candidate_actions,
+        "reason": reason,
+        "action_input": raw_action_input,
+        "uncertainty_questions": uncertainty_questions,
+        "confidence": confidence,
+    }
 
 
 def _action_prompt(
@@ -335,10 +361,17 @@ def _action_prompt(
     """
         构造每个 action 的 prompt 格式
     """
-    legal = [
-        {"name": spec.name, "description": spec.description}
-        for spec in legal_specs
-    ]
+    manifest_by_name = {
+        str(item.get("name")): item
+        for item in state.get("tool_manifest", [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    legal = []
+    for spec in legal_specs:
+        item = dict(manifest_by_name.get(spec.name, {}))
+        item["name"] = spec.name
+        item["description"] = spec.description or item.get("description", "")
+        legal.append(item)
     return render_prompt(
         "user/action_policy.md",
         title=state.get("title", ""),
@@ -347,6 +380,21 @@ def _action_prompt(
         status=state.get("status", ""),
         verification_required=json.dumps(bool(state.get("verification_required", True))),
         verification_reason=state.get("verification_reason", ""),
+        verification_stale=json.dumps(bool(state.get("verification_stale", False))),
+        verification_commands=json.dumps(
+            state.get("verification_commands", [])[-5:],
+            ensure_ascii=False,
+            default=str,
+        ),
+        command_results=json.dumps(
+            state.get("command_results", [])[-3:],
+            ensure_ascii=False,
+            default=str,
+        ),
+        plan_mode=json.dumps(bool(state.get("plan_mode", False))),
+        plan_mode_approved=json.dumps(bool(state.get("plan_mode_approved", False))),
+        debug_technical_plan=_truncate_text(str(state.get("debug_technical_plan", "")), 5000),
+        plan_mode_evaluation=_truncate_text(str(state.get("plan_mode_evaluation", "")), 3000),
         selected_skills=json.dumps(state.get("selected_skills", []), ensure_ascii=False),
         skill_context=_truncate_text(
             json.dumps(state.get("skill_context", []), ensure_ascii=False),
@@ -360,6 +408,8 @@ def _action_prompt(
         ),
         test_results=json.dumps(state.get("test_results", [])[-2:], ensure_ascii=False, default=str),
         patch_summary=state.get("patch_summary"),
+        editing_enabled=json.dumps(bool(state.get("editing_enabled", False))),
+        edit_results=json.dumps(state.get("edit_results", [])[-2:], ensure_ascii=False, default=str),
         user_inputs=json.dumps(state.get("user_inputs", []), ensure_ascii=False, default=str),
         memory_context=str(state.get("memory_context", ""))[:2500],
         compressed_context=str(state.get("compressed_context", ""))[:2500],
@@ -387,6 +437,103 @@ def _candidate_actions_from_response(
     return _dedupe(candidates)
 
 
+def _action_input_for(
+    action_name: str,
+    data: dict[str, Any],
+    reason: str,
+    default_args: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+        对各种 action 的输入进行提取
+    """
+    raw_input = data.get("action_input")
+    if not isinstance(raw_input, dict):
+        raw_input = {}
+    default_args = default_args or {}
+    if action_name == "apply_code_patch":
+        return {
+            "changes": raw_input.get("changes", []),
+            "reason": str(raw_input.get("reason") or reason or "").strip(),
+            "confidence": _clamp_float(data.get("confidence"), 0.5, "invalid confidence from LLM"),
+            "assumptions": _clean_string_list(raw_input.get("assumptions"), -1, 500),
+            "uncertainty_questions": _clean_string_list(
+                raw_input.get("uncertainty_questions") or data.get("uncertainty_questions")
+            , -1, 500),
+            "dry_run": bool(raw_input.get("dry_run", False)),
+        }
+    if action_name == "request_user_input":
+        questions = _clean_string_list(raw_input.get("questions") or data.get("uncertainty_questions"), -1, 500)
+        return {
+            "reason": str(raw_input.get("reason") or reason or "").strip(),
+            "questions": questions[:3],
+        }
+    if action_name == "read_file":
+        return {
+            "file_path": str(
+                raw_input.get("file_path") or default_args.get("file_path") or ""
+            ).strip(),
+            "max_chars": _bounded_int(
+                raw_input.get("max_chars", default_args.get("max_chars", 8000)),
+                default=8000,
+                minimum=1,
+                maximum=200000,
+            ),
+            "start_line": _optional_bounded_int(raw_input.get("start_line"), minimum=1),
+            "end_line": _optional_bounded_int(raw_input.get("end_line"), minimum=1),
+        }
+    if action_name == "search_text":
+        pattern = str(raw_input.get("pattern") or raw_input.get("query") or "").strip()
+        return {
+            "pattern": pattern,
+            "regex": bool(raw_input.get("regex", True)),
+            "globs": _clean_string_list(raw_input.get("globs"), -1, 500),
+            "context_lines": _bounded_int(raw_input.get("context_lines"), default=0, minimum=0, maximum=5),
+            "max_results": _bounded_int(raw_input.get("max_results"), default=50, minimum=1, maximum=200),
+        }
+    if action_name == "run_shell_command":
+        return {
+            "command": str(
+                raw_input.get("command") or default_args.get("command") or ""
+            ).strip(),
+            "purpose": _clean_purpose(
+                raw_input.get("purpose") or default_args.get("purpose")
+            ),
+            "timeout": _bounded_int(
+                raw_input.get("timeout", default_args.get("timeout", 120)),
+                default=120,
+                minimum=1,
+                maximum=1800,
+            ),
+            "reason": str(
+                raw_input.get("reason") or reason or default_args.get("reason") or ""
+            ).strip()[:500],
+            "allow_shell": bool(raw_input.get("allow_shell", default_args.get("allow_shell", False))),
+        }
+    if action_name == "EnterPlanMode":
+        return {
+            "technical_plan": str(
+                raw_input.get("technical_plan")
+                or raw_input.get("plan")
+                or raw_input.get("debug_plan")
+                or ""
+            ).strip(),
+            "risks": _clean_string_list(raw_input.get("risks"), -1, 500),
+            "verification_commands": _clean_string_list(raw_input.get("verification_commands"), -1, 500),
+            "assumptions": _clean_string_list(raw_input.get("assumptions"), -1, 500),
+        }
+    if action_name == "ExitPlanMode":
+        return {
+            "evaluation": str(raw_input.get("evaluation") or "").strip(),
+            "approved": _as_bool(raw_input.get("approved", False)),
+            "remaining_uncertainties": _clean_string_list(
+                raw_input.get("remaining_uncertainties")
+                or data.get("uncertainty_questions"), -1, 500
+            ),
+            "next_step": str(raw_input.get("next_step") or "").strip(),
+        }
+    return {}
+
+
 def _candidate_specs(
     legal_specs: list[ActionSpec],
     candidate_actions: list[str] | None,
@@ -408,3 +555,31 @@ def _dedupe(values: Any) -> list[str]:
         if item and item not in result:
             result.append(item)
     return result
+
+
+def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _optional_bounded_int(value: Any, *, minimum: int, maximum: int | None = None) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    parsed = max(minimum, parsed)
+    if maximum is not None:
+        parsed = min(maximum, parsed)
+    return parsed
+
+
+def _clean_purpose(value: Any) -> str:
+    purpose = str(value or "diagnostic").strip().lower()
+    if purpose not in {"verification", "diagnostic", "search", "build"}:
+        return "diagnostic"
+    return purpose

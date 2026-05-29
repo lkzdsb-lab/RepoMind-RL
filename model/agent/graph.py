@@ -37,6 +37,7 @@ class AgentState(TypedDict, total=False):
     title: str
     description: str
     registry_snapshot: Dict[str, List[str]]
+    tool_manifest: List[Dict[str, Any]]
     # 引入 skill
     task_category: str
     verification_required: bool
@@ -47,6 +48,7 @@ class AgentState(TypedDict, total=False):
     skill_context: list[dict]
 
     repo_path: str # 仓库路径
+    is_git_repo: bool
     project_profile: Dict[str, Any] # 项目语言和文件概况
     branch: str # 仓库分支
     verify_command: str # 权限认证相关命令
@@ -61,8 +63,18 @@ class AgentState(TypedDict, total=False):
     code_context_rerank: Dict[str, Any]
     observations: List[Dict[str, Any]] # 执行流程记录
     llm_observations: List[Dict[str, Any]]
+    llm_calls: List[Dict[str, Any]]
+    llm_token_usage: Dict[str, Any]
+    llm_errors: List[Dict[str, Any]]
+    user_updates: List[Dict[str, Any]]
+    last_user_update: Optional[Dict[str, Any]]
     tool_calls: List[ToolCall] # llm 使用过的 tools
     test_results: List[TestResult]
+    command_results: List[Dict[str, Any]]
+    verification_commands: List[Dict[str, Any]]
+    verification_stale: bool
+    last_edit_at_loop: int
+    last_verified_edit_loop: int
     trajectory: List[TrajectoryStep] # 整个任务的结果集
 
     # 需要用户补充信息时的暂停/恢复状态
@@ -71,6 +83,9 @@ class AgentState(TypedDict, total=False):
     needs_user_input_reason: str
     completion_judge_continue_count: int
     user_inputs: List[Dict[str, Any]]
+    require_step_approval: bool
+    pending_step_approval: Dict[str, Any]
+    step_approval_history: List[Dict[str, Any]]
 
     # 查询过的记忆记录
     retrieved_memories: Dict[str, Any]
@@ -89,6 +104,7 @@ class AgentState(TypedDict, total=False):
     promoted_memories: List[Dict[str, Any]]
     consolidated_skills: List[Dict[str, Any]]
     memory_written: bool
+    """ 是否已经写过 memory 标记"""
 
     # rl 模块相关
     rl_enabled: bool
@@ -96,6 +112,19 @@ class AgentState(TypedDict, total=False):
     rl_last_reward: Dict[str, Any]
     llm_guard_events: List[Dict[str, Any]]
 
+    llm_action_inputs_enabled: bool
+    plan_mode: bool
+    plan_mode_entered: bool
+    plan_mode_approved: bool
+    debug_technical_plan: str
+    plan_mode_evaluation: str
+    plan_mode_events: List[Dict[str, Any]]
+    editing_enabled: bool
+    editing_config: Dict[str, Any]
+    edit_results: List[Dict[str, Any]]
+    edited_files: List[str]
+    change_summaries: List[Dict[str, Any]]
+    last_change_summary: Dict[str, Any]
     patch: Optional[str] # 修改文件的块
     patch_summary: Optional[str]
     final_report: Dict[str, Any]
@@ -110,6 +139,7 @@ class AgentState(TypedDict, total=False):
         "created",
         "running",
         "need_more_context",
+        "planning",
         "patching",
         "testing",
         "awaiting_user_input",

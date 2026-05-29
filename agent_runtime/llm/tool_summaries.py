@@ -14,7 +14,17 @@ INTERESTING_OUTPUT_FIELDS = (
     "exit_code",
     "command",
     "reason",
+    "purpose",
+    "duration_ms",
     "file_path",
+    "applied",
+    "entered",
+    "exited",
+    "approved",
+    "changed_files",
+    "changed_line_count",
+    "needs_user_input",
+    "questions",
     "line_count",
     "query",
     "queries",
@@ -100,6 +110,4 @@ def _output_preview(output: dict[str, Any], limit: int) -> dict[str, str]:
         if text:
             return {"field": key, "text": _truncate_text(text, limit)}
     return {}
-
-
 

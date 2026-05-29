@@ -150,6 +150,76 @@ stay disabled.
 }
 ```
 
+## Guarded Editing
+
+Repository writes are disabled by default. Enable them only when the run is
+allowed to modify the target repo:
+
+```json
+{
+  "editing": {
+    "enabled": true,
+    "max_files": 5,
+    "max_changed_lines": 300,
+    "max_file_bytes": 200000,
+    "require_read_before_write": true,
+    "confidence_threshold": 0.75,
+    "allow_create": false
+  }
+}
+```
+
+When editing is enabled and `modes.action_policy` is `llm`, the LLM can select
+`apply_code_patch`, but the tool is guarded by runtime state. It can only apply
+exact replacements to files read during the same run, unless creation is
+explicitly enabled.
+
+Before any code-changing action, the LLM must call `EnterPlanMode` and record a
+detailed Debug/Refactor Technical Plan. While in Plan Mode, code-changing tools
+are not exposed by the action space and the executor rejects bypass attempts.
+The LLM can call `ExitPlanMode` only after evaluating the plan as feasible; if
+uncertainty remains, the run pauses with `awaiting_user_input`.
+
+After a patch is applied, `verification_stale` becomes `true`. The run cannot
+finish, write memory, or proceed to final diff summarization until a verification
+command has run through `run_shell_command` with `purpose="verification"` or
+through the legacy `run_tests` tool. The generic primitives available to the LLM
+are:
+
+- `search_text`: regex or fixed-string repository search backed by `rg`/`grep`.
+- `run_shell_command`: guarded command execution for diagnostics, search, build,
+  and verification.
+- `apply_code_patch`: guarded exact-replacement edits.
+- `EnterPlanMode` / `ExitPlanMode`: planning gate around code-changing work.
+
+If the LLM reports uncertainty or confidence below the threshold, the run pauses
+with `awaiting_user_input` instead of writing files.
+
+## Human Approval
+
+Set `approval.require_step_approval` to force an approval gate before each
+agent action is executed:
+
+```json
+{
+  "approval": {
+    "require_step_approval": true
+  }
+}
+```
+
+When this is enabled, the agent pauses after selecting the next action and
+shows the action name plus compact arguments. Reply `approve`, `yes`, or
+`同意` to execute that action. Any other reply is treated as user feedback,
+written into the conversation context, and the agent replans before selecting
+the next action.
+
+Equivalent CLI flags:
+
+```bash
+lee-agent --repo /path/to/repo --action-policy-mode llm --enable-editing --require-step-approval
+```
+
 ## Files
 
 - `config.schema.json`: machine-readable schema for editor validation.
@@ -162,8 +232,8 @@ stay disabled.
 Runtime artifacts are resolved under the target `repo_path`. If you run:
 
 ```bash
-python3 main.py "debug task" --repo /path/to/project-a
-python3 main.py "debug task" --repo /path/to/project-b
+lee-agent --repo /path/to/project-a
+lee-agent --repo /path/to/project-b
 ```
 
 the agent writes separate state:

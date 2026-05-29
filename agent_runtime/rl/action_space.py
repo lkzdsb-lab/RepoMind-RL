@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import shlex
 from typing import Iterable
 
 from agent_runtime.search_query import SearchQueryPlanner
@@ -18,8 +19,14 @@ class ActionSpace:
             action_names
             or [
                 "search_code_context",
+                "search_text",
                 "read_file",
+                "EnterPlanMode",
+                "ExitPlanMode",
+                "apply_code_patch",
+                "request_user_input",
                 "run_tests",
+                "run_shell_command",
                 "git_diff",
                 "write_memory",
                 "finish",
@@ -36,6 +43,72 @@ class ActionSpace:
         candidate_files = state.get("candidate_files") or []
         unread = [path for path in candidate_files if path not in self._read_files(state)]
         verification_required = bool(state.get("verification_required", True))
+        plan_mode = bool(state.get("plan_mode", False))
+        plan_approved = bool(state.get("plan_mode_approved", False))
+        edit_task = bool(state.get("editing_enabled", False)) and state.get("task_type") in {
+            "BUG_FIX",
+            "FEATURE_IMPL",
+        }
+        verification_stale = bool(state.get("verification_stale", False))
+
+        if plan_mode:
+            # EnterPlanMode is the gate into planning. Once a plan exists, keep the
+            # model moving toward ExitPlanMode or a concrete user question instead
+            # of letting it spend loops rewriting the same plan.
+            if (
+                "EnterPlanMode" in available
+                and bool(state.get("llm_action_inputs_enabled", False))
+                and not bool(state.get("debug_technical_plan"))
+            ):
+                specs.append(
+                    ActionSpec(
+                        "EnterPlanMode",
+                        "Create the missing Debug/Refactor technical plan without changing code.",
+                    )
+                )
+            if (
+                "ExitPlanMode" in available
+                and bool(state.get("llm_action_inputs_enabled", False))
+                and bool(state.get("debug_technical_plan"))
+            ):
+                specs.append(
+                    ActionSpec(
+                        "ExitPlanMode",
+                        "Exit planning mode after evaluating the plan as feasible.",
+                    )
+                )
+            if "request_user_input" in available:
+                specs.append(
+                    ActionSpec(
+                        "request_user_input",
+                        "Pause and ask the user concrete questions when required.",
+                    )
+                )
+            return self._finish_safe_specs(specs, allow_finish=False)
+
+        if verification_stale:
+            stale_specs: list[ActionSpec] = []
+            if "read_file" in available and self._edited_files_needing_reread(state):
+                stale_specs.append(
+                    ActionSpec(
+                        "read_file",
+                        "Re-read an edited file after the latest patch before verification.",
+                    )
+                )
+            if (
+                "run_shell_command" in available
+                and bool(state.get("llm_action_inputs_enabled", False))
+            ):
+                stale_specs.append(
+                    ActionSpec(
+                        "run_shell_command",
+                        "Run a verification command for the latest code changes.",
+                    )
+                )
+            elif "run_tests" in available:
+                stale_specs.append(ActionSpec("run_tests", "Run verification command."))
+            if stale_specs:
+                return stale_specs
 
         # 根据动作名称列表补充 action spec
         if "list_files" in available and "list_files" not in called:
@@ -44,30 +117,75 @@ class ActionSpace:
         if "search_code_context" in available and not state.get("code_context"):
             specs.append(ActionSpec("search_code_context", "Search structured code context."))
 
+        if (
+            "search_text" in available
+            and bool(state.get("llm_action_inputs_enabled", False))
+            and (not candidate_files or state.get("status") in {"need_more_context", "planning"})
+        ):
+            specs.append(ActionSpec("search_text", "Search repository text with regex or fixed strings."))
+
         if "read_file" in available and unread:
             specs.append(ActionSpec("read_file", "Read the next unread candidate file."))
+
+        if (
+            "EnterPlanMode" in available
+            and bool(state.get("llm_action_inputs_enabled", False))
+            and edit_task
+            and not plan_approved
+        ):
+            specs.append(
+                ActionSpec(
+                    "EnterPlanMode",
+                    "Enter non-mutating planning mode and write a detailed technical plan.",
+                )
+            )
+
+        if "request_user_input" in available:
+            specs.append(
+                ActionSpec(
+                    "request_user_input",
+                    "Pause and ask the user concrete questions when required.",
+                )
+            )
+
+        if (
+            "apply_code_patch" in available
+            and bool(state.get("editing_enabled", False))
+            and bool(state.get("llm_action_inputs_enabled", False))
+            and plan_approved
+            and self._read_files(state)
+            and not self._has_applied_edit(state)
+        ):
+            specs.append(
+                ActionSpec(
+                    "apply_code_patch",
+                    "Apply guarded exact-replacement edits to already-read files.",
+                )
+            )
+
+        if (
+            "run_shell_command" in available
+            and bool(state.get("llm_action_inputs_enabled", False))
+            and (
+                bool(state.get("verification_stale", False))
+                or (verification_required and self._read_files(state) and not state.get("test_results"))
+            )
+        ):
+            specs.append(ActionSpec("run_shell_command", "Run a guarded command for verification or diagnostics."))
 
         if "run_tests" in available and verification_required and not state.get("test_results"):
             specs.append(ActionSpec("run_tests", "Run verification command."))
 
         if (
             "git_diff" in available
+            and bool(state.get("is_git_repo", True))
             and (not verification_required or state.get("test_results"))
+            and not state.get("verification_stale", False)
             and state.get("patch_summary") is None
         ):
             specs.append(ActionSpec("git_diff", "Inspect current git diff."))
 
-        if (
-            "write_memory" in available
-            and state.get("patch_summary") is not None
-            and not state.get("memory_written")
-        ):
-            specs.append(ActionSpec("write_memory", "Write reward-gated memory."))
-
-        if self._can_finish(state) or not specs:
-            specs.append(ActionSpec("finish", "Finish the current run."))
-
-        return specs
+        return self._finish_safe_specs(specs, allow_finish=True, state=state)
 
     def legal_actions(self, state: AgentState) -> list[Action]:
         return [self.to_action(spec, state) for spec in self.legal_specs(state)]
@@ -82,15 +200,20 @@ class ActionSpace:
                 thought=f"RL 选择结构化代码上下文搜索：`{query_plan.query}`。",
             )
         if spec.name == "read_file":
+            reread = self._edited_files_needing_reread(state)
             unread = [
                 path
                 for path in state.get("candidate_files", [])
                 if path not in self._read_files(state)
             ]
+            targets = reread or unread or list(state.get("edited_files", []) or [])
+            if not targets:
+                targets = list(state.get("candidate_files", []) or [])
+            file_path = targets[0] if targets else ""
             return Action(
                 "read_file",
-                {"file_path": unread[0]},
-                thought=f"RL 选择阅读候选文件 `{unread[0]}`。",
+                {"file_path": file_path},
+                thought=f"RL 选择阅读文件 `{file_path}`。",
             )
         if spec.name == "run_tests":
             command = state.get("verify_command") or "pytest"
@@ -99,8 +222,46 @@ class ActionSpace:
                 {"command": command},
                 thought=f"RL 选择运行验证命令 `{command}`。",
             )
+        if spec.name == "search_text":
+            return Action(
+                "search_text",
+                thought="LLM 需要提供 regex/fixed-string 搜索参数。",
+            )
+        if spec.name == "run_shell_command":
+            command = self._default_verification_command(state)
+            return Action(
+                "run_shell_command",
+                {
+                    "command": command,
+                    "purpose": "verification",
+                    "timeout": 120,
+                    "reason": "Verify the latest code changes before finishing.",
+                    "allow_shell": False,
+                },
+                thought=f"RL 选择运行验证命令 `{command}`。",
+            )
         if spec.name == "list_files":
             return Action("list_files", thought="RL 选择读取仓库结构。")
+        if spec.name == "EnterPlanMode":
+            return Action(
+                "EnterPlanMode",
+                thought="LLM 需要进入 Plan Mode 并给出 Debug/重构技术方案。",
+            )
+        if spec.name == "ExitPlanMode":
+            return Action(
+                "ExitPlanMode",
+                thought="LLM 需要评估方案可行性后退出 Plan Mode。",
+            )
+        if spec.name == "apply_code_patch":
+            return Action(
+                "apply_code_patch",
+                thought="LLM 需要提供受限的 exact-replacement 修改内容。",
+            )
+        if spec.name == "request_user_input":
+            return Action(
+                "request_user_input",
+                thought="当前存在不确定信息，向用户询问具体问题。",
+            )
         if spec.name == "git_diff":
             return Action("git_diff", thought="RL 选择检查当前 diff。")
         if spec.name == "write_memory":
@@ -123,8 +284,77 @@ class ActionSpace:
         return (
             bool(state.get("memory_written"))
             or bool(state.get("error"))
+            or self._has_verified_edit(state)
+            or (
+                state.get("patch_summary") is not None
+                and not state.get("verification_stale", False)
+            )
             or int(state.get("loop_count", 0)) >= int(state.get("max_loops", 8)) - 1
         )
+
+    def _has_applied_edit(self, state: AgentState) -> bool:
+        return any(
+            bool(result.get("applied"))
+            for result in state.get("edit_results", [])
+            if isinstance(result, dict)
+        )
+
+    def _has_verified_edit(self, state: AgentState) -> bool:
+        return bool(state.get("edited_files")) and not bool(
+            state.get("verification_stale", False)
+        )
+
+    def _edited_files_needing_reread(self, state: AgentState) -> list[str]:
+        edited_files = [
+            str(path).strip()
+            for path in state.get("edited_files", []) or []
+            if str(path).strip()
+        ]
+        if not edited_files or not bool(state.get("verification_stale", False)):
+            return []
+        calls = state.get("tool_calls", []) or []
+        latest_edit_index = -1
+        for index, call in enumerate(calls):
+            if not isinstance(call, dict) or call.get("name") != "apply_code_patch":
+                continue
+            output = call.get("output")
+            if isinstance(output, dict) and output.get("applied"):
+                latest_edit_index = index
+        if latest_edit_index < 0:
+            return []
+        read_after_edit: set[str] = set()
+        for call in calls[latest_edit_index + 1 :]:
+            if not isinstance(call, dict) or call.get("name") != "read_file":
+                continue
+            output = call.get("output")
+            call_input = call.get("input")
+            if not isinstance(output, dict) or output.get("error"):
+                continue
+            path = str(output.get("file_path") or "").strip()
+            if not path and isinstance(call_input, dict):
+                path = str(call_input.get("file_path") or "").strip()
+            if path:
+                read_after_edit.add(path)
+        return [path for path in edited_files if path not in read_after_edit]
+
+    def _default_verification_command(self, state: AgentState) -> str:
+        configured = str(state.get("verify_command") or "").strip()
+        if configured:
+            return configured
+        paths = [
+            str(path).strip()
+            for path in (state.get("edited_files", []) or state.get("candidate_files", []) or [])
+            if str(path).strip()
+        ]
+        for path in paths:
+            quoted = shlex.quote(path)
+            if path.endswith(".py"):
+                if path.rsplit("/", 1)[-1] == "main.py":
+                    return f"python {quoted}"
+                return f"python -m py_compile {quoted}"
+            if path.endswith(".go"):
+                return "go test ./..."
+        return "pytest"
 
     def _available_action_names(self, state: AgentState) -> set[str]:
         """
@@ -134,5 +364,21 @@ class ActionSpace:
         registered_tools = set(registry.get("tools") or [])
         if not registered_tools:
             return set(self.action_names)
-        internal_actions = {"finish", "write_memory"}
+        internal_actions = {"finish", "write_memory", "request_user_input"}
         return set(self.action_names).intersection(registered_tools | internal_actions)
+
+    def _finish_safe_specs(
+        self,
+        specs: list[ActionSpec],
+        *,
+        allow_finish: bool,
+        state: AgentState | None = None,
+    ) -> list[ActionSpec]:
+        non_question_specs = [
+            spec
+            for spec in specs
+            if spec.name not in {"request_user_input"}
+        ]
+        if allow_finish and state is not None and (self._can_finish(state) or not non_question_specs):
+            specs.append(ActionSpec("finish", "Finish the current run."))
+        return specs

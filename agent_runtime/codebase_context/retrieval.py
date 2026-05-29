@@ -229,7 +229,7 @@ class LLMCodeContextReranker:
                     "candidate_id": candidate_id,
                     "kind": available[candidate_id].get("kind", ""),
                     "file_path": available[candidate_id].get("file_path", ""),
-                    "relevance": _clamp_float(item.get("relevance"), "invalid code context relevance from LLM"),
+                    "relevance": _clamp_float(item.get("relevance"), 1.0, "invalid code context relevance from LLM"),
                     "reason": str(item.get("reason", "")).strip()[:300],
                 }
             )
@@ -268,7 +268,7 @@ class LLMCodeContextReranker:
             selected.append(
                 {
                     "candidate_id": candidate_id,
-                    "relevance": _clamp_float(item.get("relevance"), "invalid code context relevance from LLM"),
+                    "relevance": _clamp_float(item.get("relevance"), 1, "invalid code context relevance from LLM"),
                     "reason": str(item.get("reason", "")).strip()[:300],
                 }
             )

@@ -19,6 +19,9 @@ def load_prompt(relative_path: str) -> str:
 
 
 def render_prompt(relative_path: str, **values: Any) -> str:
+    """
+        路由特定的 prompt 模版
+    """
     template = load_prompt(relative_path)
 
     def replace(match: re.Match[str]) -> str:

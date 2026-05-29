@@ -11,6 +11,7 @@ from loguru import logger
 from model.llm import LLMMessage, LLMRequest, LLMResponse
 from openai import OpenAI, OpenAIError
 from pydantic import BaseModel
+from utils import _safe_int
 
 
 class LLMClient(Protocol):
@@ -81,16 +82,18 @@ class OpenAICompatibleLLMClient:
         if not content and parsed is not None:
             content = json.dumps(_parsed_to_plain(parsed), ensure_ascii=False)
         logger.info(
-            "llm request completed model={} content={} parsed={}",
+            "llm request completed model={} content={} parsed={} usage={}",
             raw.get("model") or model,
             content,
             parsed is not None,
+            raw.get("usage") or {},
         )
         return LLMResponse(
             content=content[: self.config.max_output_chars],
             model=str(raw.get("model") or model),
             raw=raw,
             parsed=parsed,
+            usage=_extract_usage(raw),
         )
 
     def _message_to_dict(self, message: LLMMessage | dict[str, str]) -> dict[str, str]:
@@ -152,3 +155,14 @@ def _extract_chat_content(raw: dict) -> str:
         return json.dumps(content, ensure_ascii=False)
     except TypeError:
         return str(content or "")
+
+
+def _extract_usage(raw: dict) -> dict[str, Any]:
+    usage = raw.get("usage")
+    if not isinstance(usage, dict):
+        return {}
+    return {
+        "prompt_tokens": _safe_int(usage.get("prompt_tokens")),
+        "completion_tokens": _safe_int(usage.get("completion_tokens")),
+        "total_tokens": _safe_int(usage.get("total_tokens")),
+    }

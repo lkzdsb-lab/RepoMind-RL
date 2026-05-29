@@ -12,4 +12,5 @@ default_plan={{ default_plan }}
 
 Prefer task-specific `search_code_context` over repository-wide file listing.
 Do not add a file-listing step unless the user explicitly asks for the full file tree.
-Return JSON like {"plan": ["...", "..."]}.
+Return JSON like {"plan": ["...", "..."], "user_update": "我会按最小证据路径先定位相关代码。"}.
+user_update should be a short user-facing progress message when useful, or an empty string. Do not reveal chain-of-thought.

@@ -17,7 +17,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
 from agent_runtime.graph.register import NodeRegistry
-from model.agent.tools import ToolSpec
+from model.agent.tools import ToolSpec, normalize_tool_result, run_tool_spec
 from model.agent.node import NodeSpec
 from model.skill import SkillSpec
 from model.prompt import PromptSpec
@@ -58,13 +58,20 @@ class RegistrySnapshot:
         name: str,
         repo_path: str,
         args: dict[str, Any] | None = None,
+        *,
+        allowed_permissions: list[str] | None = None,
     ) -> dict[str, Any]:
         spec = self.get_tool(name)
         if spec is None:
             logger.warning("unknown tool requested name={}", name)
-            return {"error": f"Unknown tool: {name}"}
+            return normalize_tool_result({"error": f"Unknown tool: {name}"}, tool_name=name)
         logger.debug("running registered tool name={} repo_path={} args={}", name, repo_path, args or {})
-        return spec.runner(repo_path, args or {})
+        return run_tool_spec(
+            spec,
+            repo_path,
+            args or {},
+            allowed_permissions=allowed_permissions,
+        )
 
     # 用 name 反射获取已经注册的元素集合
     def names(self, kind: str) -> list[str]:

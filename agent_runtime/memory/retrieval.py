@@ -184,7 +184,7 @@ class LLMMemoryReranker:
             selected_payloads.append(
                 {
                     "memory_id": memory_id,
-                    "relevance": _clamp_float(item.get("relevance"), "invalid memory relevance from LLM"),
+                    "relevance": _clamp_float(item.get("relevance"), 1, "invalid memory relevance from LLM"),
                     "reason": str(item.get("reason", "")).strip()[:300],
                 }
             )
@@ -223,7 +223,7 @@ class LLMMemoryReranker:
             selected.append(
                 {
                     "memory_id": memory_id,
-                    "relevance": _clamp_float(item.get("relevance"), "invalid memory relevance from LLM"),
+                    "relevance": _clamp_float(item.get("relevance"), 1, "invalid memory relevance from LLM"),
                     "reason": str(item.get("reason", "")).strip()[:300],
                 }
             )

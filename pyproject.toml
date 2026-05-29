@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lee-agent"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+  "loguru>=0.7.0",
+  "openai>=1.0.0",
+  "pydantic>=2.0.0",
+  "prompt_toolkit>=3.0.0",
+  "rich>=13.0.0",
+  "typer>=0.9.0",
+]
+
+[project.scripts]
+lee-agent = "interfaces.cli:main"
+
+[tool.setuptools]
+py-modules = ["main", "config", "utils", "baseregister"]
+packages = [
+  "agent_runtime",
+  "agent_runtime.codebase_context",
+  "agent_runtime.context",
+  "agent_runtime.graph",
+  "agent_runtime.llm",
+  "agent_runtime.memory",
+  "agent_runtime.rl",
+  "interfaces",
+  "model",
+  "model.agent",
+  "prompts",
+  "skills",
+  "tools",
+  "tools.code_tools",
+  "tools.git_tools",
+  "tools.go_tools",
+  "tools.plan_tools",
+  "tools.shell_tools",
+]
+
+[tool.setuptools.package-data]
+prompts = ["system/*.md", "user/*.md"]
+skills = ["*.md"]

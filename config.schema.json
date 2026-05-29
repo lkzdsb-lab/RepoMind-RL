@@ -19,6 +19,8 @@
     "verify_command": { "type": "string" },
     "verify": { "type": "string" },
     "max_loops": { "type": "integer", "minimum": 1 },
+    "require_step_approval": { "type": "boolean" },
+    "step_approval": { "type": "boolean" },
     "env_file": { "type": ["string", "null"] },
     "env_override": { "type": "boolean" },
     "manifest_dir": { "type": ["string", "null"] },
@@ -139,6 +141,28 @@
         "discount": { "type": "number", "minimum": 0 },
         "replay_max_size": { "type": "integer", "minimum": 1 },
         "train_batch_size": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "editing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "max_files": { "type": "integer", "minimum": 1 },
+        "max_changed_lines": { "type": "integer", "minimum": 1 },
+        "max_file_bytes": { "type": "integer", "minimum": 1 },
+        "require_read_before_write": { "type": "boolean" },
+        "confidence_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "allow_create": { "type": "boolean" }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "require_step_approval": { "type": "boolean" },
+        "step_approval": { "type": "boolean" },
+        "each_step": { "type": "boolean" }
       }
     }
   },

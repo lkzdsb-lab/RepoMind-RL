@@ -11,10 +11,11 @@ from config import LLMConfig
 from model.agent.graph import AgentState
 from model.llm import ObservationResponse
 from prompts.templates import load_prompt, render_prompt
-from utils import _clamp_float
+from utils import _clamp_float, _clean_string_list
 
 
 OBSERVATION_STATUSES = {"ok", "error", "inconclusive", "complete"}
+OBSERVATION_MAX_CHAR = 260
 
 
 class Observer(Protocol):
@@ -52,10 +53,9 @@ class LLMObserver:
             llm_config=self.llm_config,
             system_prompt=load_prompt("system/observer.md"),
             build_prompt=_observation_prompt,
-            fallback=None,
+            fallback=_fallback_observation,
             response_model=ObservationResponse,
             normalize=_normalize_observation,
-            raise_on_error=True,
         )
 
     def observe(self, state: AgentState) -> dict[str, Any]:
@@ -99,11 +99,30 @@ def _normalize_observation(
         "latest_tool": tool[:120],
         "status": status,
         "summary": str(data.get("summary") or "").strip()[:500],
-        "new_findings": _clean_list(data.get("new_findings"), 8),
-        "hypotheses": _clean_list(data.get("hypotheses"), 6),
-        "missing_context": _clean_list(data.get("missing_context"), 6),
-        "next_search_terms": _clean_list(data.get("next_search_terms"), 10),
-        "confidence": _clamp_float(data.get("confidence"), "invalid observer confidence from LLM"),
+        "new_findings": _clean_string_list(data.get("new_findings"), 8, OBSERVATION_MAX_CHAR),
+        "hypotheses": _clean_string_list(data.get("hypotheses"), 6, OBSERVATION_MAX_CHAR),
+        "missing_context": _clean_string_list(data.get("missing_context"), 6, OBSERVATION_MAX_CHAR),
+        "next_search_terms": _clean_string_list(data.get("next_search_terms"), 10, OBSERVATION_MAX_CHAR),
+        "confidence": _clamp_float(data.get("confidence"), 0.5, "invalid observer confidence from LLM"),
+    }
+
+
+def _fallback_observation(state: AgentState, context: dict[str, Any]) -> dict[str, Any]:
+    latest = _latest_tool_call(state)
+    output = latest.get("output")
+    if not isinstance(output, dict):
+        output = {}
+    status = "error" if output.get("error") else "inconclusive"
+    return {
+        "type": "llm_observation",
+        "latest_tool": str(latest.get("name") or "unknown")[:120],
+        "status": status,
+        "summary": str(output.get("message") or output.get("error") or "LLM observer unavailable; used tool output directly.")[:500],
+        "new_findings": [],
+        "hypotheses": [],
+        "missing_context": [],
+        "next_search_terms": [],
+        "confidence": 0.0,
     }
 
 
@@ -140,17 +159,4 @@ def _trim_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _trim_value(item) for key, item in list(value.items())[:20]}
     return value
-
-
-def _clean_list(value: Any, limit: int) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    cleaned: list[str] = []
-    for item in value:
-        text = str(item).strip()
-        if text and text not in cleaned:
-            cleaned.append(text[:260])
-        if len(cleaned) >= limit:
-            break
-    return cleaned
 

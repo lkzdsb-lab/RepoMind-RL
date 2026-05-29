@@ -1,6 +1,7 @@
-Return JSON with keys: latest_tool, status, summary, new_findings, hypotheses, missing_context, next_search_terms, confidence.
+Return JSON with keys: latest_tool, status, summary, new_findings, hypotheses, missing_context, next_search_terms, confidence, user_update.
 status must be one of ok, error, inconclusive, complete.
 Use short list fields. If uncertain, use empty lists instead of guessing.
+user_update should be a short user-facing progress message when useful, or an empty string. Do not reveal chain-of-thought.
 
 title={{ title }}
 description={{ description }}

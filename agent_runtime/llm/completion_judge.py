@@ -12,7 +12,7 @@ from config import LLMConfig
 from model.agent.graph import AgentState
 from model.llm import CompletionJudgeResponse
 from prompts.templates import load_prompt, render_prompt
-from utils import _truncate_text, _safe_float
+from utils import _truncate_text, _safe_float, _clean_string_list
 
 
 class CompletionJudge(Protocol):
@@ -70,6 +70,16 @@ def _completion_judge_prompt(state: AgentState, context: dict[str, Any]) -> str:
         project_profile=json.dumps(state.get("project_profile", {}), ensure_ascii=False),
         verification_required=json.dumps(bool(state.get("verification_required", True))),
         verification_reason=state.get("verification_reason", ""),
+        verification_stale=json.dumps(bool(state.get("verification_stale", False))),
+        verification_commands=json.dumps(
+            state.get("verification_commands", [])[-5:],
+            ensure_ascii=False,
+            default=str,
+        ),
+        plan_mode=json.dumps(bool(state.get("plan_mode", False))),
+        plan_mode_approved=json.dumps(bool(state.get("plan_mode_approved", False))),
+        debug_technical_plan=_truncate_text(str(state.get("debug_technical_plan", "")), 5000),
+        plan_mode_evaluation=_truncate_text(str(state.get("plan_mode_evaluation", "")), 3000),
         task_analysis=json.dumps(state.get("task_analysis", {}), ensure_ascii=False, default=str),
         plan=json.dumps(state.get("plan", []), ensure_ascii=False),
         candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),
@@ -80,6 +90,7 @@ def _completion_judge_prompt(state: AgentState, context: dict[str, Any]) -> str:
         ),
         tool_calls=json.dumps(tool_call_summaries(state), ensure_ascii=False, default=str),
         test_results=json.dumps(state.get("test_results", [])[-5:], ensure_ascii=False, default=str),
+        edit_results=json.dumps(state.get("edit_results", [])[-5:], ensure_ascii=False, default=str),
         patch_summary=state.get("patch_summary") or "",
         has_patch=json.dumps(bool(state.get("patch"))),
         llm_observations=json.dumps(
@@ -109,10 +120,12 @@ def _normalize_completion_judge(
     decision = str(data.get("decision") or "complete").strip().lower()
     if decision not in {"complete", "needs_user_input", "continue"}:
         decision = "complete"
-    questions = _clean_list(data.get("questions"), 3, 300)
+    questions = _clean_string_list(data.get("questions"), 3, 300)
     reason = str(data.get("reason") or "").strip()[:1000]
+    suggested_next_action = str(data.get("suggested_next_action") or "").strip()[:120]
     if decision == "needs_user_input" and not questions:
-        questions = ["请补充当前任务缺失的具体目标、约束或期望判断标准。"]
+        decision = "continue"
+        suggested_next_action = suggested_next_action or "search_code_context"
     if decision != "needs_user_input":
         questions = []
     confidence = _safe_float(data.get("confidence"), default=0.5)
@@ -120,7 +133,7 @@ def _normalize_completion_judge(
         "decision": decision,
         "reason": reason,
         "questions": questions,
-        "suggested_next_action": str(data.get("suggested_next_action") or "").strip()[:120],
+        "suggested_next_action": suggested_next_action,
         "confidence": max(0.0, min(1.0, confidence)),
     }
 
@@ -137,21 +150,8 @@ def _trim_observations(observations: Any) -> list[dict[str, Any]]:
                 "latest_tool": item.get("latest_tool"),
                 "status": item.get("status"),
                 "summary": str(item.get("summary") or "")[:500],
-                "new_findings": _clean_list(item.get("new_findings"), 5, 220),
-                "missing_context": _clean_list(item.get("missing_context"), 5, 220),
+                "new_findings": _clean_string_list(item.get("new_findings"), 5, 220),
+                "missing_context": _clean_string_list(item.get("missing_context"), 5, 220),
             }
         )
     return trimmed
-
-
-def _clean_list(value: Any, limit: int, max_chars: int) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    cleaned: list[str] = []
-    for item in value:
-        text = str(item).strip()
-        if text and text not in cleaned:
-            cleaned.append(text[:max_chars])
-        if len(cleaned) >= limit:
-            break
-    return cleaned

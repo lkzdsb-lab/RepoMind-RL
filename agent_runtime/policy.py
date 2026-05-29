@@ -40,7 +40,7 @@ class HeuristicDebugPolicy:
             "阅读候选文件建立上下文",
             verification_step,
             "查看 git diff 并汇总当前补丁状态",
-            "按 reward gate 写入分层记忆，必要时沉淀到 skill",
+            "结束任务并在 finalize 阶段按 reward gate 写入分层记忆",
         ]
 
     # llm 决策
@@ -91,16 +91,10 @@ class HeuristicDebugPolicy:
                 thought="检查当前工作区 diff，判断是否已有补丁。",
             )
 
-        if not state.get("memory_written"):
-            return Action(
-                "write_memory",
-                thought="将本次任务轨迹沉淀为第一版 episodic memory。",
-            )
-
         if loop_count >= max_loops:
             return Action("finish", thought="达到最大循环次数，结束本轮执行。")
 
-        return Action("finish", thought="已完成第一版可执行流程。")
+        return Action("finish", thought="已完成第一版可执行流程，进入收尾。")
 
     def extract_keyword(self, state: AgentState) -> str:
         return self.query_planner.plan(state).query
