@@ -57,16 +57,19 @@ from agent_runtime.planning import HeuristicPlanner, LLMPlanner, Planner
 from agent_runtime.policy import HeuristicDebugPolicy
 from agent_runtime.registry import RegistryManager, RegistrySnapshot
 from agent_runtime.rl import (
+    ACTION_SPACE_VERSION,
     ActionSpace,
+    ENCODER_VERSION,
     QLearningDebugPolicy,
     QLearningTrainer,
+    QTableStore,
     ReplayBuffer,
+    REWARD_VERSION,
     RewardFunction,
     StateEncoder,
     Transition,
 )
 from agent_runtime.skill_selection import DisabledSkillSelector, LLMSkillSelector, SkillSelector
-from agent_runtime.rl.trainer import QTableStore
 from agent_runtime.tool_registry import ToolRegistry
 from agent_runtime.trajectory import TrajectoryRecorder
 from agent_runtime.user_updates import UserUpdateSink, set_user_update_sink
@@ -1169,6 +1172,9 @@ class DebugAgent:
         prev_encoded = self.rl_encoder.encode(prev_state)
         next_encoded = self.rl_encoder.encode(next_state)
         reward = self.rl_reward.compute(prev_state, action, next_state, output)
+        next_legal = [
+            spec.name for spec in self.rl_action_space.legal_specs(next_state)
+        ]
         transition = Transition(
             state_key=prev_encoded.key,
             action=action.name,
@@ -1180,6 +1186,10 @@ class DebugAgent:
             state_features=prev_encoded.features,
             next_state_features=next_encoded.features,
             task_id=next_state.get("task_id", ""),
+            encoder_version=ENCODER_VERSION,
+            action_space_version=ACTION_SPACE_VERSION,
+            reward_version=REWARD_VERSION,
+            next_legal_actions=next_legal,
         )
         if self.rl_replay is not None:
             self.rl_replay.append(transition)
@@ -1189,7 +1199,12 @@ class DebugAgent:
                 self.rl_trainer.train_batch(
                     self.rl_replay.sample(self.config.rl_train_batch_size)
                 )
-            self.rl_q_store.save(self.rl_q_table)
+            self.rl_q_store.save(
+                self.rl_q_table,
+                encoder_version=ENCODER_VERSION,
+                action_space_version=ACTION_SPACE_VERSION,
+                reward_version=REWARD_VERSION,
+            )
 
         transitions = next_state.get("rl_transitions", []) + [transition.to_dict()]
         logger.bind(task_id=next_state.get("task_id"), action=action.name).debug(

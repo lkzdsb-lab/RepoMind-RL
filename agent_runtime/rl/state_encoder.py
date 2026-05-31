@@ -7,6 +7,9 @@ from model.agent.encode import EncodedState
 from model.agent.graph import AgentState
 
 
+ENCODER_VERSION = "state-encoder-v1"
+
+
 class StateEncoder:
     """
         把复杂的 AgentState 压缩成 RL policy 能学习的离散状态表示

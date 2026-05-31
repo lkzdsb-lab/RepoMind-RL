@@ -18,6 +18,12 @@ class Transition:
     task_id: str = ""
     transition_id: str = field(default_factory=lambda: str(uuid4()))
     created_at: str = field(default_factory=utc_now)
+    # Versioning fields for policy compatibility tracking
+    encoder_version: str = ""
+    action_space_version: str = ""
+    reward_version: str = ""
+    # Legal actions available from the *next* state (used by trainer for next_max)
+    next_legal_actions: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

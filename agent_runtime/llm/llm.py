@@ -9,7 +9,6 @@ from typing import Any, Protocol
 from config import LLMConfig
 from loguru import logger
 from model.llm import LLMMessage, LLMRequest, LLMResponse
-from openai import OpenAI, OpenAIError
 from pydantic import BaseModel
 from utils import _safe_int
 
@@ -26,16 +25,29 @@ class DisabledLLMClient:
 
 class OpenAICompatibleLLMClient:
     """
-        llm 客户端
+    OpenAI-compatible client.
+
+    ``openai`` is imported lazily so executor imports keep working when the
+    package is not installed and LLM usage is disabled.
     """
     def __init__(self, config: LLMConfig) -> None:
+        try:
+            from openai import OpenAI, OpenAIError  # noqa: F811
+        except ImportError as exc:
+            raise RuntimeError(
+                "The openai package is required when an LLM provider is configured. "
+                "Install openai or disable LLM provider. "
+                "For example: `pip install openai`, or set provider=\"disabled\"."
+            ) from exc
+        self._OpenAI = OpenAI
+        self._OpenAIError = OpenAIError
         self.config = config
         api_key = os.getenv(config.api_key_env) if config.api_key_env else ""
         if not api_key:
             raise RuntimeError(
                 f"LLM API key env var `{config.api_key_env}` is not set for provider `{config.provider}`."
             )
-        self.client = OpenAI(
+        self.client = self._OpenAI(
             api_key=api_key,
             base_url=config.api_base or None,
             timeout=config.timeout,
@@ -73,7 +85,7 @@ class OpenAICompatibleLLMClient:
             kwargs["response_format"] = request.response_format
             completion = self.client.beta.chat.completions.parse(**kwargs)
             parsed = _extract_parsed_message(completion)
-        except OpenAIError as exc:
+        except self._OpenAIError as exc:
             logger.warning("llm request failed error_type={} error={}", exc.__class__.__name__, exc)
             raise RuntimeError(f"LLM request failed via OpenAI SDK: {exc}") from exc
 
