@@ -118,8 +118,13 @@ class DebugAgent:
         self.rl_reward = RewardFunction()
         repo_path = Path(config.repo_path)
         self.rl_q_store = QTableStore(repo_path / config.rl_q_table_path)
+        expected_rl_versions = {
+            "encoder_version": ENCODER_VERSION,
+            "action_space_version": ACTION_SPACE_VERSION,
+            "reward_version": REWARD_VERSION,
+        }
         self.rl_q_table = (
-            self.rl_q_store.load()
+            self.rl_q_store.load(expected_versions=expected_rl_versions)
             if self.rl_enabled or (config.action_policy_mode or "").strip().lower() == "llm"
             else {}
         )
@@ -1179,6 +1184,7 @@ class DebugAgent:
             state_key=prev_encoded.key,
             action=action.name,
             action_args=action.args,
+            tool_output_summary=self._rl_tool_output_summary(action, output),
             reward=reward.reward,
             reward_reasons=reward.reasons,
             next_state_key=next_encoded.key,
@@ -1217,6 +1223,57 @@ class DebugAgent:
             "rl_transitions": transitions,
             "rl_last_reward": reward.to_dict(),
         }
+
+    def _rl_tool_output_summary(self, action: Action, output: Dict[str, Any]) -> Dict[str, Any]:
+        """Return small, stable tool-output fields for RL diagnostics.
+
+        Replay entries should not copy large stdout/stderr/content payloads, but
+        evaluator metrics need enough output data to distinguish successful
+        verification, empty searches, and useful file reads.
+        """
+        summary: Dict[str, Any] = {}
+        for key in (
+            "exit_code",
+            "error",
+            "fatal",
+            "needs_more_context",
+            "needs_user_input",
+            "skipped",
+            "reason",
+            "command",
+        ):
+            if key in output:
+                summary[key] = _compact_rl_summary_value(output.get(key))
+
+        if action.name == "run_shell_command":
+            purpose = output.get("purpose") or action.args.get("purpose")
+            if purpose:
+                summary["purpose"] = str(purpose)
+        elif action.name == "run_tests":
+            summary.setdefault("command", action.args.get("command") or output.get("command"))
+        elif action.name == "search_code_context":
+            summary["candidate_count"] = _code_context_candidate_count(output)
+            selected = output.get("selected_code_context")
+            if isinstance(selected, dict):
+                summary["selected_candidate_count"] = _code_context_candidate_count(selected)
+        elif action.name in {"search_text", "search_code"}:
+            matches = output.get("matches")
+            if isinstance(matches, list):
+                summary["matches_count"] = len(matches)
+        elif action.name == "read_file":
+            file_path = output.get("file_path") or action.args.get("file_path")
+            if file_path:
+                summary["file_path"] = str(file_path)
+            content = output.get("content")
+            if isinstance(content, str):
+                summary["content_chars"] = len(content)
+        elif action.name == "apply_code_patch":
+            summary["applied"] = bool(output.get("applied"))
+            changed_files = output.get("changed_files")
+            if isinstance(changed_files, list):
+                summary["changed_files_count"] = len(changed_files)
+
+        return {key: value for key, value in summary.items() if value is not None}
 
     def _short_term_tool_content(self, tool_name: str, output: Dict[str, Any]) -> str:
         if output.get("error"):
@@ -1822,6 +1879,21 @@ def _is_git_repo(repo_path: str) -> bool:
     except (OSError, subprocess.TimeoutExpired):
         return False
     return result.returncode == 0 and result.stdout.strip().lower() == "true"
+
+
+def _compact_rl_summary_value(value: Any, max_chars: int = 300) -> Any:
+    if isinstance(value, str):
+        return value if len(value) <= max_chars else value[:max_chars] + "...[truncated]"
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        return [_compact_rl_summary_value(item, max_chars=max_chars) for item in value[:20]]
+    if isinstance(value, dict):
+        return {
+            str(key): _compact_rl_summary_value(item, max_chars=max_chars)
+            for key, item in list(value.items())[:20]
+        }
+    return str(value)[:max_chars]
 
 
 def _code_context_candidate_count(context: Dict[str, Any]) -> int:

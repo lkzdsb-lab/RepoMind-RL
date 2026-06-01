@@ -96,6 +96,22 @@ python -m agent_runtime.rl.evaluator \
 
 支持 `--format json` 输出机器可读结果。
 
+Evaluator 当前输出两类指标：
+
+| 指标 | 含义 |
+|---|---|
+| `avg_reward` | replay 中 transition 的平均 reward，只能作为过程诊断，不等价于真实修复成功率 |
+| `finish_after_tests_ratio` | finish action 前是否已经出现成功验证 |
+| `stale_finish_count` | 在验证过期时 finish 的次数 |
+| `replay_version_coverage` | replay 中 transition 是否带有当前 encoder/action/reward 版本 |
+| `metadata_matches_expected` | Q-table metadata 是否匹配当前代码版本 |
+| `steps_per_episode_avg` | 每个 task/episode 的平均 action 步数 |
+| `search_hit_rate` | `search_code_context` 返回候选代码上下文的比例 |
+| `duplicate_read_ratio` | 重复读取同一文件的比例，越低越好 |
+| `verification_pass_rate` | 验证类 action 的通过比例 |
+
+这些指标用于衡量 Harness 行为质量；真实自动修复能力仍需要 benchmark 任务集计算 `task_success_rate`。
+
 ### Q-table 工具
 
 ```bash
@@ -109,11 +125,55 @@ python -m agent_runtime.rl.qtable_tools wrap-legacy \
     --trust-legacy
 ```
 
+### Policy benchmark 对比
+
+收集两组固定任务 replay 后，可以比较 heuristic policy 和 RL policy：
+
+```bash
+python -m agent_runtime.rl.benchmark compare \
+    --baseline-replay runs/heuristic/replay.jsonl \
+    --candidate-replay runs/rl/replay.jsonl \
+    --tasks benchmarks/rl_policy_smoke/tasks.json \
+    --format text
+```
+
+也可以输出 JSON 供 CI 或报告使用：
+
+```bash
+python -m agent_runtime.rl.benchmark compare \
+    --baseline-replay runs/heuristic/replay.jsonl \
+    --candidate-replay runs/rl/replay.jsonl \
+    --tasks benchmarks/rl_policy_smoke/tasks.json \
+    --format json
+```
+
+Benchmark 对比的核心指标：
+
+| 指标 | 含义 | 方向 |
+|---|---|---|
+| `task_success_rate` | 固定任务集中成功 finish 的比例 | 越高越好 |
+| `avg_steps_to_success` | 成功任务平均用了多少 action | 越低越好 |
+| `verification_pass_rate` | 验证类 action 的通过比例 | 越高越好 |
+| `duplicate_read_ratio` | 重复读取同一文件的比例 | 越低越好 |
+| `stale_finish_count` | verification stale 时 finish 的次数 | 越低越好 |
+
+仓库提供了一组 smoke replay fixture，可以直接验证 benchmark 报告格式：
+
+```bash
+python -m agent_runtime.rl.benchmark compare \
+    --baseline-replay benchmarks/rl_policy_smoke/heuristic_replay.jsonl \
+    --candidate-replay benchmarks/rl_policy_smoke/rl_replay.jsonl \
+    --tasks benchmarks/rl_policy_smoke/tasks.json \
+    --format text
+```
+
+这组 fixture 用于展示指标计算方式，不代表真实代码修复效果。
+
 ## 已知限制
 
 1. **没有真实 benchmark** — 当前 RL 策略在单元测试级别验证，缺少大规模代码修复的端到端评测（如 SWE-bench）。
 2. **没有 DQN / 深度学习** — 当前纯 Q-table 是表格化学习，状态空间离散化后维度有限；未引入神经网络函数近似。
 3. **memory retrieval 尚不是 RL action** — memory 检索由启发式/LLM 驱动，未纳入 RL action space。
-4. **端到端自动修复能力仍需评测证明** — 当前没有完整的修复成功率指标；evaluator 只统计 replay 统计数据。
+4. **端到端自动修复能力仍需评测证明** — 当前 evaluator 能统计 Harness 行为指标，但完整修复成功率仍需要 benchmark 任务集。
 5. **LLM 依赖 lazily imported** — 默认 LLM disabled 时不需要 `openai`；启用 LLM 时需要 `pip install openai`。
 6. **Q-table 自动迁移有限** — 旧格式 Q-table 被识别并安全忽略；`qtable_tools wrap-legacy --trust-legacy` 提供显式手动包装路径，不做语义兼容性保证。

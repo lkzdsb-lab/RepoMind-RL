@@ -3,7 +3,9 @@ import builtins
 import pytest
 
 from agent_runtime.executor import DebugAgent
+from agent_runtime.rl import QLearningDebugPolicy
 from config import DebugAgentConfig, LLMConfig
+from model.agent.actions import Action
 
 
 class TestExecutorImport:
@@ -21,6 +23,7 @@ class TestDebugAgentInitRlSmoke:
         agent = DebugAgent(config)
         assert agent is not None
         assert agent.rl_enabled is True
+        assert isinstance(agent.policy, QLearningDebugPolicy)
         # Q-table store and replay buffer should be initialised
         assert agent.rl_q_store is not None
         assert agent.rl_replay is not None
@@ -53,6 +56,45 @@ class TestDebugAgentInitRlSmoke:
         config.action_policy_mode = "llm"
         agent = DebugAgent(config)
         assert agent.rl_q_table == {}
+
+    def test_record_transition_persists_tool_output_summary(self, tmp_path):
+        config = _rl_smoke_config(repo_path=str(tmp_path))
+        agent = DebugAgent(config)
+        prev_state = {
+            "task_id": "smoke-task",
+            "status": "running",
+            "loop_count": 0,
+            "max_loops": 4,
+            "tool_calls": [],
+            "candidate_files": [],
+        }
+        next_state = {
+            **prev_state,
+            "status": "testing",
+            "test_results": [{"exit_code": 0}],
+        }
+        output = {
+            "exit_code": 0,
+            "command": "python -m pytest tests/rl -q",
+            "stdout": "large output should not be copied to replay",
+        }
+
+        updated = agent._record_rl_transition(
+            prev_state,
+            Action("run_tests", args={"command": "python -m pytest tests/rl -q"}),
+            next_state,
+            output,
+            done=False,
+        )
+
+        transition_dict = updated["rl_transitions"][0]
+        summary = transition_dict["tool_output_summary"]
+        assert summary["exit_code"] == 0
+        assert summary["command"] == "python -m pytest tests/rl -q"
+        assert "stdout" not in summary
+
+        replayed = agent.rl_replay.list()
+        assert replayed[0].tool_output_summary["exit_code"] == 0
 
 
 class TestLlmLazyImport:

@@ -36,7 +36,12 @@ class QTableStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def load(self) -> dict[str, dict[str, float]]:
+    def load(
+        self,
+        expected_versions: dict[str, str] | None = None,
+        *,
+        allow_mismatch: bool = False,
+    ) -> dict[str, dict[str, float]]:
         if not self.path.exists():
             logger.info("rl q-table not found path={}", self.path)
             return {}
@@ -49,6 +54,19 @@ class QTableStore:
         # Envelope format (v2)
         if isinstance(data, dict) and "metadata" in data:
             meta = data.get("metadata", {})
+            if expected_versions and not allow_mismatch:
+                mismatches = {
+                    key: {"expected": expected, "actual": meta.get(key, "")}
+                    for key, expected in expected_versions.items()
+                    if meta.get(key) != expected
+                }
+                if mismatches:
+                    logger.warning(
+                        "rl q-table metadata mismatch; returning empty q_table path={} mismatches={}",
+                        self.path,
+                        mismatches,
+                    )
+                    return {}
             logger.info(
                 "rl q-table loaded (envelope) path={} states={} encoder={} action_space={} reward={}",
                 self.path,

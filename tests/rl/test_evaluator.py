@@ -160,6 +160,8 @@ class TestEvaluatorJsonOutput:
             assert data["metadata_matches_expected"] is True
             assert "replay_version_coverage" in data
             assert data["replay_version_coverage"]["encoder_version"] == 1.0
+            assert "behavior_metrics" in data
+            assert "verification_pass_rate" in data["behavior_metrics"]
 
 
 class TestFinishAfterTestsRatio:
@@ -255,6 +257,57 @@ class TestFinishAfterTestsRatio:
         ]
         ratio = evaluator._finish_after_tests_ratio(transitions)
         assert ratio == 0.0
+
+
+class TestBehaviorMetrics:
+    def test_behavior_metrics_measure_search_reads_verification_and_steps(self):
+        transitions = [
+            {
+                "task_id": "t1",
+                "action": "search_code_context",
+                "reward": 0.4,
+                "tool_output_summary": {"candidate_count": 2},
+            },
+            {
+                "task_id": "t1",
+                "action": "search_code_context",
+                "reward": -0.1,
+                "tool_output_summary": {"candidate_count": 0},
+            },
+            {
+                "task_id": "t1",
+                "action": "read_file",
+                "action_args": {"file_path": "a.py"},
+            },
+            {
+                "task_id": "t1",
+                "action": "read_file",
+                "action_args": {"file_path": "a.py"},
+            },
+            {
+                "task_id": "t2",
+                "action": "read_file",
+                "action_args": {"file_path": "b.py"},
+            },
+            {
+                "task_id": "t2",
+                "action": "run_tests",
+                "tool_output_summary": {"exit_code": 0},
+            },
+            {
+                "task_id": "t2",
+                "action": "run_shell_command",
+                "action_args": {"purpose": "verification"},
+                "tool_output_summary": {"exit_code": 1},
+            },
+        ]
+
+        metrics = evaluator._behavior_metrics(transitions)
+
+        assert metrics["search_hit_rate"] == 0.5
+        assert metrics["duplicate_read_ratio"] == 0.3333
+        assert metrics["verification_pass_rate"] == 0.5
+        assert metrics["steps_per_episode_avg"] == 3.5
 
 
 class TestReplayVersionCoverage:

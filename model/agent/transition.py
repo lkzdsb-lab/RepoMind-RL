@@ -14,6 +14,7 @@ class Transition:
     state_features: dict[str, Any] = field(default_factory=dict)
     next_state_features: dict[str, Any] = field(default_factory=dict)
     action_args: dict[str, Any] = field(default_factory=dict)
+    tool_output_summary: dict[str, Any] = field(default_factory=dict)
     reward_reasons: list[str] = field(default_factory=list)
     task_id: str = ""
     transition_id: str = field(default_factory=lambda: str(uuid4()))

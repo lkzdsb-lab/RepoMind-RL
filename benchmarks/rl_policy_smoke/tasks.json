@@ -1,0 +1,14 @@
+[
+  {
+    "task_id": "rl-smoke-search-read-test",
+    "title": "Locate candidate code, read relevant file, and finish after verification"
+  },
+  {
+    "task_id": "rl-smoke-avoid-stale-finish",
+    "title": "Avoid finishing after edits until verification is fresh"
+  },
+  {
+    "task_id": "rl-smoke-reduce-repeat-read",
+    "title": "Prefer new candidate files over repeated reads"
+  }
+]

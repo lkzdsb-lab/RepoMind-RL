@@ -4,6 +4,9 @@ import json
 import tempfile
 from pathlib import Path
 
+from agent_runtime.rl.action_space import ACTION_SPACE_VERSION
+from agent_runtime.rl.reward import REWARD_VERSION
+from agent_runtime.rl.state_encoder import ENCODER_VERSION
 from agent_runtime.rl.trainer import QTableStore
 
 
@@ -82,6 +85,56 @@ class TestQTableStoreEnvelope:
             loaded = store.load()
             assert isinstance(loaded["s"]["a"], float)
             assert loaded["s"]["a"] == 1.0
+
+    def test_mismatched_envelope_metadata_returns_empty_when_expected_versions_given(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "q_table.json"
+            envelope = {
+                "metadata": {
+                    "encoder_version": "old-encoder",
+                    "action_space_version": ACTION_SPACE_VERSION,
+                    "reward_version": REWARD_VERSION,
+                },
+                "q_values": {"s": {"a": 1.0}},
+            }
+            path.write_text(json.dumps(envelope), encoding="utf-8")
+            store = QTableStore(path)
+
+            loaded = store.load(
+                expected_versions={
+                    "encoder_version": ENCODER_VERSION,
+                    "action_space_version": ACTION_SPACE_VERSION,
+                    "reward_version": REWARD_VERSION,
+                }
+            )
+
+            assert loaded == {}
+
+    def test_mismatched_envelope_metadata_can_be_loaded_explicitly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "q_table.json"
+            q_values = {"s": {"a": 1.0}}
+            envelope = {
+                "metadata": {
+                    "encoder_version": "old-encoder",
+                    "action_space_version": ACTION_SPACE_VERSION,
+                    "reward_version": REWARD_VERSION,
+                },
+                "q_values": q_values,
+            }
+            path.write_text(json.dumps(envelope), encoding="utf-8")
+            store = QTableStore(path)
+
+            loaded = store.load(
+                expected_versions={
+                    "encoder_version": ENCODER_VERSION,
+                    "action_space_version": ACTION_SPACE_VERSION,
+                    "reward_version": REWARD_VERSION,
+                },
+                allow_mismatch=True,
+            )
+
+            assert loaded == q_values
 
     def test_unreadable_file_returns_empty(self):
         with tempfile.TemporaryDirectory() as tmp:

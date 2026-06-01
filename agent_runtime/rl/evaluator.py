@@ -73,12 +73,18 @@ def _episodes(transitions: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
 def _is_verification_pass(transition: dict[str, Any]) -> bool:
     """Return True if *transition* represents a successful verification."""
     action = transition.get("action", "")
-    if action == "run_tests" and transition.get("reward", 0) > 0.5:
-        return True
+    if action == "run_tests":
+        if _transition_exit_code(transition) == 0:
+            return True
+        if transition.get("reward", 0) > 0.5:
+            return True
     # Also recognise run_shell_command with purpose=verification and exit_code=0
     if action == "run_shell_command":
         action_args = transition.get("action_args", {})
-        if isinstance(action_args, dict) and action_args.get("purpose") == "verification":
+        summary = _tool_output_summary(transition)
+        purpose = action_args.get("purpose") if isinstance(action_args, dict) else None
+        purpose = purpose or summary.get("purpose")
+        if purpose == "verification":
             if _transition_exit_code(transition) == 0:
                 return True
             # Older replay records did not persist tool output. Keep a reward
@@ -89,7 +95,7 @@ def _is_verification_pass(transition: dict[str, Any]) -> bool:
 
 
 def _transition_exit_code(transition: dict[str, Any]) -> int | None:
-    for key in ("tool_output", "output", "tool_result", "action_args"):
+    for key in ("tool_output_summary", "tool_output", "output", "tool_result", "action_args"):
         value = transition.get(key)
         if isinstance(value, dict) and "exit_code" in value:
             try:
@@ -97,6 +103,23 @@ def _transition_exit_code(transition: dict[str, Any]) -> int | None:
             except (TypeError, ValueError):
                 return None
     return None
+
+
+def _tool_output_summary(transition: dict[str, Any]) -> dict[str, Any]:
+    summary = transition.get("tool_output_summary")
+    return summary if isinstance(summary, dict) else {}
+
+
+def _is_verification_run(transition: dict[str, Any]) -> bool:
+    action = transition.get("action", "")
+    if action == "run_tests":
+        return True
+    if action != "run_shell_command":
+        return False
+    action_args = transition.get("action_args", {})
+    summary = _tool_output_summary(transition)
+    purpose = action_args.get("purpose") if isinstance(action_args, dict) else None
+    return (purpose or summary.get("purpose")) == "verification"
 
 
 def _finish_after_tests_ratio(transitions: list[dict[str, Any]]) -> float:
@@ -118,6 +141,58 @@ def _finish_after_tests_ratio(transitions: list[dict[str, Any]]) -> float:
     if finish_count == 0:
         return 0.0
     return finish_after / finish_count
+
+
+def _behavior_metrics(transitions: list[dict[str, Any]]) -> dict[str, float]:
+    episodes = _episodes(transitions)
+    step_counts = [len(items) for items in episodes.values()]
+
+    searches = [t for t in transitions if t.get("action") == "search_code_context"]
+    search_hits = 0
+    for t in searches:
+        summary = _tool_output_summary(t)
+        candidate_count = summary.get("candidate_count", summary.get("selected_candidate_count", 0))
+        try:
+            has_candidates = int(candidate_count) > 0
+        except (TypeError, ValueError):
+            has_candidates = False
+        if has_candidates or t.get("reward", 0.0) > 0:
+            search_hits += 1
+
+    read_count = 0
+    duplicate_reads = 0
+    seen_reads_by_task: dict[str, set[str]] = defaultdict(set)
+    for t in transitions:
+        if t.get("action") != "read_file":
+            continue
+        read_count += 1
+        action_args = t.get("action_args", {})
+        summary = _tool_output_summary(t)
+        file_path = ""
+        if isinstance(action_args, dict):
+            file_path = str(action_args.get("file_path") or "").strip()
+        file_path = file_path or str(summary.get("file_path") or "").strip()
+        if not file_path:
+            continue
+        task_id = str(t.get("task_id", "unknown"))
+        if file_path in seen_reads_by_task[task_id]:
+            duplicate_reads += 1
+        else:
+            seen_reads_by_task[task_id].add(file_path)
+
+    verification_runs = [t for t in transitions if _is_verification_run(t)]
+    verification_passes = sum(1 for t in verification_runs if _is_verification_pass(t))
+
+    return {
+        "steps_per_episode_avg": round(
+            sum(step_counts) / len(step_counts), 4
+        ) if step_counts else 0.0,
+        "search_hit_rate": round(search_hits / len(searches), 4) if searches else 0.0,
+        "duplicate_read_ratio": round(duplicate_reads / read_count, 4) if read_count else 0.0,
+        "verification_pass_rate": round(
+            verification_passes / len(verification_runs), 4
+        ) if verification_runs else 0.0,
+    }
 
 
 def _stale_finish_count(transitions: list[dict[str, Any]]) -> int:
@@ -182,6 +257,7 @@ def run(replay_path: str, q_table_path: str, fmt: str) -> None:
     stale_finishes = _stale_finish_count(transitions)
     finish_ratio = _finish_after_tests_ratio(transitions)
     replay_cov = _replay_version_coverage(transitions)
+    behavior_metrics = _behavior_metrics(transitions)
 
     per_action_avg: dict[str, float] = {}
     for action, rs in sorted(action_rewards.items()):
@@ -213,6 +289,7 @@ def run(replay_path: str, q_table_path: str, fmt: str) -> None:
             "q_table_metadata": metadata,
             "metadata_matches_expected": metadata_matches,
             "replay_version_coverage": replay_cov,
+            "behavior_metrics": behavior_metrics,
             "q_table_states": total_q_states,
             "q_table_entries": total_q_entries,
             "q_table_max": round(max_q, 4),
@@ -254,6 +331,17 @@ def run(replay_path: str, q_table_path: str, fmt: str) -> None:
         lines.append("    Replay version coverage:")
         for k, v in replay_cov.items():
             lines.append(f"      {k}: {v:.1%}")
+        lines.append("  Behavior metrics:")
+        lines.append(
+            f"    steps_per_episode_avg : {behavior_metrics['steps_per_episode_avg']:.2f}"
+        )
+        lines.append(f"    search_hit_rate       : {behavior_metrics['search_hit_rate']:.1%}")
+        lines.append(
+            f"    duplicate_read_ratio  : {behavior_metrics['duplicate_read_ratio']:.1%}"
+        )
+        lines.append(
+            f"    verification_pass_rate: {behavior_metrics['verification_pass_rate']:.1%}"
+        )
         lines.append("-" * 60)
         lines.append("  Q-table:")
         lines.append(f"    states               : {total_q_states}")

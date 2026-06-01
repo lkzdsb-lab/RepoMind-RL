@@ -1,0 +1,12 @@
+{"task_id":"rl-smoke-search-read-test","action":"search_code_context","reward":0.4,"tool_output_summary":{"candidate_count":1}}
+{"task_id":"rl-smoke-search-read-test","action":"read_file","reward":0.25,"action_args":{"file_path":"src/example_a.py"},"tool_output_summary":{"file_path":"src/example_a.py","content_chars":1200}}
+{"task_id":"rl-smoke-search-read-test","action":"run_tests","reward":1.0,"tool_output_summary":{"exit_code":0,"command":"pytest tests/smoke/test_example_a.py -q"}}
+{"task_id":"rl-smoke-search-read-test","action":"finish","reward":1.0}
+{"task_id":"rl-smoke-avoid-stale-finish","action":"search_code_context","reward":0.4,"tool_output_summary":{"candidate_count":1}}
+{"task_id":"rl-smoke-avoid-stale-finish","action":"read_file","reward":0.25,"action_args":{"file_path":"src/example_b.py"},"tool_output_summary":{"file_path":"src/example_b.py","content_chars":1000}}
+{"task_id":"rl-smoke-avoid-stale-finish","action":"run_tests","reward":1.0,"tool_output_summary":{"exit_code":0,"command":"pytest tests/smoke/test_example_b.py -q"}}
+{"task_id":"rl-smoke-avoid-stale-finish","action":"finish","reward":1.0}
+{"task_id":"rl-smoke-reduce-repeat-read","action":"search_code_context","reward":0.4,"tool_output_summary":{"candidate_count":1}}
+{"task_id":"rl-smoke-reduce-repeat-read","action":"read_file","reward":0.25,"action_args":{"file_path":"src/example_c.py"},"tool_output_summary":{"file_path":"src/example_c.py","content_chars":900}}
+{"task_id":"rl-smoke-reduce-repeat-read","action":"run_tests","reward":1.0,"tool_output_summary":{"exit_code":0,"command":"pytest tests/smoke/test_example_c.py -q"}}
+{"task_id":"rl-smoke-reduce-repeat-read","action":"finish","reward":1.0}
