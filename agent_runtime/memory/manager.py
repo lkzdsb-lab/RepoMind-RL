@@ -38,12 +38,14 @@ class MemoryWriteResult:
     written: list[MemoryCard]
     promoted: list[MemoryCard]
     consolidated: list[dict[str, Any]]
+    feedback: list[dict[str, Any]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "written": [card.to_dict() for card in self.written],
             "promoted": [card.to_dict() for card in self.promoted],
             "consolidated": self.consolidated,
+            "feedback": self.feedback or [],
         }
 
 """
@@ -123,21 +125,59 @@ class LayeredMemoryManager:
     ) -> MemoryWriteResult:
         base = self._build_task_card(state)
         written = [self.mid_store.append_card(base)]
+        feedback = self.record_reuse_feedback(state)
         promoted = self._promote(base, state)
         persisted_promotions = [self.long_store.append_card(card) for card in promoted]
         consolidated = self._consolidate_to_skills(persisted_promotions, state, registry)
         logger.bind(task_id=state.get("task_id")).info(
-            "task memory recorded written={} promoted={} consolidated={} reward={:.2f}",
+            "task memory recorded written={} promoted={} consolidated={} feedback={} reward={:.2f}",
             len(written),
             len(persisted_promotions),
             len(consolidated),
+            len(feedback),
             base.reward_credit,
         )
         return MemoryWriteResult(
             written=written,
             promoted=persisted_promotions,
             consolidated=consolidated,
+            feedback=feedback,
         )
+
+    def record_reuse_feedback(self, state: AgentState) -> list[dict[str, Any]]:
+        success = self._task_succeeded(state)
+        feedback: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        memories = state.get("retrieved_memories") or {}
+        if not isinstance(memories, dict):
+            return feedback
+
+        for tier in ("mid_term", "long_term"):
+            values = memories.get(tier, [])
+            if not isinstance(values, list):
+                continue
+            store = self.mid_store if tier == "mid_term" else self.long_store
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                memory_id = str(item.get("memory_id", ""))
+                if not memory_id or (tier, memory_id) in seen:
+                    continue
+                seen.add((tier, memory_id))
+                updated = store.record_reuse_feedback(memory_id, success=success)
+                if updated is None:
+                    continue
+                feedback.append(
+                    {
+                        "memory_id": memory_id,
+                        "tier": tier,
+                        "success": success,
+                        "reuse_success": updated.reuse_success,
+                        "reuse_failure": updated.reuse_failure,
+                        "conflict_score": updated.conflict_score,
+                    }
+                )
+        return feedback
 
     def add_short_term(
         self,
@@ -277,7 +317,7 @@ class LayeredMemoryManager:
 
     def _build_task_card(self, state: AgentState) -> MemoryCard:
         latest_test = (state.get("test_results") or [{}])[-1]
-        passed = latest_test.get("exit_code") == 0
+        passed = self._task_succeeded(state)
         has_patch = bool(state.get("patch"))
         # 计算当前状态的 reward
         reward = self._reward_credit(state)
@@ -450,15 +490,38 @@ class LayeredMemoryManager:
             reward -= 0.4
         return reward
 
+    def _task_succeeded(self, state: AgentState) -> bool:
+        tests = state.get("test_results") or []
+        latest_exit = tests[-1].get("exit_code") if tests else None
+        return latest_exit == 0 and not state.get("error")
+
     def _task_memory_content(self, state: AgentState) -> str:
         candidates = ", ".join(state.get("candidate_files", [])[:5]) or "none"
         tests = state.get("test_results") or []
-        latest_exit = tests[-1].get("exit_code") if tests else "not_run"
+        latest = tests[-1] if tests else {}
+        latest_exit = latest.get("exit_code", "not_run")
+        tools = ", ".join(call.get("name", "unknown") for call in state.get("tool_calls", [])[-8:])
+        selected_skills = ", ".join(state.get("selected_skills", [])[:5]) or "none"
+        code_context = state.get("code_context") or {}
+        context_summary = "none"
+        if isinstance(code_context, dict):
+            context_summary = (
+                f"files={len(code_context.get('files', []))}, "
+                f"functions={len(code_context.get('functions', []))}, "
+                f"routes={len(code_context.get('api_routes', []))}, "
+                f"db_models={len(code_context.get('db_models', []))}"
+            )
         return (
             f"Task: {state.get('title', '')}\n"
+            f"Description: {state.get('description', '') or 'none'}\n"
             f"Candidate files: {candidates}\n"
+            f"Tools used: {tools or 'none'}\n"
+            f"Selected skills: {selected_skills}\n"
+            f"Code context summary: {context_summary}\n"
+            f"Verify command: {latest.get('command', state.get('verify_command', 'not_run'))}\n"
             f"Latest test exit code: {latest_exit}\n"
-            f"Patch summary: {state.get('patch_summary') or 'no patch'}"
+            f"Patch summary: {state.get('patch_summary') or 'no patch'}\n"
+            f"Error: {state.get('error') or 'none'}"
         )
 
     def _semantic_content(self, state: AgentState) -> str:

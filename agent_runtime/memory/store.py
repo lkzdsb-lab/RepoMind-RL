@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Iterable, Protocol
+from typing import Any, Iterable, Protocol
 
 from agent_runtime.memory.cards import MemoryCard, MemorySearchResult, MemoryTier
 
@@ -15,6 +15,15 @@ class MemoryStore(Protocol):
     def append_card(self, card: MemoryCard) -> MemoryCard:
         ...
 
+    def get_card(self, memory_id: str) -> MemoryCard | None:
+        ...
+
+    def upsert_card(self, card: MemoryCard) -> MemoryCard:
+        ...
+
+    def update_card(self, memory_id: str, **updates: Any) -> MemoryCard | None:
+        ...
+
     def list_cards(self) -> list[MemoryCard]:
         ...
 
@@ -22,6 +31,12 @@ class MemoryStore(Protocol):
         ...
 
     def touch_card(self, memory_id: str, used_at: str | None = None) -> MemoryCard | None:
+        ...
+
+    def deprecate_card(self, memory_id: str, reason: str = "") -> MemoryCard | None:
+        ...
+
+    def record_reuse_feedback(self, memory_id: str, success: bool) -> MemoryCard | None:
         ...
 
 
@@ -41,6 +56,35 @@ class JsonlMemoryStore:
         with self.path.open("a", encoding="utf-8") as fp:
             fp.write(json.dumps(card.to_dict(), ensure_ascii=False) + "\n")
         return card
+
+    def get_card(self, memory_id: str) -> MemoryCard | None:
+        for card in self.list_cards():
+            if card.memory_id == memory_id:
+                return card
+        return None
+
+    def upsert_card(self, card: MemoryCard) -> MemoryCard:
+        card = card.with_updates(tier=self.tier)
+        cards = self.list_cards()
+        for index, existing in enumerate(cards):
+            if existing.memory_id == card.memory_id:
+                cards[index] = card
+                self._write_cards(cards)
+                return card
+        cards.append(card)
+        self._write_cards(cards)
+        return card
+
+    def update_card(self, memory_id: str, **updates: Any) -> MemoryCard | None:
+        cards = self.list_cards()
+        for index, card in enumerate(cards):
+            if card.memory_id != memory_id:
+                continue
+            updated = card.with_updates(**updates)
+            cards[index] = updated
+            self._write_cards(cards)
+            return updated
+        return None
 
     def touch_card(self, memory_id: str, used_at: str | None = None) -> MemoryCard | None:
         cards = self.list_cards()
@@ -72,7 +116,10 @@ class JsonlMemoryStore:
                 line = line.strip()
                 if not line:
                     continue
-                cards.append(MemoryCard.from_dict(json.loads(line)))
+                try:
+                    cards.append(MemoryCard.from_dict(json.loads(line)))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
         return cards
 
     def search(self, query: str, limit: int = 5) -> list[dict]:
@@ -82,6 +129,8 @@ class JsonlMemoryStore:
         query_terms = set(self._tokens(query))
         scored: list[MemorySearchResult] = []
         for card in self.list_cards():
+            if card.status == "deprecated":
+                continue
             score = self._lexical_score(query_terms, card)
             if score > 0:
                 scored.append(MemorySearchResult(card=card, score=score, source=card.tier))
@@ -124,6 +173,29 @@ class JsonlMemoryStore:
                 fp.write(json.dumps(card.to_dict(), ensure_ascii=False) + "\n")
         tmp_path.replace(self.path)
 
+    def deprecate_card(self, memory_id: str, reason: str = "") -> MemoryCard | None:
+        card = self.get_card(memory_id)
+        if card is None:
+            return None
+        metadata = dict(card.metadata)
+        if reason:
+            metadata["deprecated_reason"] = reason
+        return self.update_card(memory_id, status="deprecated", metadata=metadata)
+
+    def record_reuse_feedback(self, memory_id: str, success: bool) -> MemoryCard | None:
+        card = self.get_card(memory_id)
+        if card is None:
+            return None
+        updates: dict[str, Any]
+        if success:
+            updates = {"reuse_success": card.reuse_success + 1}
+        else:
+            updates = {
+                "reuse_failure": card.reuse_failure + 1,
+                "conflict_score": min(card.conflict_score + 0.1, 1.0),
+            }
+        return self.update_card(memory_id, **updates)
+
 
 class LocalVectorMemoryStore(JsonlMemoryStore):
     """A local vector-store stand-in using token vectors.
@@ -142,6 +214,8 @@ class LocalVectorMemoryStore(JsonlMemoryStore):
         query_terms = set(self._tokens(query))
         scored: list[MemorySearchResult] = []
         for card in self.list_cards():
+            if card.status == "deprecated":
+                continue
             score = self._cosine_token_score(query_terms, card)
             if score > 0:
                 scored.append(MemorySearchResult(card=card, score=score, source=self.tier))
@@ -185,6 +259,27 @@ class RedisMemoryStore:
         )
         return card
 
+    def get_card(self, memory_id: str) -> MemoryCard | None:
+        value = self.client.hget(self.namespace, memory_id)
+        if value is None:
+            return None
+        return MemoryCard.from_dict(json.loads(value))
+
+    def upsert_card(self, card: MemoryCard) -> MemoryCard:
+        return self.append_card(card)
+
+    def update_card(self, memory_id: str, **updates: Any) -> MemoryCard | None:
+        card = self.get_card(memory_id)
+        if card is None:
+            return None
+        updated = card.with_updates(**updates)
+        self.client.hset(
+            self.namespace,
+            updated.memory_id,
+            json.dumps(updated.to_dict(), ensure_ascii=False),
+        )
+        return updated
+
     def list_cards(self) -> list[MemoryCard]:
         values = self.client.hvals(self.namespace)
         return [MemoryCard.from_dict(json.loads(value)) for value in values]
@@ -203,12 +298,35 @@ class RedisMemoryStore:
         return updated
 
     def search_cards(self, query: str, limit: int = 5) -> list[MemorySearchResult]:
-        fallback = JsonlMemoryStore(Path("/private/tmp/unused-memory-search.jsonl"))
+        fallback = JsonlMemoryStore(Path(".repomind/unused-memory-search.jsonl"))
         scored = []
         query_terms = set(fallback._tokens(query))
         for card in self.list_cards():
+            if card.status == "deprecated":
+                continue
             score = fallback._lexical_score(query_terms, card)
             if score > 0:
                 scored.append(MemorySearchResult(card=card, score=score, source=self.tier))
         scored.sort(key=lambda item: item.score, reverse=True)
         return scored[:limit]
+
+    def deprecate_card(self, memory_id: str, reason: str = "") -> MemoryCard | None:
+        card = self.get_card(memory_id)
+        if card is None:
+            return None
+        metadata = dict(card.metadata)
+        if reason:
+            metadata["deprecated_reason"] = reason
+        return self.update_card(memory_id, status="deprecated", metadata=metadata)
+
+    def record_reuse_feedback(self, memory_id: str, success: bool) -> MemoryCard | None:
+        card = self.get_card(memory_id)
+        if card is None:
+            return None
+        if success:
+            return self.update_card(memory_id, reuse_success=card.reuse_success + 1)
+        return self.update_card(
+            memory_id,
+            reuse_failure=card.reuse_failure + 1,
+            conflict_score=min(card.conflict_score + 0.1, 1.0),
+        )

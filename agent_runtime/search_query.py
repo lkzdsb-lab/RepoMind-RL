@@ -38,13 +38,7 @@ class SearchQueryPlanner:
             f"{state.get('title', '')} {state.get('description', '')}",
             weight=3.0,
         )
-        self._add_text(
-            weighted,
-            buckets,
-            "memory_terms",
-            str(state.get("memory_context", ""))[:3000],
-            weight=0.8,
-        )
+        self._add_memory_context(weighted, buckets, state)
         self._add_text(
             weighted,
             buckets,
@@ -116,6 +110,39 @@ class SearchQueryPlanner:
                 self._add_text(weighted, buckets, "code_terms", text, weight=2.0)
                 if item.get("path") and key == "api_routes":
                     self._add_text(weighted, buckets, "code_terms", str(item["path"]), weight=2.5)
+
+    def _add_memory_context(
+        self,
+        weighted: dict[str, float],
+        buckets: dict[str, list[str]],
+        state: AgentState,
+    ) -> None:
+        memories = state.get("retrieved_memories") or {}
+        if not isinstance(memories, dict):
+            return
+
+        positive_types = {"episodic", "semantic", "procedural"}
+        for tier, weight in (
+            ("long_term", 1.2),
+            ("skill", 1.2),
+            ("mid_term", 0.6),
+            ("short_term", 0.4),
+        ):
+            values = memories.get(tier, [])
+            if not isinstance(values, list):
+                continue
+            for item in values[:5]:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "anti_pattern":
+                    continue
+                if item.get("type") not in positive_types:
+                    continue
+                text = " ".join(
+                    str(item.get(field, ""))
+                    for field in ("trigger", "content", "tags", "scope", "skill_name")
+                )
+                self._add_text(weighted, buckets, "memory_terms", text[:1200], weight=weight)
 
 # 通过便利 text 将 term 打分并分类
     def _add_text(
