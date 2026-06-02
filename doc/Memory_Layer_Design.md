@@ -1,4 +1,5 @@
-**MemoryLayer晋升整体逻辑**
+#MemoryLayer晋升整体逻辑#
+
 `memoryLayer` 的晋升逻辑主要在 `manager.py` 里，核心方法是：
 
 ```python
@@ -21,7 +22,7 @@ _consolidate_to_skills()
 >
 > -> 如果分数更高，再沉淀成 skill memory
 
-**1. 先生成基础记忆**
+## 1. 先生成基础记忆
 任务执行到 write_memory action 时，会调用：
 
 ```
@@ -56,7 +57,7 @@ status = "draft"
 >
 > 测试失败 -> 失败经验 anti_pattern
 
-**2. 计算 reward_credit**
+## 2. 计算 reward_credit
 基础记忆会带一个 reward_credit，来自：
 
 ```
@@ -97,7 +98,7 @@ if state.get("error"):
 >
 > ​	reward_credit = -0.2 - 0.4 = -0.6
 
-**3. promotion_score 晋升分**
+## 3. promotion_score 晋升分
 真正决定晋升的是 MemoryCard.promotion_score()。
 
 位置在 cards.py。
@@ -124,7 +125,7 @@ promotion_score = reward_credit + reuse_score - age_penalty
 >
 > 冲突越高 -> 越不容易晋升
 
-**4. 写入 mid-term**
+## 4. 写入 mid-term
 无论是否晋升，基础记忆都会先写入中期记忆：
 
 ```
@@ -137,7 +138,7 @@ written = [self.mid_store.append_card(base)]
 
 这一层保存的是任务级经验，主要是 episodic 或 anti-pattern。
 
-**5. 晋升到 long-term**
+## 5. 晋升到 long-term
 然后进入：
 
 ```
@@ -160,7 +161,7 @@ skill_consolidation_threshold = 1.5
 >
 > \>= 1.5  -> skill memory
 
-**6. semantic 晋升**
+## 6. semantic 晋升
 如果基础 memory 是成功经验，并且：
 
 ```
@@ -185,7 +186,7 @@ semantic 记忆更像“稳定事实”。
 
 > 类似问题通常和哪些文件/模块有关？
 
-**7. procedural 晋升**
+## 7. procedural 晋升
 如果分数更高：
 
 ```
@@ -214,7 +215,7 @@ procedural 记忆更像“操作流程”。
 
 > 下次遇到类似问题应该按什么步骤调试？
 
-**8. anti-pattern 的特殊逻辑**
+## 8. anti-pattern 的特殊逻辑
 如果基础 memory 是：
 
 ```
@@ -237,7 +238,7 @@ content="Avoid repeating this failing path. " + base.content
 
 不过anti-pattern 现在不会污染正向搜索 query。它可以出现在 prompt 里提醒 Agent 避坑，但不会被当成“我要搜索的代码关键词”。
 
-**9. 写入 long-term**
+## 9. 写入 long-term
 所有晋升出来的 memory 会写入：
 
 ```python
@@ -253,7 +254,7 @@ persisted_promotions = [
 
 虽然当前叫 LocalVectorMemoryStore，但本质还是 JSONL，只是用 token cosine 模拟向量检索边界，方便以后替换成真正的向量数据库。
 
-**10. skill consolidation**
+## 10. skill consolidation*
 最后调用：
 
 ```python
@@ -284,7 +285,7 @@ card.promotion_score() >= skill_threshold
 
 也就是把高价值经验沉淀成可读的 skill 文档。
 
-**完整例子**
+### 完整例子
 假设一次任务：
 
 > 测试通过
