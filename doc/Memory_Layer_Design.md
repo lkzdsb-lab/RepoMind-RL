@@ -1,4 +1,4 @@
-#MemoryLayer晋升整体逻辑#
+# MemoryLayer晋升整体逻辑说明文档
 
 `memoryLayer` 的晋升逻辑主要在 `manager.py` 里，核心方法是：
 
