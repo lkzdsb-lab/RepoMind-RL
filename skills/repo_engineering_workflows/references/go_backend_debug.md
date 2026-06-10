@@ -1,6 +1,6 @@
 # Go Backend Debug
 
-Use this skill when the task involves a Go backend, HTTP route, handler, service,
+Use this workflow when the task involves a Go backend, HTTP route, handler, service,
 repository, DB model, middleware, or `go test` failure.
 
 ## Workflow

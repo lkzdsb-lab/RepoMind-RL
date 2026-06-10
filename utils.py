@@ -3,7 +3,6 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-
 def _tokens(text: str) -> list[str]:
     """
     从输入 text 获取不重复的词
@@ -31,6 +30,13 @@ def _truncate_text(text: str, limit: int) -> str:
     """
     return text if len(text) <= limit else text[:limit] + "...[truncated]"
 
+def _truncate(value: str, max_chars: int) -> str:
+    """
+        对 str 进行裁剪
+    """
+    text = str(value or "").strip()
+    return text[:max_chars]
+
 
 def _safe_float(value: Any, default: float) -> float:
     """
@@ -47,7 +53,7 @@ def _clamp_float(value: Any, default: float, info: str) -> float:
         parsed = float(value)
     except (TypeError, ValueError):
         raise ValueError(f"{info}: {value}")
-    return max(0.0, min(default, parsed))
+    return max(0.0, max(default, parsed))
 
 
 def _put_if_present(target: dict[str, Any], key: str, value: Any) -> None:
@@ -61,7 +67,7 @@ def _put_if_present(target: dict[str, Any], key: str, value: Any) -> None:
     target[key] = value
 
 
-def _clean_string_list(value: Any, limit: int, max_chars: int) -> list[str]:
+def _clean_string_list(value: Any, limit: int, max_chars: int | None) -> list[str]:
     """
         提取干净的字符串列表
     """
@@ -71,7 +77,10 @@ def _clean_string_list(value: Any, limit: int, max_chars: int) -> list[str]:
     for item in value:
         text = str(item).strip()
         if text and text not in cleaned:
-            cleaned.append(text[:max_chars])
+            if max_chars and len(text) > max_chars:
+                cleaned.append(text[:max_chars])
+            else:
+                cleaned.append(text)
         if 0 <= limit <= len(cleaned):
             break
     return cleaned
@@ -88,3 +97,47 @@ def _safe_int(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+def _language_counts(index: Any) -> dict[str, int]:
+    """ 获取 不同语言文件类型 个数"""
+    counts: dict[str, int] = {}
+    for entry in index.tree:
+        counts[entry.language] = counts.get(entry.language, 0) + 1
+    return counts
+
+
+def _line_number(content: str, offset: int) -> int:
+    """ 获取行数 """
+    return content.count("\n", 0, offset) + 1
+
+
+def _line_at(content: str, offset: int) -> str:
+    """ 获取每一行的内容 """
+    start = content.rfind("\n", 0, offset) + 1
+    end = content.find("\n", offset)
+    if end == -1:
+        end = len(content)
+    return content[start:end]
+
+
+def _embedding_doc(
+    doc_id: str,
+    kind: str,
+    title: str,
+    content: str,
+    file_path: str = "",
+    symbol: str = "",
+    metadata: dict | None = None,
+) -> Any:
+    from agent_runtime.codebase_context.models import EmbeddingDoc
+
+    return EmbeddingDoc(
+        doc_id=doc_id,
+        kind=kind,
+        title=title,
+        content=content[:4000],
+        file_path=file_path,
+        symbol=symbol,
+        tokens=sorted(set(_tokens(" ".join([title, content])))),
+        metadata=metadata or {},
+    )

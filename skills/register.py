@@ -16,56 +16,10 @@ class SkillRegistry(BaseRegistry):
         skill_root = Path(__file__).resolve().parent
         default_specs = [
             SkillSpec(
-                name="go_backend_debug",
+                name="repo_engineering_workflows",
                 description=(
-                    "Debug Go backend issues by following route, handler, service, "
-                    "repository, model, and test relationships."
-                ),
-                version="0.1.0",
-                triggers=[
-                    "go",
-                    "golang",
-                    "handler",
-                    "service",
-                    "repository",
-                    "controller",
-                    "route",
-                    "middleware",
-                    "gorm",
-                    "sql",
-                    "go test",
-                ],
-                resources=[(skill_root / "go_backend_debug.md").as_posix()],
-                entrypoints={"workflow": "go_backend_debug"},
-                metadata={"priority": 1, "category": "debugging"},
-            ),
-            SkillSpec(
-                name="codebase_context_workflow",
-                description=(
-                    "Use the structured codebase context index to search routes, symbols, "
-                    "functions, DB models, call graph hints, and test mappings."
-                ),
-                version="0.1.0",
-                triggers=[
-                    "codebase_context",
-                    "search_code_context",
-                    "symbol",
-                    "function",
-                    "route",
-                    "db_model",
-                    "call_graph",
-                    "test_mapping",
-                    "index",
-                ],
-                resources=[(skill_root / "codebase_context_workflow.md").as_posix()],
-                entrypoints={"workflow": "codebase_context_workflow"},
-                metadata={"priority": 2, "category": "code_context"},
-            ),
-            SkillSpec(
-                name="code_review_workflow",
-                description=(
-                    "Review code by reading the smallest necessary dependency closure "
-                    "before producing evidence-based findings."
+                    "Handle repository engineering tasks including code review, code editing, "
+                    "structured codebase search, test failure triage, and Go backend debugging."
                 ),
                 version="0.1.0",
                 triggers=[
@@ -83,19 +37,6 @@ class SkillRegistry(BaseRegistry):
                     "risk",
                     "correctness",
                     "implementation quality",
-                ],
-                resources=[(skill_root / "code_review_workflow.md").as_posix()],
-                entrypoints={"workflow": "code_review_workflow"},
-                metadata={"priority": 2, "category": "review"},
-            ),
-            SkillSpec(
-                name="code_edit_workflow",
-                description=(
-                    "Modify repository code using guarded exact-replacement edits, "
-                    "with mandatory user questions for uncertain behavior."
-                ),
-                version="0.1.0",
-                triggers=[
                     "fix",
                     "patch",
                     "modify",
@@ -107,10 +48,39 @@ class SkillRegistry(BaseRegistry):
                     "修改",
                     "修复",
                     "实现",
+                    "codebase_context",
+                    "search_code_context",
+                    "symbol",
+                    "function",
+                    "route",
+                    "db_model",
+                    "call_graph",
+                    "test_mapping",
+                    "index",
+                    "test",
+                    "pytest",
+                    "go",
+                    "golang",
+                    "handler",
+                    "service",
+                    "repository",
+                    "controller",
+                    "route",
+                    "middleware",
+                    "gorm",
+                    "sql",
+                    "go test",
+                    "assertion",
+                    "timeout",
+                    "flaky",
+                    "import error",
+                    "panic",
+                    "traceback",
+                    "failure",
                 ],
-                resources=[(skill_root / "code_edit_workflow.md").as_posix()],
-                entrypoints={"workflow": "code_edit_workflow"},
-                metadata={"priority": 2, "category": "editing"},
+                resources=[(skill_root / "repo_engineering_workflows" / "SKILL.md").as_posix()],
+                entrypoints={"workflow": "repo_engineering_workflows"},
+                metadata={"priority": 1, "category": "engineering"},
             ),
             SkillSpec(
                 name="memory_consolidation",
@@ -130,7 +100,7 @@ class SkillRegistry(BaseRegistry):
                     "consolidation",
                     "skill memory",
                 ],
-                resources=[(skill_root / "memory_consolidation.md").as_posix()],
+                resources=[(skill_root / "memory_consolidation" / "SKILL.md").as_posix()],
                 entrypoints={"workflow": "memory_consolidation"},
                 metadata={"priority": 3, "category": "memory"},
             ),
@@ -152,31 +122,8 @@ class SkillRegistry(BaseRegistry):
                     "ManifestLoader",
                     "Snapshot",
                 ],
-                resources=[(skill_root / "registry_extension.md").as_posix()],
+                resources=[(skill_root / "registry_extension" / "SKILL.md").as_posix()],
                 entrypoints={"workflow": "registry_extension"},
-                metadata={"priority": 4, "category": "registry"},
-            ),
-            SkillSpec(
-                name="test_failure_triage",
-                description=(
-                    "Triage failing pytest, go test, import, timeout, flaky, and assertion "
-                    "failures before patching."
-                ),
-                version="0.1.0",
-                triggers=[
-                    "test",
-                    "pytest",
-                    "go test",
-                    "assertion",
-                    "timeout",
-                    "flaky",
-                    "import error",
-                    "panic",
-                    "traceback",
-                    "failure",
-                ],
-                resources=[(skill_root / "test_failure_triage.md").as_posix()],
-                entrypoints={"workflow": "test_failure_triage"},
                 metadata={"priority": 5, "category": "testing"},
             ),
         ]

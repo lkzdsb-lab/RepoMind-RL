@@ -5,3 +5,5 @@ __pycache__/
 !/config.example.json
 /.env
 /.env.local
+.tmp_pycache
+.gitignore

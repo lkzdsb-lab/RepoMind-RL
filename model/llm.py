@@ -3,12 +3,49 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def _coerce_score(value: Any) -> Any:
+    if isinstance(value, str):
+        text = value.strip().lower()
+        aliases = {
+            "low": 0.25,
+            "medium": 0.5,
+            "med": 0.5,
+            "high": 0.85,
+        }
+        if text in aliases:
+            return aliases[text]
+    return value
+
+
+def _coerce_string_list(value: Any) -> Any:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        lines = [
+            line.strip().lstrip("-*•").strip()
+            for line in text.splitlines()
+            if line.strip()
+        ]
+        if len(lines) > 1:
+            return lines
+        return [text]
+    return [str(value).strip()] if str(value).strip() else []
 
 
 class PlanResponse(BaseModel):
     plan: list[str] = Field(default_factory=list)
     user_update: str = ""
+
+    @field_validator("plan", mode="before")
+    @classmethod
+    def _normalize_plan(cls, value: Any) -> Any:
+        return _coerce_string_list(value)
 
 
 class TaskAnalysisResponse(BaseModel):
@@ -22,6 +59,11 @@ class TaskAnalysisResponse(BaseModel):
     search_hints: list[str]
     user_update: str = ""
 
+    @field_validator("entities", "acceptance_criteria", "risk_notes", "search_hints", mode="before")
+    @classmethod
+    def _normalize_lists(cls, value: Any) -> Any:
+        return _coerce_string_list(value)
+
 
 class ObservationResponse(BaseModel):
     latest_tool: str = "unknown"
@@ -29,10 +71,20 @@ class ObservationResponse(BaseModel):
     summary: str = ""
     new_findings: list[str] = Field(default_factory=list)
     hypotheses: list[str] = Field(default_factory=list)
+    invalidated_hypotheses: list[str] = Field(default_factory=list)
+    facts: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    next_actions: list[str] = Field(default_factory=list)
+    memory_candidates: list[dict[str, Any]] = Field(default_factory=list)
     missing_context: list[str] = Field(default_factory=list)
     next_search_terms: list[str] = Field(default_factory=list)
     confidence: float = 0.5
     user_update: str = ""
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _normalize_confidence(cls, value: Any) -> Any:
+        return _coerce_score(value)
 
 
 class FinalReportResponse(BaseModel):
@@ -45,6 +97,11 @@ class FinalReportResponse(BaseModel):
     next_steps: list[str] = Field(default_factory=list)
     user_update: str = ""
 
+    @field_validator("work_done", "candidate_files", "test_results", "next_steps", mode="before")
+    @classmethod
+    def _normalize_lists(cls, value: Any) -> Any:
+        return _coerce_string_list(value)
+
 
 class CompletionJudgeResponse(BaseModel):
     decision: Literal["complete", "needs_user_input", "continue"] = "complete"
@@ -54,17 +111,37 @@ class CompletionJudgeResponse(BaseModel):
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     user_update: str = ""
 
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _normalize_confidence(cls, value: Any) -> Any:
+        return _coerce_score(value)
+
+    @field_validator("questions", mode="before")
+    @classmethod
+    def _normalize_questions(cls, value: Any) -> Any:
+        return _coerce_string_list(value)
+
 
 class MemoryQueryPlanResponse(BaseModel):
     queries: list[str]
     rationale: str = ""
     user_update: str = ""
 
+    @field_validator("queries", mode="before")
+    @classmethod
+    def _normalize_queries(cls, value: Any) -> Any:
+        return _coerce_string_list(value)
+
 
 class MemorySelectionResponse(BaseModel):
     memory_id: str
     relevance: float
     reason: str = ""
+
+    @field_validator("relevance", mode="before")
+    @classmethod
+    def _normalize_relevance(cls, value: Any) -> Any:
+        return _coerce_score(value)
 
 
 class MemoryRerankResponse(BaseModel):
@@ -77,11 +154,21 @@ class CodeContextQueryPlanResponse(BaseModel):
     rationale: str = ""
     user_update: str = ""
 
+    @field_validator("queries", mode="before")
+    @classmethod
+    def _normalize_queries(cls, value: Any) -> Any:
+        return _coerce_string_list(value)
+
 
 class CodeContextSelectionResponse(BaseModel):
     candidate_id: str
     relevance: float
     reason: str = ""
+
+    @field_validator("relevance", mode="before")
+    @classmethod
+    def _normalize_relevance(cls, value: Any) -> Any:
+        return _coerce_score(value)
 
 
 class CodeContextRerankResponse(BaseModel):
@@ -94,6 +181,11 @@ class SkillSelectionResponse(BaseModel):
     skill_name: str
     relevance: float
     reason: str = ""
+
+    @field_validator("relevance", mode="before")
+    @classmethod
+    def _normalize_relevance(cls, value: Any) -> Any:
+        return _coerce_score(value)
 
 
 class SkillSelectorResponse(BaseModel):
@@ -108,8 +200,15 @@ class ActionChoiceResponse(BaseModel):
     reason: str = ""
     action_input: dict[str, Any] = Field(default_factory=dict)
     uncertainty_questions: list[str] = Field(default_factory=list)
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     user_update: str = ""
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _normalize_confidence(cls, value: Any) -> Any:
+        if value in (None, ""):
+            return None
+        return _coerce_score(value)
 
 
 class ToolResultResponse(BaseModel):

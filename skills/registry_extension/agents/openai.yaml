@@ -1,0 +1,4 @@
+interface:
+  display_name: "Registry Extension"
+  short_description: "Extend tools, prompts, and skills without breaking registry snapshots"
+

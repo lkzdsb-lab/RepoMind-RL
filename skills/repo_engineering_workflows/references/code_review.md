@@ -1,10 +1,10 @@
 # Code Review Workflow
 
-Use this skill when the user asks to review code, check whether code is correct,
+Use this workflow when the user asks to review code, check whether code is correct,
 find bugs or risks, or inspect implementation quality without necessarily
 requesting a patch.
 
-This skill is evidence-driven. Do not make final claims before reading the
+This workflow is evidence-driven. Do not make final claims before reading the
 smallest necessary dependency context.
 
 ## Workflow

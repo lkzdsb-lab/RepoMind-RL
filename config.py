@@ -20,6 +20,28 @@ class FileConfig(object):
     MAX_READ_AMOUNT = 200
     MAX_LIST_FILE_LIMIT = 200
     MAX_READ_FILE_LIMIT = 8000
+    MAX_FILE_BYTES_LIMIT = 500_000
+    LIST_IGNORED_DIRS = {
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+        "env",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".repomind",
+        "node_modules",
+        "vendor",
+        "__pycache__",
+        "dist",
+        "build",
+        "coverage",
+        ".next",
+        ".turbo",
+    }
 
 
 @dataclass
@@ -40,7 +62,7 @@ class DebugAgentConfig:
     """
     # 仓库路径
     repo_path: str = ""
-    verify_command: str = "pytest"
+    verify_command: str = ""
     max_loops: int = 8
     env_file: str | None = ".env"
     env_override: bool = False
@@ -70,6 +92,7 @@ class DebugAgentConfig:
     context_max_tokens: int = 32000
     context_compression_threshold: float = 0.75
     context_recent_items: int = 8
+    context_min_new_tokens: int = 1200
 
     # llm 配置
     llm_config: LLMConfig = field(default_factory=LLMConfig)
@@ -89,6 +112,10 @@ class DebugAgentConfig:
     action_policy_mode: str = "heuristic"
     task_analyzer_mode: str = "disabled"
     observer_mode: str = "disabled"
+    observer_use_delta: bool = True
+    observer_full_state_on_severe: bool = True
+    observer_write_threshold: float = 0.35
+    observer_store_limit: int = 12
     memory_query_planner_mode: str = "disabled"
     memory_reranker_mode: str = "disabled"
     code_context_query_planner_mode: str = "disabled"
@@ -209,6 +236,13 @@ def default_config_payload() -> dict[str, Any]:
             "max_tokens": config.context_max_tokens,
             "compression_threshold": config.context_compression_threshold,
             "recent_items": config.context_recent_items,
+            "min_new_tokens": config.context_min_new_tokens,
+        },
+        "observer": {
+            "use_delta": config.observer_use_delta,
+            "full_state_on_severe": config.observer_full_state_on_severe,
+            "write_threshold": config.observer_write_threshold,
+            "store_limit": config.observer_store_limit,
         },
         "code_context": {
             "index_path": config.code_context_index_path,
@@ -375,6 +409,7 @@ def apply_debug_agent_config(config: DebugAgentConfig, data: dict[str, Any]) -> 
             "max_tokens": "context_max_tokens",
             "compression_threshold": "context_compression_threshold",
             "recent_items": "context_recent_items",
+            "min_new_tokens": "context_min_new_tokens",
         },
     )
     _apply_section(
@@ -393,6 +428,16 @@ def apply_debug_agent_config(config: DebugAgentConfig, data: dict[str, Any]) -> 
             "skill_selector": "skill_selector_mode",
             "final_reporter": "final_reporter_mode",
             "completion_judge": "completion_judge_mode",
+        },
+    )
+    _apply_section(
+        config,
+        data.get("observer"),
+        {
+            "use_delta": "observer_use_delta",
+            "full_state_on_severe": "observer_full_state_on_severe",
+            "write_threshold": "observer_write_threshold",
+            "store_limit": "observer_store_limit",
         },
     )
     _apply_section(
@@ -552,6 +597,8 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         "max_loops",
         "context_max_tokens",
         "context_recent_items",
+        "context_min_new_tokens",
+        "observer_store_limit",
         "memory_query_limit",
         "memory_selected_limit",
         "memory_rerank_candidate_limit",
@@ -569,6 +616,8 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
             raise ValueError(f"{field_name} must be greater than 0")
     if not 0.0 <= float(config.editing_confidence_threshold) <= 1.0:
         raise ValueError("editing_confidence_threshold must be between 0 and 1")
+    if not 0.0 <= float(config.observer_write_threshold) <= 1.0:
+        raise ValueError("observer_write_threshold must be between 0 and 1")
 
     _require_llm_config(
         "modes.planner",

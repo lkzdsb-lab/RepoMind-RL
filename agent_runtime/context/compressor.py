@@ -6,7 +6,10 @@ import json
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from agent_runtime.context.assembler import ContextAssembler
 from agent_runtime.context.cards import ContextDigest, ContextItem
+from agent_runtime.context.distiller import distill_context_events
+from agent_runtime.context.events import collect_context_events
 from agent_runtime.context.token_counter import estimate_context_tokens
 from agent_runtime.llm.llm_nodes import LLMJsonNode
 from model.agent.graph import AgentState
@@ -27,6 +30,7 @@ class ContextCompressionPolicy:
     max_context_tokens: int = 32000
     threshold: float = 0.75
     recent_items: int = 8
+    min_new_tokens: int = 1200
 
     def should_compress(self, items: list[ContextItem]) -> bool:
         if not self.enabled:
@@ -136,6 +140,7 @@ class ContextCompressionManager:
     ) -> None:
         self.policy = policy
         self.compressor = compressor
+        self.assembler = ContextAssembler(max_tokens=policy.max_context_tokens)
 
     @classmethod
     def from_config(cls, config: DebugAgentConfig) -> "ContextCompressionManager":
@@ -144,6 +149,7 @@ class ContextCompressionManager:
             max_context_tokens=config.context_max_tokens,
             threshold=config.context_compression_threshold,
             recent_items=config.context_recent_items,
+            min_new_tokens=config.context_min_new_tokens,
         )
         mode = (config.context_compressor_mode or "rule_based").strip().lower()
         compressor: ContextCompressor
@@ -172,8 +178,25 @@ class ContextCompressionManager:
 
     def prepare(self, state: AgentState) -> AgentState:
         items = collect_context_items(state)
-        token_estimate = estimate_context_tokens(items)
+        raw_items = [item for item in items if item.item_type != "compressed_context"]
+        context_events = collect_context_events(state)
+        distilled_events, memory_candidates = distill_context_events(context_events, state)
+        assembled = self.assembler.assemble(distilled_events, state)
+        token_estimate = estimate_context_tokens(raw_items)
         threshold_tokens = int(self.policy.max_context_tokens * self.policy.threshold)
+        context_updates = {
+            "context_events": [event.to_dict() for event in context_events],
+            "distilled_events": [event.to_dict() for event in distilled_events],
+            "working_context": assembled.working_context,
+            "archive_context": assembled.archive_context,
+            "context_sections": assembled.context_sections,
+            "memory_candidates": memory_candidates,
+            "compressed_context": _merge_context_text(
+                assembled.working_context,
+                _render_state_digest(state),
+                assembled.archive_context,
+            ),
+        }
         if not self.policy.enabled:
             logger.bind(task_id=state.get("task_id")).debug(
                 "context compression disabled items={} estimated_tokens={}",
@@ -182,6 +205,7 @@ class ContextCompressionManager:
             )
             return {
                 **state,
+                **context_updates,
                 "context_items": [item.to_dict() for item in items[-self.policy.recent_items :]],
             }
         if token_estimate < threshold_tokens:
@@ -193,6 +217,7 @@ class ContextCompressionManager:
             )
             return {
                 **state,
+                **context_updates,
                 "context_items": [item.to_dict() for item in items[-self.policy.recent_items :]],
             }
 
@@ -203,12 +228,14 @@ class ContextCompressionManager:
         already_compressed = set(
             (state.get("context_digest") or {}).get("source_item_ids", [])
         )
+        already_compressed.update(_string_set(state.get("compressed_context_item_ids")))
         compressible = [
             item
             for item in items
             if item.item_id not in recent_ids
             and item.item_id not in pinned_ids
             and item.item_id not in already_compressed
+            and item.item_type != "compressed_context"
         ]
         if not compressible:
             logger.bind(task_id=state.get("task_id")).debug(
@@ -217,26 +244,49 @@ class ContextCompressionManager:
             )
             return {
                 **state,
+                **context_updates,
                 "context_items": [item.to_dict() for item in items],
+            }
+        new_token_estimate = estimate_context_tokens(compressible)
+        if state.get("context_digest") and new_token_estimate < self.policy.min_new_tokens:
+            logger.bind(task_id=state.get("task_id")).debug(
+                "context compression skipped; new compressible tokens below minimum new_tokens={} min_new_tokens={}",
+                new_token_estimate,
+                self.policy.min_new_tokens,
+            )
+            return {
+                **state,
+                **context_updates,
+                "compressed_context_item_ids": sorted(already_compressed),
+                "context_items": [item.to_dict() for item in pinned + recent],
             }
 
         logger.bind(task_id=state.get("task_id")).info(
-            "context compression started items={} compressible={} estimated_tokens={} threshold_tokens={}",
+            "context compression started items={} compressible={} estimated_tokens={} new_tokens={} threshold_tokens={}",
             len(items),
             len(compressible),
             token_estimate,
+            new_token_estimate,
             threshold_tokens,
         )
         digest = self.compressor.compress(compressible, state)
+        compressed_item_ids = sorted(already_compressed.union(digest.source_item_ids))
         logger.bind(task_id=state.get("task_id")).info(
-            "context compression completed method={} source_items={}",
+            "context compression completed method={} source_items={} total_source_items={}",
             digest.compression_method,
             len(digest.source_item_ids),
+            len(compressed_item_ids),
         )
         return {
             **state,
+            **context_updates,
             "context_digest": digest.to_dict(),
-            "compressed_context": digest.render_for_prompt(),
+            "compressed_context_item_ids": compressed_item_ids,
+            "compressed_context": _merge_context_text(
+                assembled.working_context,
+                digest.render_for_prompt(),
+                assembled.archive_context,
+            ),
             "context_items": [item.to_dict() for item in pinned + recent],
         }
 
@@ -284,7 +334,11 @@ def collect_context_items(state: AgentState) -> list[ContextItem]:
             ContextItem(
                 role="assistant",
                 item_type="llm_observation",
-                content=json.dumps(observation, ensure_ascii=False, default=str),
+                content=json.dumps(
+                    _summarize_llm_observation_item(observation),
+                    ensure_ascii=False,
+                    default=str,
+                ),
                 metadata={"source": "llm_observation", "tool": observation.get("latest_tool")},
                 item_id=f"llm_observation:{index}:{observation.get('latest_tool', 'unknown')}",
             )
@@ -294,7 +348,7 @@ def collect_context_items(state: AgentState) -> list[ContextItem]:
             ContextItem(
                 role="assistant",
                 item_type="trajectory",
-                content=json.dumps(step, ensure_ascii=False, default=str),
+                content=json.dumps(_summarize_trajectory_item(step), ensure_ascii=False, default=str),
                 metadata={"source": "trajectory", "node": step.get("node")},
                 item_id=f"trajectory:{step.get('step_id', index)}",
             )
@@ -304,7 +358,7 @@ def collect_context_items(state: AgentState) -> list[ContextItem]:
             ContextItem(
                 role="tool",
                 item_type="tool_call",
-                content=json.dumps(call, ensure_ascii=False, default=str),
+                content=json.dumps(_summarize_tool_call_item(call), ensure_ascii=False, default=str),
                 metadata={"source": "tool_call", "name": call.get("name")},
                 item_id=f"tool_call:{index}:{call.get('name', 'unknown')}",
             )
@@ -314,7 +368,7 @@ def collect_context_items(state: AgentState) -> list[ContextItem]:
             ContextItem(
                 role="tool",
                 item_type="observation",
-                content=json.dumps(observation, ensure_ascii=False, default=str),
+                content=json.dumps(_summarize_observation_item(observation), ensure_ascii=False, default=str),
                 metadata={"source": "observation", "type": observation.get("type")},
                 item_id=f"observation:{index}:{observation.get('type', 'unknown')}",
             )
@@ -330,6 +384,145 @@ def collect_context_items(state: AgentState) -> list[ContextItem]:
             )
         )
     return items
+
+
+def _summarize_llm_observation_item(observation: Any) -> dict[str, Any]:
+    if not isinstance(observation, dict):
+        return {"summary": str(observation)[:500]}
+    return {
+        "latest_tool": observation.get("latest_tool"),
+        "status": observation.get("status"),
+        "summary": str(observation.get("summary", ""))[:500],
+        "facts": _short_list(observation.get("facts"), 6),
+        "risks": _short_list(observation.get("risks"), 4),
+        "next_actions": _short_list(observation.get("next_actions"), 6),
+    }
+
+
+def _summarize_trajectory_item(step: Any) -> dict[str, Any]:
+    if not isinstance(step, dict):
+        return {"summary": str(step)[:500]}
+    return {
+        "step_id": step.get("step_id"),
+        "node": step.get("node"),
+        "thought": str(step.get("thought", ""))[:500],
+        "action": step.get("action"),
+        "action_input": _compact_value(step.get("action_input"), max_chars=800),
+        "observation": _summarize_payload(step.get("observation")),
+        "created_at": step.get("created_at"),
+    }
+
+
+def _summarize_tool_call_item(call: Any) -> dict[str, Any]:
+    if not isinstance(call, dict):
+        return {"summary": str(call)[:500]}
+    output = call.get("output") if isinstance(call.get("output"), dict) else {}
+    name = str(call.get("name") or "unknown")
+    return {
+        "name": name,
+        "input": _compact_value(call.get("input"), max_chars=800),
+        "error": call.get("error") or output.get("error"),
+        "output_summary": _tool_output_summary(name, output),
+        "output": _summarize_payload(output),
+    }
+
+
+def _summarize_observation_item(observation: Any) -> dict[str, Any]:
+    if not isinstance(observation, dict):
+        return {"summary": str(observation)[:500]}
+    return {
+        "type": observation.get("type"),
+        "tool": observation.get("tool"),
+        "content": _summarize_payload(observation.get("content")),
+    }
+
+
+def _summarize_payload(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return _compact_value(value, max_chars=1000)
+    if value.get("error"):
+        return {"error": str(value.get("error"))[:1000]}
+    if "matches" in value:
+        matches = value.get("matches")
+        return {
+            "query": value.get("query"),
+            "match_count": len(matches) if isinstance(matches, list) else 0,
+            "sample_matches": _short_list(matches, 5, max_chars=240),
+            "exit_code": value.get("exit_code"),
+            "command": value.get("command"),
+        }
+    if "content" in value and "file_path" in value:
+        content = str(value.get("content") or "")
+        return {
+            "file_path": value.get("file_path"),
+            "content_chars": len(content),
+            "excerpt": content[:1000],
+            "truncated": value.get("truncated"),
+            "start_line": value.get("start_line"),
+            "end_line": value.get("end_line"),
+            "total_lines": value.get("total_lines"),
+        }
+    if "files" in value:
+        files = value.get("files")
+        return {
+            "file_count": len(files) if isinstance(files, list) else 0,
+            "sample_files": _short_list(files, 20, max_chars=200),
+            "truncated": value.get("truncated"),
+            "ignored_dirs": value.get("ignored_dirs"),
+        }
+    if "diff" in value:
+        diff = str(value.get("diff") or "")
+        return {
+            "diff_lines": len(diff.splitlines()),
+            "excerpt": diff[:1200],
+        }
+    return {
+        key: _compact_value(val, max_chars=800)
+        for key, val in value.items()
+        if key not in {"content", "matches", "files", "diff"}
+    }
+
+
+def _compact_value(value: Any, max_chars: int = 500) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _compact_value(val, max_chars=max_chars) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_compact_value(item, max_chars=max_chars) for item in value[:20]]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        text = str(value) if isinstance(value, str) else value
+        return text[:max_chars] if isinstance(text, str) else text
+    return str(value)[:max_chars]
+
+
+def _short_list(value: Any, limit: int, max_chars: int = 300) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item)[:max_chars] for item in value[:limit]]
+
+
+def _string_set(value: Any) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    return {str(item) for item in value if str(item)}
+
+
+def _render_state_digest(state: AgentState) -> str:
+    digest = state.get("context_digest")
+    if not isinstance(digest, dict) or not digest:
+        return ""
+    try:
+        return ContextDigest.from_dict(digest).render_for_prompt()
+    except TypeError:
+        return ""
+
+
+def _merge_context_text(*parts: str) -> str:
+    chunks: list[str] = []
+    for part in parts:
+        text = str(part or "").strip()
+        if text and text not in chunks:
+            chunks.append(text)
+    return "\n\n".join(chunks)
 
 
 def _build_llm_compression_prompt(

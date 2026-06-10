@@ -21,6 +21,7 @@ from agent_runtime.memory.store import (
     RedisMemoryStore,
 )
 from agent_runtime.registry import RegistrySnapshot
+from agent_runtime.verification import infer_lightweight_verification_command
 from model.agent.graph import AgentState
 from config import DebugAgentConfig
 from loguru import logger
@@ -479,7 +480,12 @@ class LayeredMemoryManager:
         )
 
     def _procedural_content(self, state: AgentState) -> str:
-        command = state.get("verify_command", "pytest")
+        command = infer_lightweight_verification_command(
+            str(state.get("repo_path") or "."),
+            configured=str(state.get("verify_command") or ""),
+            changed_files=list(state.get("edited_files", []) or []),
+            candidate_files=list(state.get("candidate_files", []) or []),
+        )
         if not state.get("verification_required", True):
             return (
                 f"Procedure for similar inspection tasks: search using task-specific keywords, "

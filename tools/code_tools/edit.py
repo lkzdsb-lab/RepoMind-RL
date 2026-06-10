@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import difflib
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Union
 from loguru import logger
-from utils import _safe_float, _clean_string_list
+from utils import _safe_float, _clean_string_list, _clamp_float
 
 
 DENIED_PATH_PARTS = {
@@ -26,6 +26,7 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
     files. The executor injects `_guard`; LLM-provided permission fields are not
     trusted.
     """
+    # 获取注入的 安全约束
     guard = args.get("_guard")
     if not isinstance(guard, dict):
         guard = {}
@@ -39,7 +40,7 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     confidence_threshold = _safe_float(guard.get("confidence_threshold"), 0.75)
-    confidence = _safe_float(args.get("confidence"), 0.0)
+    confidence = _clamp_float(args.get("confidence"), 0.5, "apply_code_patch invalid confidence")
     questions = _clean_questions(args.get("uncertainty_questions"))
     if questions:
         return _needs_user_input(
@@ -121,7 +122,7 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
             new_text = str(raw_change.get("new_text") or "")
             planned_contents[file_path] = current + new_text
             original_contents.setdefault(file_path, original)
-        elif operation == "replace":
+        elif operation in {"replace", "append", "insert_after", "insert_before"}:
             original = original_contents.get(file_path)
             if original is None:
                 loaded = _load_text_file(target, max_file_bytes, file_path)
@@ -133,6 +134,68 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
             old_text = str(raw_change.get("old_text") or "")
             new_text = str(raw_change.get("new_text") or "")
             read_content = str(read_contents.get(file_path) or "")
+            if operation == "append":
+                if require_read and file_path not in allowed_files:
+                    return {
+                        "error": f"File must be read in this run before editing: {file_path}",
+                        "applied": False,
+                        "needs_more_context": True,
+                        "suggested_next_action": "read_file",
+                    }
+                planned_contents[file_path] = current + new_text
+                if file_path not in changed_files:
+                    changed_files.append(file_path)
+                continue
+            if operation == "replace" and old_text == "":
+                if current != "":
+                    return {
+                        "error": (
+                            "Empty old_text is only allowed when replacing the full content "
+                            f"of an empty file: {file_path}"
+                        ),
+                        "applied": False,
+                        "needs_more_context": True,
+                        "suggested_next_action": "read_file",
+                    }
+                if require_read and file_path not in allowed_files:
+                    return {
+                        "error": f"File must be read in this run before editing: {file_path}",
+                        "applied": False,
+                        "needs_more_context": True,
+                        "suggested_next_action": "read_file",
+                    }
+                planned_contents[file_path] = new_text
+                if file_path not in changed_files:
+                    changed_files.append(file_path)
+                continue
+            if operation in {"insert_after", "insert_before"}:
+                if require_read and old_text not in read_content:
+                    logger.warning(
+                        f"old_text not in read_content \n"
+                        f"old_text: {old_text}\n"
+                        f"read_content: {read_content}"
+                    )
+                    return {
+                        "error": (
+                            "Anchor old_text must come from content read during this run: "
+                            f"{file_path}"
+                        ),
+                        "applied": False,
+                        "needs_more_context": True,
+                        "suggested_next_action": "read_file",
+                        "conflict_context": _conflict_context(read_content or current, old_text),
+                    }
+                expected_or_err = _validate_occurrences(raw_change, current, old_text, file_path)
+                if isinstance(expected_or_err, dict):
+                    return expected_or_err
+                expected = expected_or_err
+                replacement = (
+                    old_text + new_text if operation == "insert_after" else new_text + old_text
+                )
+                planned_contents[file_path] = current.replace(old_text, replacement, expected)
+                if file_path not in changed_files:
+                    changed_files.append(file_path)
+                continue
             if require_read and old_text not in read_content:
                 return {
                     "error": (
@@ -144,24 +207,10 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
                     "suggested_next_action": "read_file",
                     "conflict_context": _conflict_context(read_content or current, old_text),
                 }
-            expected = int(_safe_float(raw_change.get("expected_occurrences"), 1))
-            if expected <= 0:
-                return {
-                    "error": "expected_occurrences must be greater than 0.",
-                    "applied": False,
-                }
-            occurrences = current.count(old_text)
-            if occurrences != expected:
-                return {
-                    "error": (
-                        f"Expected old_text to occur {expected} time(s) in {file_path}, "
-                        f"found {occurrences}."
-                    ),
-                    "applied": False,
-                    "needs_more_context": True,
-                    "suggested_next_action": "read_file",
-                    "conflict_context": _conflict_context(current, old_text),
-                }
+            expected_or_err = _validate_occurrences(raw_change, current, old_text, file_path)
+            if isinstance(expected_or_err, dict):
+                return expected_or_err
+            expected = expected_or_err
             planned_contents[file_path] = current.replace(old_text, new_text, expected)
         else:
             return {"error": f"Unsupported edit operation: {operation}", "applied": False}
@@ -197,6 +246,11 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
         "preview": dry_run,
         "would_apply": True,
         "changed_files": changed_files,
+        "updated_contents": {
+            file_path: planned_contents[file_path]
+            for file_path in changed_files
+            if file_path in planned_contents
+        },
         "change_count": len(changes),
         "changed_line_count": changed_line_count,
         "reason": str(args.get("reason") or "").strip(),
@@ -215,8 +269,14 @@ def _validate_change_shape(change: dict[str, Any], index: int) -> str:
         return f"Change #{index + 1} is missing file_path."
     operation = str(change.get("operation") or "replace").strip().lower()
     if operation == "replace":
+        if "new_text" not in change:
+            return f"Change #{index + 1} is missing new_text."
+    elif operation == "append":
+        if "new_text" not in change:
+            return f"Change #{index + 1} is missing new_text."
+    elif operation in {"insert_after", "insert_before"}:
         if not str(change.get("old_text") or ""):
-            return f"Change #{index + 1} is missing old_text."
+            return f"Change #{index + 1} is missing old_text anchor."
         if "new_text" not in change:
             return f"Change #{index + 1} is missing new_text."
     elif operation == "create":
@@ -347,3 +407,29 @@ def _needs_user_input(reason: str, questions: list[str]) -> dict[str, Any]:
         "reason": reason,
         "questions": questions[:3],
     }
+
+
+def _validate_occurrences(raw_change: Dict[str, Any], current: str, old_text: str, file_path: str) -> \
+Union[int, Dict[str, Any]]:
+    """ 校验文本匹配次数"""
+    expected = int(_safe_float(raw_change.get("expected_occurrences"), 1))
+    if expected <= 0:
+        logger.error(f"Expected occurrences should be a positive integer, found {expected}")
+        return {
+            "error": "expected_occurrences must be greater than 0.",
+            "applied": False,
+        }
+    occurrences = current.count(old_text)
+    if occurrences != expected:
+        logger.error(f"文本匹配次数不同")
+        return {
+            "error": (
+                f"Expected anchor old_text to occur {expected} time(s) in {file_path}, "
+                f"found {occurrences}."
+            ),
+            "applied": False,
+            "needs_more_context": True,
+            "suggested_next_action": "read_file",
+            "conflict_context": _conflict_context(current, old_text),
+        }
+    return expected

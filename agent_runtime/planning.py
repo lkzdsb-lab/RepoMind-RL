@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from agent_runtime.llm.llm_nodes import LLMJsonNode
+from agent_runtime.verification import infer_lightweight_verification_command
 from config import LLMConfig
 from model.agent.graph import AgentState
 from model.llm import PlanResponse
@@ -21,7 +22,7 @@ class Planner(Protocol):
 @dataclass
 class HeuristicPlanner:
     def make_plan(self, state: AgentState) -> list[str]:
-        verify_command = state.get("verify_command") or "pytest"
+        verify_command = _verification_command(state)
         verification_step = (
             "跳过验证命令（LLM 判定本任务不需要命令验证）"
             if not _verification_required(state)
@@ -96,3 +97,12 @@ def _normalize_plan_response(data: dict, state: AgentState, context: dict) -> di
 
 def _verification_required(state: AgentState) -> bool:
     return bool(state.get("verification_required", True))
+
+
+def _verification_command(state: AgentState) -> str:
+    return infer_lightweight_verification_command(
+        str(state.get("repo_path") or "."),
+        configured=str(state.get("verify_command") or ""),
+        changed_files=list(state.get("edited_files", []) or []),
+        candidate_files=list(state.get("candidate_files", []) or []),
+    )

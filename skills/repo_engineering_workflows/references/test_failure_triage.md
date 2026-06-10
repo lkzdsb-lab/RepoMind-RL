@@ -1,6 +1,6 @@
 # Test Failure Triage
 
-Use this skill when verification fails or a task starts from failing tests.
+Use this workflow when verification fails or a task starts from failing tests.
 
 ## Workflow
 

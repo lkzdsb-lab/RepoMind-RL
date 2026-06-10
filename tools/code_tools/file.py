@@ -12,21 +12,22 @@ def _safe_path(repo_path: str, file_path: str) -> Path:
 
 # 查看文件列表
 def list_files(repo_path: str, max_files: int = FileConfig.MAX_LIST_FILE_LIMIT) -> Dict[str, Any]:
+    repo = Path(repo_path).resolve()
     files: List[str] = []
-    ignored = {".git", "vendor", "node_modules", "__pycache__"}
+    ignored = set(FileConfig.LIST_IGNORED_DIRS)
 
-    for root, dirs, filenames in os.walk(repo_path):
+    for root, dirs, filenames in os.walk(repo):
         dirs[:] = [d for d in dirs if d not in ignored]
 
         for filename in filenames:
             path = Path(root) / filename
-            rel = path.relative_to(repo_path).as_posix()
+            rel = path.relative_to(repo).as_posix()
             files.append(rel)
 
             if len(files) >= max_files:
-                return {"files": files, "truncated": True}
+                return {"files": files, "truncated": True, "ignored_dirs": sorted(ignored)}
 
-    return {"files": files, "truncated": False}
+    return {"files": files, "truncated": False, "ignored_dirs": sorted(ignored)}
 
 # 读取文件
 def read_file(

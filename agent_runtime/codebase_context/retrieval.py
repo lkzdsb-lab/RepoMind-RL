@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from agent_runtime.llm.llm_nodes import LLMJsonNode
@@ -13,6 +13,7 @@ from model.agent.graph import AgentState
 from model.llm import CodeContextQueryPlanResponse, CodeContextRerankResponse
 from prompts.templates import load_prompt, render_prompt
 from utils import _truncate_text, _clamp_float
+from agent_runtime.codebase_context.models import CodeContextRerankDecision, CodeContextQueryPlan
 
 
 CONTEXT_LIST_KEYS = (
@@ -36,28 +37,6 @@ CONTEXT_KINDS = {
     "test_mappings": "test_mapping",
     "embedding_matches": "embedding_match",
 }
-
-
-@dataclass
-class CodeContextQueryPlan:
-    queries: list[str]
-    source: str = "disabled"
-    rationale: str = ""
-    default_query: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
-class CodeContextRerankDecision:
-    selected_ids: list[str] = field(default_factory=list)
-    source: str = "disabled"
-    rationale: str = ""
-    selections: list[dict[str, Any]] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 class CodeContextQueryPlanner(Protocol):
@@ -229,7 +208,7 @@ class LLMCodeContextReranker:
                     "candidate_id": candidate_id,
                     "kind": available[candidate_id].get("kind", ""),
                     "file_path": available[candidate_id].get("file_path", ""),
-                    "relevance": _clamp_float(item.get("relevance"), 1.0, "invalid code context relevance from LLM"),
+                    "relevance": _clamp_float(item.get("relevance"), 0.5, "invalid code context relevance from LLM"),
                     "reason": str(item.get("reason", "")).strip()[:300],
                 }
             )
@@ -268,7 +247,7 @@ class LLMCodeContextReranker:
             selected.append(
                 {
                     "candidate_id": candidate_id,
-                    "relevance": _clamp_float(item.get("relevance"), 1, "invalid code context relevance from LLM"),
+                    "relevance": _clamp_float(item.get("relevance"), 0.5, "invalid code context relevance from LLM"),
                     "reason": str(item.get("reason", "")).strip()[:300],
                 }
             )
@@ -397,7 +376,7 @@ def _code_context_query_prompt(state: AgentState, context: dict[str, Any]) -> st
         project_profile=json.dumps(state.get("project_profile", {}), ensure_ascii=False),
         task_analysis=json.dumps(state.get("task_analysis", {}), ensure_ascii=False),
         selected_skills=json.dumps(state.get("selected_skills", []), ensure_ascii=False),
-        skill_context=_truncate_text(json.dumps(state.get("skill_context", []), ensure_ascii=False), 3000),
+        skill_context=_truncate_text(json.dumps(state.get("skill_context", []), ensure_ascii=False), 1400),
         memory_context=_truncate_text(str(state.get("memory_context", "")), 3000),
         current_step=state.get("current_step", ""),
         candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),

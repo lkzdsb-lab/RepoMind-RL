@@ -1,6 +1,7 @@
 Select up to {{ selected_limit }} skills that should influence this run.
 Return JSON with keys: selected, rationale, user_update.
 Each selected item must have skill_name, relevance, reason.
+relevance must be a number between 0 and 1, not a word like "high" or "medium".
 Select none if no registered skill is relevant.
 user_update should be a short user-facing progress message when useful, or an empty string. Do not reveal chain-of-thought.
 

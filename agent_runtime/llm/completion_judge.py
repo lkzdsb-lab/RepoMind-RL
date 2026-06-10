@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from agent_runtime.llm.llm_nodes import LLMJsonNode
-from agent_runtime.llm.tool_summaries import read_file_summaries, tool_call_summaries
+from ext.tool_summaries import read_file_summaries, tool_call_summaries
 from config import LLMConfig
 from model.agent.graph import AgentState
 from model.llm import CompletionJudgeResponse
@@ -102,7 +102,7 @@ def _completion_judge_prompt(state: AgentState, context: dict[str, Any]) -> str:
         selected_skills=json.dumps(state.get("selected_skills", []), ensure_ascii=False),
         skill_context=_truncate_text(
             json.dumps(state.get("skill_context", []), ensure_ascii=False, default=str),
-            3500,
+            1600,
         ),
         fallback_judgement=json.dumps(
             context.get("fallback_judgement", {}),

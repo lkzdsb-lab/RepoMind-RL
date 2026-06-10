@@ -3,7 +3,7 @@ from typing import Dict, Any
 from tools.shell_tools.command import run_shell_command
 
 
-def run_command(repo_path: str, command: str = "pytest", timeout: int = 120) -> Dict[str, Any]:
+def run_command(repo_path: str, command: str = "go test ./...", timeout: int = 120) -> Dict[str, Any]:
     return run_shell_command(
         repo_path,
         {

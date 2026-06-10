@@ -1,7 +1,7 @@
 # Codebase Context Workflow
 
-Use this skill when the agent needs structured code search beyond raw grep.
-The skill describes how to use the codebase context tools; it does not replace the tools.
+Use this workflow when the agent needs structured code search beyond raw grep.
+The workflow describes how to use the codebase context tools; it does not replace the tools.
 
 ## Workflow
 

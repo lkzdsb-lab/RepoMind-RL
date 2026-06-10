@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
+from loguru import logger
 
 from agent_runtime.llm.llm_nodes import LLMJsonNode
 from agent_runtime.memory.cards import MemoryContextPack, MemorySearchResult
@@ -108,6 +109,9 @@ class LLMMemoryQueryPlanner:
             if len(queries) >= max_queries:
                 break
         if not queries:
+            logger.warning(
+                f"memory query planner returned no queries \n"
+                f"raw_queries: {raw_queries}\n")
             raise ValueError("memory query planner response returned empty queries")
         return {
             "queries": queries,
@@ -184,7 +188,7 @@ class LLMMemoryReranker:
             selected_payloads.append(
                 {
                     "memory_id": memory_id,
-                    "relevance": _clamp_float(item.get("relevance"), 1, "invalid memory relevance from LLM"),
+                    "relevance": _clamp_float(item.get("relevance"), 0.5, "invalid memory relevance from LLM"),
                     "reason": str(item.get("reason", "")).strip()[:300],
                 }
             )
@@ -223,7 +227,7 @@ class LLMMemoryReranker:
             selected.append(
                 {
                     "memory_id": memory_id,
-                    "relevance": _clamp_float(item.get("relevance"), 1, "invalid memory relevance from LLM"),
+                    "relevance": _clamp_float(item.get("relevance"), 0.5, "invalid memory relevance from LLM"),
                     "reason": str(item.get("reason", "")).strip()[:300],
                 }
             )

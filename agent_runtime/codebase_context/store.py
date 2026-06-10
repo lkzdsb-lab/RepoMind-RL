@@ -32,6 +32,11 @@ class CodebaseContextStore:
         return self.index_path
 
     def is_stale(self) -> bool:
+        """
+            如果用户没改代码，Agent 启动时秒速通过检查（返回 False），直接零成本加载本地缓存。
+            如果用户刚刚在 IDE 里改了一个函数的入参，Agent 启动时瞬间捕捉到（返回 True），
+            只针对变动的部分（或全量）进行精准重刷。
+        """
         if not self.index_path.exists():
             return True
         index_mtime = self.index_path.stat().st_mtime

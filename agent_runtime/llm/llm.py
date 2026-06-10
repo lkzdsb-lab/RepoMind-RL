@@ -73,9 +73,19 @@ class OpenAICompatibleLLMClient:
             kwargs["response_format"] = request.response_format
             completion = self.client.beta.chat.completions.parse(**kwargs)
             parsed = _extract_parsed_message(completion)
-        except OpenAIError as exc:
-            logger.warning("llm request failed error_type={} error={}", exc.__class__.__name__, exc)
-            raise RuntimeError(f"LLM request failed via OpenAI SDK: {exc}") from exc
+        except Exception as exc:
+            logger.warning(
+                "structured parse failed; retrying with plain completion error_type={} error={}",
+                exc.__class__.__name__,
+                exc,
+            )
+            completion, parsed = self._retry_plain_completion(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                response_model=request.response_format,
+                original_error=exc,
+            )
 
         raw = completion.model_dump()
         content = _extract_chat_content(raw)
@@ -100,6 +110,36 @@ class OpenAICompatibleLLMClient:
         if isinstance(message, dict):
             return {"role": str(message.get("role", "")), "content": str(message.get("content", ""))}
         return message.to_dict()
+
+    def _retry_plain_completion(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        temperature: float | None,
+        response_model: Any,
+        original_error: Exception,
+    ) -> tuple[Any, Any]:
+        """ 降级以适配老模型传输格式出问题的场景 todo 后期换好模型考虑删除"""
+        try:
+            completion = self.client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+            )
+        except OpenAIError as exc:
+            logger.warning("llm request failed error_type={} error={}", exc.__class__.__name__, exc)
+            raise RuntimeError(f"LLM request failed via OpenAI SDK: {exc}") from exc
+
+        raw = completion.model_dump()
+        content = _extract_chat_content(raw)
+        try:
+            parsed = _manual_parse_response(content, response_model)
+        except Exception as manual_exc:
+            raise RuntimeError(
+                f"LLM structured parse failed: {original_error}; manual JSON recovery also failed: {manual_exc}"
+            ) from manual_exc
+        return completion, parsed
 
 
 def build_llm_client(config: LLMConfig) -> LLMClient:
@@ -166,3 +206,25 @@ def _extract_usage(raw: dict) -> dict[str, Any]:
         "completion_tokens": _safe_int(usage.get("completion_tokens")),
         "total_tokens": _safe_int(usage.get("total_tokens")),
     }
+
+
+def _manual_parse_response(content: str, response_model: Any) -> Any:
+    if not _is_pydantic_response_model(response_model):
+        raise RuntimeError("Manual structured parsing requires a Pydantic response model.")
+    cleaned = _strip_markdown_fence(content)
+    return response_model.model_validate_json(cleaned)
+
+
+def _strip_markdown_fence(content: str) -> str:
+    """ 模型兼容逻辑"""
+    text = str(content or "").strip()
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    if not lines:
+        return text
+    if lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines).strip()

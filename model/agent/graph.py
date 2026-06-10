@@ -57,6 +57,9 @@ class AgentState(TypedDict, total=False):
     current_step: str
 
     candidate_files: List[str] # llm 想要调用的 files
+    # todo 考虑使用本地缓存实现
+    read_file_cache: Dict[str, Dict[str, Any]]
+    read_file_order: List[str]
     code_context: Dict[str, Any]
     selected_code_context: Dict[str, Any]
     code_context_query_plan: Dict[str, Any]
@@ -98,6 +101,13 @@ class AgentState(TypedDict, total=False):
     context_items: List[Dict[str, Any]]
     context_digest: Dict[str, Any]
     compressed_context: str
+    compressed_context_item_ids: List[str]
+    context_events: List[Dict[str, Any]]
+    distilled_events: List[Dict[str, Any]]
+    working_context: str
+    archive_context: str
+    context_sections: Dict[str, List[str]]
+    memory_candidates: List[Dict[str, Any]]
 
     # 记忆持久话相关
     short_term_memories: List[Dict[str, Any]]
@@ -111,14 +121,19 @@ class AgentState(TypedDict, total=False):
     rl_transitions: List[Dict[str, Any]]
     rl_last_reward: Dict[str, Any]
     llm_guard_events: List[Dict[str, Any]]
+    action_history: List[Dict[str, Any]]
+    action_limit_events: List[Dict[str, Any]]
 
     llm_action_inputs_enabled: bool
     plan_mode: bool
     plan_mode_entered: bool
     plan_mode_approved: bool
     debug_technical_plan: str
+    plan_verification_commands: List[str]
     plan_mode_evaluation: str
     plan_mode_events: List[Dict[str, Any]]
+    execution_queue: List[Dict[str, Any]]
+    """ plan 后的执行队列"""
     editing_enabled: bool
     editing_config: Dict[str, Any]
     edit_results: List[Dict[str, Any]]
@@ -131,6 +146,7 @@ class AgentState(TypedDict, total=False):
 
     next_action: Optional[str] # 下一个步骤
     next_action_input: Optional[Dict[str, Any]]
+    pending_action_requirements: Dict[str, Any]
 
     loop_count: int
     max_loops: int

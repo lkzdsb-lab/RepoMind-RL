@@ -28,6 +28,7 @@ from agent_runtime.codebase_context.retrieval import (
     merge_code_context_outputs,
 )
 from agent_runtime.context import ContextCompressionManager
+from agent_runtime.context.events import latest_tool_event, should_llm_observe_event
 from agent_runtime.logging_config import configure_from_agent_config
 from agent_runtime.llm.llm_policy import LLMActionPolicy
 from agent_runtime.llm.completion_judge import (
@@ -40,7 +41,12 @@ from agent_runtime.llm.final_reporter import (
     LLMFinalReporter,
     RuleBasedFinalReporter,
 )
-from agent_runtime.llm.observation import DisabledObserver, LLMObserver, Observer
+from agent_runtime.llm.observation import (
+    DisabledObserver,
+    LLMObserver,
+    Observer,
+    build_action_limit_observation,
+)
 from agent_runtime.llm.task_analysis import DisabledTaskAnalyzer, LLMTaskAnalyzer, TaskAnalyzer
 from agent_runtime.memory.manager import LayeredMemoryManager
 from agent_runtime.memory.retrieval import (
@@ -67,6 +73,7 @@ from agent_runtime.rl import (
 )
 from agent_runtime.skill_selection import DisabledSkillSelector, LLMSkillSelector, SkillSelector
 from agent_runtime.rl.trainer import QTableStore
+from agent_runtime.skill_context import build_selected_skill_context
 from agent_runtime.tool_registry import ToolRegistry
 from agent_runtime.trajectory import TrajectoryRecorder
 from agent_runtime.user_updates import UserUpdateSink, set_user_update_sink
@@ -226,8 +233,11 @@ class DebugAgent:
             "plan_mode_entered": bool(state.get("plan_mode_entered", False)),
             "plan_mode_approved": bool(state.get("plan_mode_approved", False)),
             "debug_technical_plan": state.get("debug_technical_plan", ""),
+            "plan_verification_commands": state.get("plan_verification_commands", []),
             "plan_mode_evaluation": state.get("plan_mode_evaluation", ""),
             "plan_mode_events": state.get("plan_mode_events", []),
+            "execution_queue": state.get("execution_queue", []),
+            "pending_action_requirements": state.get("pending_action_requirements", {}),
             "user_updates": state.get("user_updates", []),
             "last_user_update": state.get("last_user_update"),
             "llm_calls": state.get("llm_calls", []),
@@ -244,9 +254,18 @@ class DebugAgent:
             "verification_stale": bool(state.get("verification_stale", False)),
             "last_edit_at_loop": int(state.get("last_edit_at_loop", -1)),
             "last_verified_edit_loop": int(state.get("last_verified_edit_loop", -1)),
+            "context_events": state.get("context_events", []),
+            "distilled_events": state.get("distilled_events", []),
+            "working_context": state.get("working_context", ""),
+            "archive_context": state.get("archive_context", ""),
+            "context_sections": state.get("context_sections", {}),
+            "memory_candidates": state.get("memory_candidates", []),
+            "compressed_context_item_ids": state.get("compressed_context_item_ids", []),
             "require_step_approval": self.config.require_step_approval,
             "pending_step_approval": state.get("pending_step_approval", {}),
             "step_approval_history": state.get("step_approval_history", []),
+            "action_history": state.get("action_history", []),
+            "action_limit_events": state.get("action_limit_events", []),
         }
         if user_answer and _has_pending_step_approval(state):
             state, approved_action = self._handle_step_approval_response(state, user_answer)
@@ -287,6 +306,14 @@ class DebugAgent:
         while state.get("loop_count", 0) < state.get("max_loops", self.config.max_loops):
             state = self._prepare_context(state)
             action = self.policy.next_action(state)
+            limit_events = self.rl_action_space.consume_last_limit_events()
+            if limit_events:
+                action = Action(
+                    action.name,
+                    action.args,
+                    thought=action.thought,
+                    metadata={**dict(action.metadata), "action_limit_events": limit_events},
+                )
             state = self._record_action_selection(state, action)
 
             if self._requires_step_approval(state, action):
@@ -375,6 +402,8 @@ class DebugAgent:
             plan=[],
             current_step="created",
             candidate_files=[],
+            read_file_cache={},
+            read_file_order=[],
             code_context={},
             selected_code_context={},
             code_context_query_plan={},
@@ -409,6 +438,13 @@ class DebugAgent:
             context_items=[],
             context_digest={},
             compressed_context="",
+            compressed_context_item_ids=[],
+            context_events=[],
+            distilled_events=[],
+            working_context="",
+            archive_context="",
+            context_sections={},
+            memory_candidates=[],
             short_term_memories=[],
             promoted_memories=[],
             consolidated_skills=[],
@@ -417,13 +453,17 @@ class DebugAgent:
             rl_transitions=[],
             rl_last_reward={},
             llm_guard_events=[],
+            action_history=[],
+            action_limit_events=[],
             llm_action_inputs_enabled=_llm_action_inputs_enabled(self.config),
             plan_mode=False,
             plan_mode_entered=False,
             plan_mode_approved=False,
             debug_technical_plan="",
+            plan_verification_commands=[],
             plan_mode_evaluation="",
             plan_mode_events=[],
+            execution_queue=[],
             editing_enabled=self.config.editing_enabled,
             editing_config=_editing_config_dict(self.config),
             edit_results=[],
@@ -438,6 +478,7 @@ class DebugAgent:
             final_report={},
             next_action=None,
             next_action_input=None,
+            pending_action_requirements={},
             loop_count=0,
             max_loops=self.config.max_loops,
             status="created",
@@ -692,10 +733,40 @@ class DebugAgent:
             "action selected args={}",
             action.args,
         )
+        pending_requirements = dict(state.get("pending_action_requirements") or {})
+        deferred = action.metadata.get("deferred_action") if isinstance(action.metadata, dict) else None
+        limit_events = []
+        if isinstance(action.metadata, dict):
+            raw_limit_events = action.metadata.get("action_limit_events")
+            if isinstance(raw_limit_events, list):
+                limit_events = [event for event in raw_limit_events if isinstance(event, dict)]
+        if isinstance(deferred, dict):
+            pending_requirements = deferred
+        elif pending_requirements:
+            pending_requirements = {}
+        action_history = list(state.get("action_history", []) or [])
+        action_history.append(self._action_history_entry(state, action))
+        observations = list(state.get("observations", []) or [])
+        llm_observations = list(state.get("llm_observations", []) or [])
+        action_limit_events = list(state.get("action_limit_events", []) or [])
+        if limit_events:
+            limit_observation = build_action_limit_observation(action.name, limit_events)
+            observations.append(limit_observation)
+            llm_observations = _store_lru_observation(
+                llm_observations,
+                limit_observation,
+                limit=max(1, int(getattr(self.config, "observer_store_limit", 12))),
+            )
+            action_limit_events.extend(limit_events)
         state = {
             **state,
             "next_action": action.name,
             "next_action_input": action.args,
+            "pending_action_requirements": pending_requirements,
+            "action_history": action_history,
+            "action_limit_events": action_limit_events,
+            "observations": observations,
+            "llm_observations": llm_observations,
             "current_step": action.name,
         }
         return self.recorder.append(
@@ -707,6 +778,14 @@ class DebugAgent:
             observation=action.metadata or None,
         )
 
+    def _action_history_entry(self, state: AgentState, action: Action) -> dict[str, Any]:
+        return {
+            "action": action.name,
+            "signature": _action_signature(action, state),
+            "loop_count": int(state.get("loop_count", 0)),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
     def _execute_action(self, state: AgentState, action: Action) -> AgentState:
         """
             执行 action
@@ -715,7 +794,16 @@ class DebugAgent:
         started_at = time.perf_counter()
         action_logger.info("action execution started")
         try:
-            if action.name == "run_tests" and not _verification_required(state):
+            deferred = action.metadata.get("deferred_action") if isinstance(action.metadata, dict) else None
+            if isinstance(deferred, dict):
+                output = {
+                    "skipped": True,
+                    "needs_more_context": True,
+                    "deferred_action": deferred.get("action"),
+                    "missing_required_args": deferred.get("missing_required_args", []),
+                    "message": deferred.get("message") or "Action deferred until required arguments are inferred from repository context.",
+                }
+            elif action.name == "run_tests" and not _verification_required(state):
                 output = {
                     "command": action.args.get("command", self.config.verify_command),
                     "skipped": True,
@@ -935,16 +1023,25 @@ class DebugAgent:
             获取 llm calls 操作过的所有文件后的回复
         """
         read_contents: dict[str, str] = {}
-        for call in state.get("tool_calls", []):
-            if not isinstance(call, dict) or call.get("name") != "read_file":
-                continue
-            output = call.get("output")
-            if not isinstance(output, dict) or output.get("error"):
-                continue
-            file_path = str(output.get("file_path") or "").strip()
-            content = output.get("content")
-            if file_path and isinstance(content, str):
-                read_contents[file_path] = content
+        cache = state.get("read_file_cache") or {}
+        if isinstance(cache, dict):
+            for file_path, snapshot in cache.items():
+                if not isinstance(snapshot, dict):
+                    continue
+                content = snapshot.get("content")
+                if str(file_path).strip() and isinstance(content, str):
+                    read_contents[str(file_path).strip()] = content
+        if not read_contents:
+            for call in state.get("tool_calls", []):
+                if not isinstance(call, dict) or call.get("name") != "read_file":
+                    continue
+                output = call.get("output")
+                if not isinstance(output, dict) or output.get("error"):
+                    continue
+                file_path = str(output.get("file_path") or "").strip()
+                content = output.get("content")
+                if file_path and isinstance(content, str):
+                    read_contents[file_path] = content
         return {
             "editing_enabled": self.config.editing_enabled,
             "allowed_files": sorted(read_contents),
@@ -1040,6 +1137,7 @@ class DebugAgent:
         action: Action,
         output: Dict[str, Any],
     ) -> AgentState:
+        """ 根据 tool 执行的结果更新 state"""
         updates: Dict[str, Any] = {}
 
         tool_spec = self._registry().get_tool(action.name)
@@ -1124,8 +1222,12 @@ class DebugAgent:
             )
         llm_observations = state.get("llm_observations", [])
         observations = state.get("observations", [])
-        if observation.get("source") != "disabled":
-            llm_observations = llm_observations + [observation]
+        if observation.get("source") != "disabled" and bool(observation.get("store", True)):
+            llm_observations = _store_lru_observation(
+                llm_observations,
+                observation,
+                limit=max(1, int(getattr(self.config, "observer_store_limit", 12))),
+            )
             observations = observations + [observation]
         state = {
             **state,
@@ -1265,6 +1367,9 @@ class DebugAgent:
 
         if output.get("needs_user_input"):
             return False
+        event = latest_tool_event(state)
+        if event is not None:
+            return should_llm_observe_event(event)
         if output.get("fatal"):
             return True
         if output.get("error"):
@@ -1419,6 +1524,30 @@ class DebugAgent:
                     "reason": reason,
                     "questions": [],
                     "skipped": True,
+                },
+            )
+        if _is_duplicate_user_question_set(state, questions):
+            state = {
+                **state,
+                "status": "need_more_context",
+                "current_step": "select_action",
+                "pending_user_questions": [],
+                "needs_user_input_reason": reason,
+            }
+            logger.bind(task_id=state.get("task_id")).info(
+                "skipped duplicate user question set questions={} reason={}",
+                questions,
+                reason,
+            )
+            return self.recorder.append(
+                state,
+                node="await_user_input_skipped_duplicate",
+                thought="重复问题集已被抑制，继续尝试其他动作。",
+                observation={
+                    "reason": reason,
+                    "questions": questions,
+                    "skipped": True,
+                    "duplicate": True,
                 },
             )
         state = {
@@ -1638,6 +1767,9 @@ class DebugAgent:
                     self.config.llm_config,
                     self.config.observer_llm_config,
                 ),
+                use_delta=bool(getattr(self.config, "observer_use_delta", True)),
+                full_state_on_severe=bool(getattr(self.config, "observer_full_state_on_severe", True)),
+                write_threshold=float(getattr(self.config, "observer_write_threshold", 0.35)),
             )
         return DisabledObserver()
 
@@ -1997,40 +2129,8 @@ def _registry_tool_manifest(registry: Any) -> list[dict[str, Any]]:
 def _selected_skill_context(
     selected_skills: list[str],
     skills: Any,
-    max_resource_chars: int = 4000,
 ) -> list[dict[str, Any]]:
-    context: list[dict[str, Any]] = []
-    for skill_name in selected_skills:
-        spec = skills.get(skill_name) if hasattr(skills, "get") else None
-        if spec is None:
-            continue
-        resources = []
-        for resource_path in getattr(spec, "resources", [])[:2]:
-            path = Path(str(resource_path))
-            if not path.is_file():
-                resources.append({"path": str(resource_path), "error": "resource not found"})
-                continue
-            try:
-                text = path.read_text(encoding="utf-8", errors="ignore")
-            except OSError as exc:
-                resources.append({"path": path.as_posix(), "error": str(exc)})
-                continue
-            resources.append(
-                {
-                    "path": path.as_posix(),
-                    "content": text[:max_resource_chars],
-                    "truncated": len(text) > max_resource_chars,
-                }
-            )
-        context.append(
-            {
-                "source": "registry",
-                "skill_name": skill_name,
-                "description": getattr(spec, "description", ""),
-                "resources": resources,
-            }
-        )
-    return context
+    return build_selected_skill_context(selected_skills, skills)
 
 
 def _merge_skill_context(*groups: Any) -> list[dict[str, Any]]:
@@ -2065,6 +2165,101 @@ def _merge_unique(*groups: Any) -> list[str]:
             if value and value not in values:
                 values.append(value)
     return values
+
+
+def _normalize_question_text(value: str) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _question_set_signature(questions: list[str]) -> str:
+    return "|".join(_normalize_question_text(item) for item in questions if _normalize_question_text(item))
+
+
+def _is_duplicate_user_question_set(state: AgentState, questions: list[str]) -> bool:
+    signature = _question_set_signature(questions)
+    if not signature:
+        return False
+    pending = _question_set_signature(
+        _clean_string_list(state.get("pending_user_questions"), limit=5, max_chars=500)
+    )
+    if pending and pending == signature:
+        return True
+    for item in state.get("user_inputs", []) or []:
+        if not isinstance(item, dict):
+            continue
+        previous = _question_set_signature(
+            _clean_string_list(item.get("questions"), limit=5, max_chars=500)
+        )
+        if previous and previous == signature:
+            return True
+    return False
+
+
+def _action_signature(action: Action, state: AgentState | None = None) -> str:
+    if action.name == "read_file":
+        file_path = str(action.args.get("file_path") or "").strip()
+        if not file_path and isinstance(state, dict):
+            current = _current_execution_item(state)
+            if isinstance(current, dict):
+                for path in current.get("target_files", []) or []:
+                    file_path = str(path).strip()
+                    if file_path:
+                        break
+        return f"read_file:{file_path or '<unknown>'}"
+    if action.name == "apply_code_patch":
+        changes = action.args.get("changes")
+        targets: list[str] = []
+        if isinstance(changes, list):
+            for change in changes:
+                if not isinstance(change, dict):
+                    continue
+                file_path = str(change.get("file_path") or "").strip()
+                if file_path and file_path not in targets:
+                    targets.append(file_path)
+        if not targets:
+            targets = [
+                str(path).strip()
+                for path in action.args.get("target_files", []) or []
+                if str(path).strip()
+            ]
+        if not targets and isinstance(state, dict):
+            current = _current_execution_item(state)
+            if isinstance(current, dict):
+                targets = [
+                    str(path).strip()
+                    for path in current.get("target_files", []) or []
+                    if str(path).strip()
+                ]
+        return f"apply_code_patch:{'|'.join(sorted(targets)) or '<unknown>'}"
+    if action.name == "run_shell_command":
+        command = str(action.args.get("command") or "").strip()
+        return f"run_shell_command:{command or '<unknown>'}"
+    if action.name == "search_code_context":
+        query = str(action.args.get("query") or "").strip()
+        return f"search_code_context:{query or '<empty>'}"
+    if action.name == "request_user_input":
+        questions = _clean_string_list(action.args.get("questions"), limit=3, max_chars=300)
+        signature = _question_set_signature(questions)
+        if signature:
+            return f"request_user_input:{signature}"
+        missing = ",".join(
+            sorted(
+                str(item).strip()
+                for item in action.metadata.get("missing_required_args", []) or []
+                if str(item).strip()
+            )
+        )
+        return f"request_user_input:{missing or 'generic'}"
+    return f"action:{action.name}"
+
+
+def _current_execution_item(state: AgentState) -> dict[str, Any] | None:
+    for item in state.get("execution_queue", []) or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("status") or "pending") == "pending":
+            return item
+    return None
 
 
 def _build_project_profile(repo_path: str, max_files: int = 3000) -> dict[str, Any]:
@@ -2143,6 +2338,30 @@ def _editing_config_dict(config: DebugAgentConfig) -> dict[str, Any]:
 
 def _llm_action_inputs_enabled(config: DebugAgentConfig) -> bool:
     return (config.action_policy_mode or "").strip().lower() == "llm"
+
+
+def _store_lru_observation(
+    existing: list[dict[str, Any]],
+    observation: dict[str, Any],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    items = [dict(item) for item in existing if isinstance(item, dict)]
+    signature = _observation_lru_signature(observation)
+    items = [item for item in items if _observation_lru_signature(item) != signature]
+    items.append(dict(observation))
+    return items[-limit:]
+
+
+def _observation_lru_signature(observation: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(observation.get("event_id") or ""),
+            str(observation.get("latest_tool") or ""),
+            str(observation.get("status") or ""),
+            str(observation.get("summary") or ""),
+        ]
+    )
 
 
 def _render_user_clarification(input_item: dict[str, Any]) -> str:

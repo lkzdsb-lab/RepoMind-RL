@@ -28,6 +28,7 @@ packages = [
   "agent_runtime.llm",
   "agent_runtime.memory",
   "agent_runtime.rl",
+  "ext",
   "interfaces",
   "model",
   "model.agent",
@@ -43,4 +44,10 @@ packages = [
 
 [tool.setuptools.package-data]
 prompts = ["system/*.md", "user/*.md"]
-skills = ["*.md"]
+skills = [
+  "*.md",
+  "*/SKILL.md",
+  "*/agents/*.yaml",
+  "*/references/*.md",
+  "*/scripts/*",
+]

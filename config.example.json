@@ -5,7 +5,7 @@
     "description": ""
   },
   "repo_path": ".",
-  "verify_command": "pytest",
+  "verify_command": "",
   "max_loops": 8,
   "env_file": ".env",
   "env_override": false,
@@ -69,10 +69,17 @@
   },
   "context": {
     "enabled": true,
-    "compressor_mode": "rule_based",
+    "compressor_mode": "llm",
     "max_tokens": 32000,
     "compression_threshold": 0.75,
-    "recent_items": 8
+    "recent_items": 8,
+    "min_new_tokens": 1200
+  },
+  "observer": {
+    "use_delta": true,
+    "full_state_on_severe": true,
+    "write_threshold": 0.35,
+    "store_limit": 12
   },
   "code_context": {
     "index_path": ".repomind/codebase_context/index.json",

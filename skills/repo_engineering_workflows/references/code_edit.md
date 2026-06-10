@@ -1,6 +1,6 @@
 # Code Edit Workflow
 
-Use this skill when the task requires modifying repository code, implementing a
+Use this workflow when the task requires modifying repository code, implementing a
 small change, or fixing a localized bug.
 
 ## Workflow

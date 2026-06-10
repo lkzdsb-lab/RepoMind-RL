@@ -13,23 +13,28 @@ debug_technical_plan={{ debug_technical_plan }}
 plan_mode_evaluation={{ plan_mode_evaluation }}
 selected_skills={{ selected_skills }}
 skill_context={{ skill_context }}
+selected_code_context_summary={{ selected_code_context_summary }}
 candidate_files={{ candidate_files }}
 read_files={{ read_files }}
+full_read_requirements={{ full_read_requirements }}
 test_results={{ test_results }}
 patch_summary={{ patch_summary }}
 editing_enabled={{ editing_enabled }}
 edit_results={{ edit_results }}
 user_inputs={{ user_inputs }}
+pending_action_requirements={{ pending_action_requirements }}
 memory_context={{ memory_context }}
 compressed_context={{ compressed_context }}
 legal_actions={{ legal_actions }}
+action_constraints={{ action_constraints }}
 fallback_action={{ fallback_action }}
 
 Choose only from legal_actions.
-Each legal action includes its description, input_schema, and permissions when available.
+Each legal action includes a short description, required_fields when applicable, and permissions/notes when relevant.
 Return an ordered candidate_actions list so the q-table guard can truncate your choices after selection.
 Put the single best next action first.
-For tools with input_schema, action_input must match that schema. Do not invent fields outside the schema unless the tool description explicitly allows it.
+Use action_constraints as the compact summary of current execution-phase restrictions, focus files, full-read requirements, and fallback routing.
+If a selected tool has required_fields, you must fill them. Do not leave required fields blank.
 Include user_update as a short user-facing progress message when useful, or an empty string. Do not reveal chain-of-thought.
 
 Selection rules:
@@ -40,15 +45,21 @@ Selection rules:
 - Choose ExitPlanMode only when debug_technical_plan is concrete, risks are evaluated, verification commands are identified, and remaining_uncertainties is empty.
 - If candidate_files is empty and code_context is not available yet, prefer search_code_context.
 - Use search_text for focused regex/fixed-string grep when structured context is missing, stale, or too broad.
-- If candidate_files contains unread files, prefer read_file.
-- If a candidate file is already present in read_files, use that evidence instead of requesting it again.
+- Use selected_code_context_summary as the primary structured evidence about where the relevant logic lives.
+- Treat full_read_requirements as a hard signal: when a file appears there, summaries/excerpts are not enough yet, so read the complete file before concluding it is already correct or before patching it.
+- If candidate_files contains unread files, prefer read_file only when you need exact source text for the file you intend to patch or when selected_code_context_summary is still insufficient.
+- If a candidate file is already present in read_files with full_read=true, use that evidence instead of requesting it again. Treat read_files as durable memory for this run.
+- If a candidate file is already present in read_files but full_read=false and it appears in full_read_requirements, you still need a complete read before making a final diagnosis or patch decision.
+- If pending_action_requirements is non-empty, treat it as the highest-priority constraint from the previous step. Use repository context and prior reads to fill those fields before changing topic or asking the user.
 - If verification_required is true and enough relevant code has been read, prefer run_shell_command with purpose="verification". run_tests is only a compatibility alias.
 - After apply_code_patch succeeds, verification_stale becomes true. Do not choose finish, git_diff, or write_memory until a verification command has run.
 - When verification_stale is true, choose run_shell_command with purpose="verification" and the narrowest useful command.
 - When verification_stale is true, do not ask the user for original file content, expected behavior, or review scope. Verify the current repository state with tools.
 - If verification_required is false, do not choose run_tests just to be safe.
-- If editing_enabled is true, choose apply_code_patch only after reading the exact file content that must change and after plan_mode_approved is true.
-- For apply_code_patch, action_input must use exact replacement changes whose old_text comes from read_files.
+- If editing_enabled is true, choose apply_code_patch only after reading the exact file content that must change, ensuring target files have full_read=true when they are relevant patch targets, and after plan_mode_approved is true.
+- For apply_code_patch, prefer exact replacement changes whose old_text comes from read_files. Use append only for end-of-file additions, and use insert_after or insert_before only with an exact anchor old_text that comes from read_files.
+- Preserve the file's existing structural conventions. Keep package/import sections at the top for Go, keep Python import blocks at the beginning, and do not place executable logic before them.
+- Prefer the smallest structurally valid edit. Reuse existing formatting, indentation, blank-line spacing, and declaration order unless the task explicitly requires a reorganization.
 - If expected behavior, business rule, target file, compatibility impact, data migration, permission/auth behavior, or public API behavior is uncertain, choose request_user_input only when you can ask 1-3 concrete questions.
 - If the user only asks to modify/edit a file but does not specify the desired behavior, locate and read the file if needed, then choose request_user_input with concrete questions about the intended change. Do not infer an arbitrary code change only because the file contains suspicious code.
 - If you cannot write a concrete user question, do not choose request_user_input; use the available tools to gather more evidence or choose finish when enough evidence exists.

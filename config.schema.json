@@ -109,7 +109,18 @@
         "compressor_mode": { "enum": ["disabled", "rule_based", "llm"] },
         "max_tokens": { "type": "integer", "minimum": 1 },
         "compression_threshold": { "type": "number", "exclusiveMinimum": 0 },
-        "recent_items": { "type": "integer", "minimum": 1 }
+        "recent_items": { "type": "integer", "minimum": 1 },
+        "min_new_tokens": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "observer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "use_delta": { "type": "boolean" },
+        "full_state_on_severe": { "type": "boolean" },
+        "write_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "store_limit": { "type": "integer", "minimum": 1 }
       }
     },
     "code_context": {

@@ -60,7 +60,7 @@ class CodebaseContextSearcher:
         db_models = self._rank_records(self.index.db_models, query_tokens, limit)
         tests = self._related_tests([item["path"] for item in files], limit=limit)
         call_graph = self._related_call_edges(functions, limit=limit)
-        flow = self._go_flow(files, functions, db_models, routes)
+        flow = self._flow(files, functions, db_models, routes)
 
         result = {
             "query": query,
@@ -113,6 +113,9 @@ class CodebaseContextSearcher:
         query_tokens: set[str],
         limit: int,
     ) -> list[tuple[EmbeddingDoc, float]]:
+        """
+            对文件和用户 token 进行匹配打分，最后获取得分排在前的文件
+        """
         scored: list[tuple[EmbeddingDoc, float]] = []
         for doc in self.index.embeddings:
             score = _token_score(query_tokens, set(doc.tokens))
@@ -162,7 +165,7 @@ class CodebaseContextSearcher:
         ]
         return edges[:limit]
 
-    def _go_flow(
+    def _flow(
         self,
         files: list[dict],
         functions: list[tuple[Any, float]],
@@ -172,8 +175,9 @@ class CodebaseContextSearcher:
         layer_paths: dict[str, list[str]] = {}
         for item in files:
             layer_paths.setdefault(item["layer"], []).append(item["path"])
+        hint = self.index.metadata.get("go_flow_hint") or "entrypoint -> domain logic -> persistence/model"
         return {
-            "hint": "handler -> service -> repository -> model",
+            "hint": hint,
             "layers": layer_paths,
             "routes": [route.path for route, _ in routes],
             "entrypoints": [function.full_name for function, _ in functions if function.layer in {"handler", "route"}],
@@ -223,6 +227,9 @@ def _record_to_dict(record: Any) -> dict:
 
 
 def _token_score(query_tokens: set[str], doc_tokens: set[str]) -> float:
+    """
+        Score = 精准匹配数 / 搜索词总数 + (模糊匹配数 * 0.05)
+    """
     if not query_tokens or not doc_tokens:
         return 0.0
     exact = len(query_tokens.intersection(doc_tokens))
@@ -231,4 +238,3 @@ def _token_score(query_tokens: set[str], doc_tokens: set[str]) -> float:
         if any(query in token or token in query for token in doc_tokens if len(query) >= 3 and len(token) >= 3):
             fuzzy += 1
     return exact / len(query_tokens) + fuzzy * 0.05
-
