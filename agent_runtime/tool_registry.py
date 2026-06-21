@@ -20,6 +20,10 @@ from tools.code_tools.search_text import search_text
 from tools.git_tools.diff import git_diff
 from tools.plan_tools.mode import enter_plan_mode, exit_plan_mode
 from tools.shell_tools.command import run_shell_command
+from agent_runtime.execution_queue import (
+    advance_execution_queue_for_patch,
+    advance_execution_queue_for_verification,
+)
 from agent_runtime.verification import infer_lightweight_verification_command
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
@@ -67,6 +71,7 @@ def reduce_read_file_output(
     state: Dict[str, Any],
     output: Dict[str, Any],
 ) -> Dict[str, Any]:
+    """ 对文件输出进行裁剪"""
     if output.get("error"):
         return {}
     file_path = str(output.get("file_path") or "").strip()
@@ -101,10 +106,18 @@ def reduce_read_file_output(
     if file_path in order:
         order.remove(file_path)
     order.append(file_path)
-    return {
+    updates = {
         "read_file_cache": cache,
         "read_file_order": order[-50:],
     }
+    pending_resolution = state.get("pending_resolution") or {}
+    if (
+        isinstance(pending_resolution, dict)
+        and str(pending_resolution.get("kind") or "") == "recovery"
+        and str(pending_resolution.get("target_file") or "").strip() == file_path
+    ):
+        updates["pending_resolution"] = {}
+    return updates
 
 
 def _focused_file_excerpt(
@@ -138,6 +151,7 @@ def _focused_file_excerpt(
 
 
 def _imports_excerpt(file_path: str, content: str, *, max_chars: int = 1200) -> str:
+    """ 对导包进行单独提取"""
     if not content:
         return ""
     suffix = file_path.lower()
@@ -197,6 +211,7 @@ def _focus_ranges_from_code_context(
     total_lines: int,
     padding: int,
 ) -> list[tuple[int, int]]:
+    """ 在代码索引查找相关值得关注的区间"""
     context = state.get("selected_code_context")
     if not isinstance(context, dict) or not context:
         context = state.get("code_context")
@@ -224,6 +239,7 @@ def _focus_ranges_from_code_context(
         if line > 0:
             raw_ranges.append((max(1, line - padding), min(total_lines, line + padding)))
 
+    # 合并区间
     if not raw_ranges:
         return []
     raw_ranges.sort()
@@ -448,7 +464,7 @@ def reduce_run_shell_command_output(
         if output.get("exit_code") == 0:
             updates["verification_stale"] = False
             updates["last_verified_edit_loop"] = state.get("loop_count", 0)
-            updates["execution_queue"] = _advance_execution_queue_for_verification(state)
+            updates["execution_queue"] = advance_execution_queue_for_verification(state)
     return updates
 
 
@@ -484,6 +500,21 @@ def reduce_apply_code_patch_output(
         "edit_results": edit_results,
         "edited_files": edited_files,
     }
+    if output.get("applied"):
+        updates["pending_resolution"] = {}
+    elif output.get("recoverable_conflict"):
+        recovery_file = str(output.get("recovery_file") or "").strip()
+        updates["pending_resolution"] = {
+            "kind": "recovery",
+            "action": "apply_code_patch",
+            "required_next_action": str(output.get("suggested_next_action") or "read_file"),
+            "target_file": recovery_file,
+            "reason": str(output.get("error") or "").strip(),
+            "details": {
+                "recovery_kind": str(output.get("recovery_kind") or "reread_target"),
+                "conflict_context": output.get("conflict_context", {}),
+            },
+        }
     updates.update(_updated_read_file_cache_from_patch(state, output))
     diff = str(output.get("diff") or "")
     change_summary = summarize_diff_detail(
@@ -494,12 +525,20 @@ def reduce_apply_code_patch_output(
     )
     if change_summary.get("files"):
         updates["change_summaries"] = state.get("change_summaries", []) + [change_summary]
-        updates["last_change_summary"] = change_summary
+    if output.get("applied"):
+        change_event = build_change_event(output, change_summary=change_summary)
+        if change_event:
+            updates["change_events"] = state.get("change_events", []) + [change_event]
     if output.get("applied"):
         updates["status"] = "patching"
         updates["verification_stale"] = True
         updates["last_edit_at_loop"] = state.get("loop_count", 0)
-        updates["execution_queue"] = _advance_execution_queue_for_patch(state, output)
+        changed_files = {
+            str(path).strip()
+            for path in output.get("changed_files", []) or []
+            if str(path).strip()
+        }
+        updates["execution_queue"] = advance_execution_queue_for_patch(state, changed_files)
     return updates
 
 
@@ -507,6 +546,7 @@ def _updated_read_file_cache_from_patch(
     state: Dict[str, Any],
     output: Dict[str, Any],
 ) -> Dict[str, Any]:
+    """ 应用 patch 后更新 filecache"""
     updated_contents = output.get("updated_contents")
     if not isinstance(updated_contents, dict) or not updated_contents:
         return {}
@@ -694,45 +734,6 @@ def _planned_verification_commands(state: Dict[str, Any]) -> list[str]:
     return commands[:5]
 
 
-def _advance_execution_queue_for_patch(
-    state: Dict[str, Any],
-    output: Dict[str, Any],
-) -> list[Dict[str, Any]]:
-    queue = [dict(item) for item in state.get("execution_queue", []) or [] if isinstance(item, dict)]
-    changed_files = {
-        str(path).strip()
-        for path in output.get("changed_files", []) or []
-        if str(path).strip()
-    }
-    if not changed_files:
-        return queue
-    for item in queue:
-        if str(item.get("status") or "pending") != "pending":
-            continue
-        if str(item.get("kind") or "") != "patch":
-            continue
-        targets = {
-            str(path).strip()
-            for path in item.get("target_files", []) or []
-            if str(path).strip()
-        }
-        if targets and targets.issubset(changed_files):
-            item["status"] = "completed"
-            break
-    return queue
-
-
-def _advance_execution_queue_for_verification(
-    state: Dict[str, Any],
-) -> list[Dict[str, Any]]:
-    queue = [dict(item) for item in state.get("execution_queue", []) or [] if isinstance(item, dict)]
-    for item in queue:
-        if str(item.get("status") or "pending") == "pending" and str(item.get("kind") or "") == "verify":
-            item["status"] = "completed"
-            break
-    return queue
-
-
 def _extract_files_from_search(matches: list[str]) -> list[str]:
     files: list[str] = []
     for line in matches:
@@ -749,6 +750,36 @@ def _extract_files_from_search(matches: list[str]) -> list[str]:
 
 def summarize_diff(diff: str) -> str:
     return summarize_diff_detail(diff)["summary"]
+
+
+def build_change_event(
+    output: dict[str, Any],
+    *,
+    change_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """ 构建修改对比"""
+    diff = str(output.get("diff") or "")
+    if not diff:
+        return {}
+    summary = dict(change_summary or summarize_diff_detail(diff, source="apply_code_patch"))
+    files = [
+        str(path).strip()
+        for path in output.get("changed_files", []) or []
+        if str(path).strip()
+    ]
+    return {
+        "tool": "apply_code_patch",
+        "summary": str(output.get("summary") or summary.get("summary") or "").strip(),
+        "reason": str(output.get("reason") or "").strip(),
+        "applied": bool(output.get("applied")),
+        "dry_run": bool(output.get("dry_run")),
+        "change_count": int(output.get("change_count") or 0),
+        "changed_line_count": int(output.get("changed_line_count") or 0),
+        "files": files,
+        "diff": diff,
+        "diff_summary": summary,
+        "hunks": parse_unified_diff(diff),
+    }
 
 
 def summarize_diff_detail(
@@ -821,6 +852,47 @@ def _clean_diff_path(value: str) -> str:
     if path.startswith("a/") or path.startswith("b/"):
         path = path[2:]
     return path
+
+
+def parse_unified_diff(diff: str) -> list[dict[str, Any]]:
+    if not diff:
+        return []
+    file_hunks: list[dict[str, Any]] = []
+    current_file: dict[str, Any] | None = None
+    current_hunk: dict[str, Any] | None = None
+    old_path = ""
+    for raw_line in diff.splitlines():
+        if raw_line.startswith("--- "):
+            old_path = _clean_diff_path(raw_line[4:].strip())
+            current_hunk = None
+            continue
+        if raw_line.startswith("+++ "):
+            new_path = _clean_diff_path(raw_line[4:].strip())
+            file_path = new_path or old_path
+            current_file = {"file_path": file_path, "hunks": []}
+            file_hunks.append(current_file)
+            current_hunk = None
+            continue
+        if raw_line.startswith("@@ "):
+            if current_file is None:
+                continue
+            current_hunk = {"header": raw_line, "lines": []}
+            current_file["hunks"].append(current_hunk)
+            continue
+        if current_hunk is None:
+            continue
+        line_type = "context"
+        if raw_line.startswith("+") and not raw_line.startswith("+++"):
+            line_type = "add"
+        elif raw_line.startswith("-") and not raw_line.startswith("---"):
+            line_type = "remove"
+        current_hunk["lines"].append(
+            {
+                "type": line_type,
+                "text": raw_line,
+            }
+        )
+    return [item for item in file_hunks if item.get("file_path")]
 
 # 工具注册
 class ToolRegistry:

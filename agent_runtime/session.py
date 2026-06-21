@@ -86,11 +86,9 @@ class AgentSession:
             change_summaries=[
                 item for item in state.get("change_summaries", []) if isinstance(item, dict)
             ],
-            last_change_summary=(
-                state.get("last_change_summary")
-                if isinstance(state.get("last_change_summary"), dict)
-                else {}
-            ),
+            change_events=[
+                item for item in state.get("change_events", []) if isinstance(item, dict)
+            ],
             llm_token_usage=_clean_token_usage(state.get("llm_token_usage")),
             llm_errors=_clean_llm_errors(state.get("llm_errors")),
         )

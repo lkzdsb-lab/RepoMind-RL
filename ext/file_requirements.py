@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from agent_runtime.execution_queue import current_execution_item
 from model.agent.graph import AgentState
 
 FULL_READ_MAX_CHARS = 200000
@@ -21,7 +22,7 @@ def collect_active_queries(state: AgentState) -> list[str]:
     _append_query(queries, state.get("current_step"))
 
     # 2.从 llm 的决策中获取
-    pending = state.get("pending_action_requirements")
+    pending = (state.get("pending_resolution") or {}).get("details")
     if isinstance(pending, dict):
         _append_query(queries, pending.get("reason"))
         _append_query(queries, pending.get("message"))
@@ -229,15 +230,11 @@ def _needs_full_read(
 
 
 def _is_execution_target(state: AgentState, file_path: str) -> bool:
-    for item in state.get("execution_queue", []) or []:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("status") or "pending") != "pending":
-            continue
+    item = current_execution_item(state)
+    if isinstance(item, dict):
         for path in item.get("target_files", []) or []:
             if str(path or "").strip() == file_path:
                 return True
-        break
     return False
 
 

@@ -22,7 +22,7 @@ patch_summary={{ patch_summary }}
 editing_enabled={{ editing_enabled }}
 edit_results={{ edit_results }}
 user_inputs={{ user_inputs }}
-pending_action_requirements={{ pending_action_requirements }}
+pending_resolution={{ pending_resolution }}
 memory_context={{ memory_context }}
 compressed_context={{ compressed_context }}
 legal_actions={{ legal_actions }}
@@ -50,7 +50,7 @@ Selection rules:
 - If candidate_files contains unread files, prefer read_file only when you need exact source text for the file you intend to patch or when selected_code_context_summary is still insufficient.
 - If a candidate file is already present in read_files with full_read=true, use that evidence instead of requesting it again. Treat read_files as durable memory for this run.
 - If a candidate file is already present in read_files but full_read=false and it appears in full_read_requirements, you still need a complete read before making a final diagnosis or patch decision.
-- If pending_action_requirements is non-empty, treat it as the highest-priority constraint from the previous step. Use repository context and prior reads to fill those fields before changing topic or asking the user.
+- If pending_resolution is non-empty, treat it as the highest-priority unresolved runtime state from the previous step. Follow its required_next_action before changing topic.
 - If verification_required is true and enough relevant code has been read, prefer run_shell_command with purpose="verification". run_tests is only a compatibility alias.
 - After apply_code_patch succeeds, verification_stale becomes true. Do not choose finish, git_diff, or write_memory until a verification command has run.
 - When verification_stale is true, choose run_shell_command with purpose="verification" and the narrowest useful command.

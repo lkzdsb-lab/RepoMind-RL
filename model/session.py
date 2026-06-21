@@ -18,6 +18,6 @@ class ChatResponse:
     test_results: list[dict[str, Any]] = field(default_factory=list)
     patch_summary: str = ""
     change_summaries: list[dict[str, Any]] = field(default_factory=list)
-    last_change_summary: dict[str, Any] = field(default_factory=dict)
+    change_events: list[dict[str, Any]] = field(default_factory=list)
     llm_token_usage: dict[str, Any] = field(default_factory=dict)
     llm_errors: list[dict[str, Any]] = field(default_factory=list)

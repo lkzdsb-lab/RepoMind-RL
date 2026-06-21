@@ -2,17 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent_runtime.execution_queue import current_execution_item as queue_current_execution_item
 from ext.file_requirements import full_read_requirements
 from model.agent.graph import AgentState
 
 
 def current_execution_item(state: AgentState) -> dict[str, Any] | None:
-    for item in state.get("execution_queue", []) or []:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("status") or "pending") == "pending":
-            return item
-    return None
+    return queue_current_execution_item(state)
 
 
 def execution_target_files(state: AgentState) -> list[str]:

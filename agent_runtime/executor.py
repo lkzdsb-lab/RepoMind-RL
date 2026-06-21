@@ -27,6 +27,7 @@ from agent_runtime.codebase_context.retrieval import (
     LLMCodeContextReranker,
     merge_code_context_outputs,
 )
+from agent_runtime.completion_state import derive_phase, evaluate_completion_transition
 from agent_runtime.context import ContextCompressionManager
 from agent_runtime.context.events import latest_tool_event, should_llm_observe_event
 from agent_runtime.logging_config import configure_from_agent_config
@@ -76,7 +77,15 @@ from agent_runtime.rl.trainer import QTableStore
 from agent_runtime.skill_context import build_selected_skill_context
 from agent_runtime.tool_registry import ToolRegistry
 from agent_runtime.trajectory import TrajectoryRecorder
-from agent_runtime.user_updates import UserUpdateSink, set_user_update_sink
+from agent_runtime.user_updates import (
+    UserUpdateSink,
+    ChangeEventSink,
+    emit_change_event,
+    set_change_event_sink,
+    set_user_update_sink,
+)
+from agent_runtime.execution_queue import current_execution_item as queue_current_execution_item
+from ext.focus_files import current_execution_item, execution_target_files
 from model.agent.graph import AgentState, AgentRunResult
 from model.agent.actions import Action
 from config import CompressionConfig, DebugAgentConfig, LLMConfig
@@ -111,11 +120,13 @@ class DebugAgent:
         memory_store: JsonlMemoryStore | None = None,
         recorder: TrajectoryRecorder | None = None,
         user_update_sink: UserUpdateSink | None = None,
+        change_event_sink: ChangeEventSink | None = None,
     ) -> None:
         configure_from_agent_config(config)
         self.config = config
         self.user_update_sink = user_update_sink
         set_user_update_sink(user_update_sink)
+        set_change_event_sink(change_event_sink)
         self.rl_enabled = config.rl_enabled
         self.rl_encoder = StateEncoder()
         self.rl_action_space = ActionSpace()
@@ -237,7 +248,9 @@ class DebugAgent:
             "plan_mode_evaluation": state.get("plan_mode_evaluation", ""),
             "plan_mode_events": state.get("plan_mode_events", []),
             "execution_queue": state.get("execution_queue", []),
-            "pending_action_requirements": state.get("pending_action_requirements", {}),
+            "pending_resolution": state.get("pending_resolution", {}),
+            "phase": state.get("phase", ""),
+            "runtime_decision": state.get("runtime_decision", {}),
             "user_updates": state.get("user_updates", []),
             "last_user_update": state.get("last_user_update"),
             "llm_calls": state.get("llm_calls", []),
@@ -248,7 +261,7 @@ class DebugAgent:
             "edit_results": state.get("edit_results", []),
             "edited_files": state.get("edited_files", []),
             "change_summaries": state.get("change_summaries", []),
-            "last_change_summary": state.get("last_change_summary", {}),
+            "change_events": state.get("change_events", []),
             "command_results": state.get("command_results", []),
             "verification_commands": state.get("verification_commands", []),
             "verification_stale": bool(state.get("verification_stale", False)),
@@ -304,8 +317,14 @@ class DebugAgent:
         """
         run_logger = logger.bind(task_id=state.get("task_id"), repo_path=self.config.repo_path)
         while state.get("loop_count", 0) < state.get("max_loops", self.config.max_loops):
+            state = self._sync_runtime_state(state)
             state = self._prepare_context(state)
-            action = self.policy.next_action(state)
+            state = self._sync_runtime_state(state)
+            runtime_decision = state.get("runtime_decision") or {}
+            if bool(runtime_decision.get("is_complete")):
+                action = Action("finish", thought="Runtime completion evaluator marked the run complete.")
+            else:
+                action = self.policy.next_action(state)
             limit_events = self.rl_action_space.consume_last_limit_events()
             if limit_events:
                 action = Action(
@@ -363,6 +382,16 @@ class DebugAgent:
             state = self._finalize(state)
 
         return self._finish_run(state, started_at)
+
+    def _sync_runtime_state(self, state: AgentState) -> AgentState:
+        decision = evaluate_completion_transition(state)
+        phase = str(decision.get("phase") or derive_phase(state))
+        return {
+            **state,
+            "execution_queue": decision.get("execution_queue", state.get("execution_queue", [])),
+            "phase": phase,
+            "runtime_decision": decision,
+        }
 
     def _finish_run(self, state: AgentState, started_at: float) -> AgentRunResult:
         trace_path = self.recorder.save(state, self.config.trace_dir)
@@ -469,7 +498,7 @@ class DebugAgent:
             edit_results=[],
             edited_files=[],
             change_summaries=[],
-            last_change_summary={},
+            change_events=[],
             require_step_approval=self.config.require_step_approval,
             pending_step_approval={},
             step_approval_history=[],
@@ -478,7 +507,9 @@ class DebugAgent:
             final_report={},
             next_action=None,
             next_action_input=None,
-            pending_action_requirements={},
+            pending_resolution={},
+            phase="collect_context",
+            runtime_decision={},
             loop_count=0,
             max_loops=self.config.max_loops,
             status="created",
@@ -733,7 +764,7 @@ class DebugAgent:
             "action selected args={}",
             action.args,
         )
-        pending_requirements = dict(state.get("pending_action_requirements") or {})
+        pending_resolution = dict(state.get("pending_resolution") or {})
         deferred = action.metadata.get("deferred_action") if isinstance(action.metadata, dict) else None
         limit_events = []
         if isinstance(action.metadata, dict):
@@ -741,9 +772,16 @@ class DebugAgent:
             if isinstance(raw_limit_events, list):
                 limit_events = [event for event in raw_limit_events if isinstance(event, dict)]
         if isinstance(deferred, dict):
-            pending_requirements = deferred
-        elif pending_requirements:
-            pending_requirements = {}
+            pending_resolution = {
+                "kind": "deferred",
+                "action": str(deferred.get("action") or action.name),
+                "required_next_action": str(deferred.get("action") or action.name),
+                "target_file": "",
+                "reason": str(deferred.get("reason") or "").strip(),
+                "details": deferred,
+            }
+        elif pending_resolution:
+            pending_resolution = {}
         action_history = list(state.get("action_history", []) or [])
         action_history.append(self._action_history_entry(state, action))
         observations = list(state.get("observations", []) or [])
@@ -762,7 +800,7 @@ class DebugAgent:
             **state,
             "next_action": action.name,
             "next_action_input": action.args,
-            "pending_action_requirements": pending_requirements,
+            "pending_resolution": pending_resolution,
             "action_history": action_history,
             "action_limit_events": action_limit_events,
             "observations": observations,
@@ -1042,9 +1080,25 @@ class DebugAgent:
                 content = output.get("content")
                 if file_path and isinstance(content, str):
                     read_contents[file_path] = content
+        allowed_files = sorted(read_contents)
+        current_execution = current_execution_item(state)
+        execution_scope = (
+            execution_target_files(state)
+            if isinstance(current_execution, dict) and str(current_execution.get("kind") or "") == "patch"
+            else []
+        )
+        if execution_scope:
+            scoped_contents = {
+                path: read_contents[path]
+                for path in execution_scope
+                if path in read_contents
+            }
+            if scoped_contents:
+                read_contents = scoped_contents
+                allowed_files = sorted(scoped_contents)
         return {
             "editing_enabled": self.config.editing_enabled,
-            "allowed_files": sorted(read_contents),
+            "allowed_files": allowed_files,
             "read_contents": read_contents,
             "max_files": self.config.editing_max_files,
             "max_changed_lines": self.config.editing_max_changed_lines,
@@ -1187,6 +1241,10 @@ class DebugAgent:
             "tool_calls": tool_calls,
             "observations": observations,
         }
+        if action.name == "apply_code_patch" and output.get("applied"):
+            change_events = new_state.get("change_events")
+            if isinstance(change_events, list) and change_events:
+                emit_change_event(change_events[-1])
         if action.name != "write_memory":
             new_state = self.memory_manager.add_short_term(
                 new_state,
@@ -1391,6 +1449,12 @@ class DebugAgent:
         """
             处理终止状态，由 llm 判断是否结束并总结，并且进行 loop 限制
         """
+        runtime_decision = evaluate_completion_transition(state)
+        state = {
+            **state,
+            "phase": runtime_decision.get("phase", state.get("phase", "")),
+            "runtime_decision": runtime_decision,
+        }
         if state.get("plan_mode"):
             judgement = {
                 "decision": "continue",
@@ -1433,6 +1497,9 @@ class DebugAgent:
                 "loop_count": int(state.get("loop_count", 0)) + 1,
             }
             return state, False, False, output
+        if bool(runtime_decision.get("is_complete")):
+            state = self._finalize(state)
+            return state, True, True, {"completion_judgement": {"decision": "complete", "source": "runtime_transition"}}
         judgement = self.completion_judge.judge(state)
         output = {"completion_judgement": judgement}
         state = self._record_completion_judgement(state, judgement)
@@ -2254,12 +2321,7 @@ def _action_signature(action: Action, state: AgentState | None = None) -> str:
 
 
 def _current_execution_item(state: AgentState) -> dict[str, Any] | None:
-    for item in state.get("execution_queue", []) or []:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("status") or "pending") == "pending":
-            return item
-    return None
+    return queue_current_execution_item(state)
 
 
 def _build_project_profile(repo_path: str, max_files: int = 3000) -> dict[str, Any]:

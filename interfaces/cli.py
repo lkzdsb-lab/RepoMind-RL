@@ -11,6 +11,7 @@ from rich.console import Console
 
 from agent_runtime.executor import DebugAgent
 from agent_runtime.session import AgentSession
+from agent_runtime.user_updates import set_change_event_sink
 from config import (
     DEFAULT_CONFIG_PATH,
     DebugAgentConfig,
@@ -135,16 +136,15 @@ def chat(
             console_log=console_log,
         )
         # 启动对话并初始化 agent
-        agent_session = AgentSession(
-            DebugAgent(config, user_update_sink=_render_live_user_update)
-        )
-        initial_response = _load_initial_response(agent_session, resume_trace)
         shell = ChatShell(
-            agent_session,
+            AgentSession(DebugAgent(config, user_update_sink=_render_live_user_update)),
             repo_path=config.repo_path,
             history_path=Path(config.repo_path) / ".repomind" / "chat_history",
             console=console,
         )
+        set_change_event_sink(shell.render_live_change_event)
+        agent_session = shell.agent_session
+        initial_response = _load_initial_response(agent_session, resume_trace)
         shell.run(initial_response)
     except Exception as exc:
         console.print(f"[red]Error:[/red] {exc}")

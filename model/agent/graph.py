@@ -139,14 +139,16 @@ class AgentState(TypedDict, total=False):
     edit_results: List[Dict[str, Any]]
     edited_files: List[str]
     change_summaries: List[Dict[str, Any]]
-    last_change_summary: Dict[str, Any]
+    change_events: List[Dict[str, Any]]
     patch: Optional[str] # 修改文件的块
     patch_summary: Optional[str]
     final_report: Dict[str, Any]
 
     next_action: Optional[str] # 下一个步骤
     next_action_input: Optional[Dict[str, Any]]
-    pending_action_requirements: Dict[str, Any]
+    pending_resolution: Dict[str, Any]
+    phase: str
+    runtime_decision: Dict[str, Any]
 
     loop_count: int
     max_loops: int

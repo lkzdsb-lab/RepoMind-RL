@@ -5,6 +5,7 @@ from __future__ import annotations
 from loguru import logger
 from typing import Any, Iterable
 
+from agent_runtime.completion_state import derive_phase, evaluate_completion_transition
 from ext.focus_files import (
     current_execution_item as state_current_execution_item,
     edited_files_needing_reread,
@@ -61,7 +62,9 @@ class ActionSpace:
 
     def legal_specs(self, state: AgentState) -> list[ActionSpec]:
         self._last_limit_events = []
-        if state.get("status") in {"finished", "failed"}:
+        runtime_decision = evaluate_completion_transition(state)
+        phase = str(runtime_decision.get("phase") or derive_phase(state))
+        if state.get("status") in {"finished", "failed"} or phase == "complete":
             return [ActionSpec("finish", "Finish terminal task.")]
 
         specs: list[ActionSpec] = []
@@ -71,15 +74,38 @@ class ActionSpace:
         unread = [path for path in candidate_files if path not in self._read_files(state)]
         full_read_needed = full_read_requirements(state, candidate_files=list(candidate_files))
         verification_required = bool(state.get("verification_required", True))
-        plan_mode = bool(state.get("plan_mode", False))
+        plan_mode = phase == "plan"
         plan_approved = bool(state.get("plan_mode_approved", False))
         need_more_context = state.get("status") in {"need_more_context", "planning"}
         current_execution = self._current_execution_item(state)
+        pending_resolution = state.get("pending_resolution") or {}
         edit_task = bool(state.get("editing_enabled", False)) and state.get("task_type") in {
             "BUG_FIX",
             "FEATURE_IMPL",
         }
         verification_stale = bool(state.get("verification_stale", False))
+
+        if str(pending_resolution.get("kind") or "") == "recovery" and str(
+            pending_resolution.get("target_file") or ""
+        ).strip():
+            recovery_file = str(pending_resolution.get("target_file") or "").strip()
+            recovery_specs: list[ActionSpec] = []
+            if "read_file" in available:
+                recovery_specs.append(
+                    ActionSpec(
+                        "read_file",
+                        f"Re-read {recovery_file} to refresh patch anchors after a recoverable edit conflict.",
+                    )
+                )
+            if "search_code_context" in available:
+                recovery_specs.append(
+                    ActionSpec(
+                        "search_code_context",
+                        "Refresh structured context for the recoverable patch conflict.",
+                    )
+                )
+            if recovery_specs:
+                return self._limit_specs(state, self._finish_safe_specs(recovery_specs, allow_finish=False))
 
         if plan_mode:
             # EnterPlanMode is the gate into planning. Once a plan exists, keep the
@@ -465,16 +491,10 @@ class ActionSpace:
         return files
 
     def _can_finish(self, state: AgentState) -> bool:
-        return (
-            bool(state.get("memory_written"))
-            or bool(state.get("error"))
-            or self._has_verified_edit(state)
-            or (
-                state.get("patch_summary") is not None
-                and not state.get("verification_stale", False)
-            )
-            or int(state.get("loop_count", 0)) >= int(state.get("max_loops", 8)) - 1
-        )
+        decision = evaluate_completion_transition(state)
+        return bool(decision.get("is_complete")) or int(state.get("loop_count", 0)) >= int(
+            state.get("max_loops", 8)
+        ) - 1
 
     def _has_applied_edit(self, state: AgentState) -> bool:
         return any(
@@ -599,7 +619,7 @@ class ActionSpace:
             query = self.query_planner.plan(state).query
             return f"search_code_context:{query or '<empty>'}"
         if spec.name == "request_user_input":
-            pending = state.get("pending_action_requirements", {}) or {}
+            pending = (state.get("pending_resolution") or {}).get("details") or {}
             missing = ",".join(
                 sorted(
                     str(item).strip()

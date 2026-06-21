@@ -484,8 +484,8 @@ def _action_prompt(
         editing_enabled=json.dumps(bool(state.get("editing_enabled", False))),
         edit_results=json.dumps(state.get("edit_results", [])[-2:], ensure_ascii=False, default=str),
         user_inputs=json.dumps(state.get("user_inputs", []), ensure_ascii=False, default=str),
-        pending_action_requirements=json.dumps(
-            state.get("pending_action_requirements", {}),
+        pending_resolution=json.dumps(
+            state.get("pending_resolution", {}),
             ensure_ascii=False,
             default=str,
         ),
@@ -621,6 +621,9 @@ def _action_constraints(
 
 
 def _action_phase(state: AgentState) -> str:
+    phase = str(state.get("phase") or "").strip().lower()
+    if phase:
+        return phase
     if bool(state.get("plan_mode", False)):
         return "plan"
     if bool(state.get("verification_stale", False)):
@@ -858,6 +861,14 @@ def _normalize_read_file_target(
     """
         获取下一个读取的文件
     """
+    pending_resolution = state.get("pending_resolution") or {}
+    recovery_file = ""
+    if str(pending_resolution.get("kind") or "") == "recovery":
+        recovery_file = str(pending_resolution.get("target_file") or "").strip()
+    if recovery_file:
+        if requested_path and requested_path == recovery_file:
+            return requested_path
+        return recovery_file
     execution_targets = execution_target_files(state)
     required_target = choose_read_file_target(
         state,

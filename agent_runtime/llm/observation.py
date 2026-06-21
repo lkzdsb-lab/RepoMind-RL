@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from agent_runtime.context.events import latest_tool_event
+from agent_runtime.execution_queue import current_execution_item as queue_current_execution_item
 from agent_runtime.llm.llm_nodes import LLMJsonNode
 from config import LLMConfig
 from model.agent.graph import AgentState
@@ -416,17 +417,17 @@ def _recent_relevant_observations(state: AgentState) -> list[dict[str, Any]]:
 
 
 def _current_execution_item(state: AgentState) -> dict[str, Any]:
-    """ 强制等待 plan 执行"""
-    for item in state.get("execution_queue", []) or []:
-        if isinstance(item, dict) and str(item.get("status") or "pending") == "pending":
-            return {
-                "kind": str(item.get("kind") or ""),
-                "target_files": [
-                    str(path).strip()
-                    for path in item.get("target_files", []) or []
-                    if str(path).strip()
-                ],
-            }
+    item = queue_current_execution_item(state)
+    if isinstance(item, dict):
+        return {
+            "kind": str(item.get("kind") or ""),
+            "status": str(item.get("status") or ""),
+            "target_files": [
+                str(path).strip()
+                for path in item.get("target_files", []) or []
+                if str(path).strip()
+            ],
+        }
     return {}
 
 

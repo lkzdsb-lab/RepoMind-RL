@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ext.focus_files import current_focus_files
+from ext.focus_files import current_focus_files, execution_target_files
 from model.agent.graph import AgentState
 from utils import _truncate_text, _put_if_present
 
@@ -81,6 +81,7 @@ def read_file_summaries(
         focus_paths = [
             path for path in current_focus_files(state, limit=min(3, limit)) if path in cache
         ]
+        execution_targets = set(execution_target_files(state))
         recent_paths = [
             str(path).strip()
             for path in reversed(order)
@@ -107,9 +108,13 @@ def read_file_summaries(
                     summary["imports_excerpt"] = _truncate_text(imports_excerpt, min(500, excerpt_chars))
                 if snapshot.get("focus_ranges"):
                     summary["focus_ranges"] = snapshot.get("focus_ranges")
-                excerpt = str(snapshot.get("focus_excerpt") or "")
+                excerpt = _detailed_file_excerpt(
+                    snapshot,
+                    excerpt_chars=excerpt_chars,
+                    prefer_full_content=file_path in execution_targets,
+                )
                 if excerpt:
-                    summary["content_excerpt"] = _truncate_text(excerpt, min(900, excerpt_chars))
+                    summary["content_excerpt"] = excerpt
                 elif summary["is_empty"]:
                     summary["content_excerpt"] = "<empty file>"
             else:
@@ -170,6 +175,27 @@ def _compact_file_note(snapshot: dict[str, Any], *, max_chars: int = 180) -> str
         )
         if first:
             return _truncate_text(first, max_chars)
+    return ""
+
+
+def _detailed_file_excerpt(
+    snapshot: dict[str, Any],
+    *,
+    excerpt_chars: int,
+    prefer_full_content: bool,
+) -> str:
+    if bool(snapshot.get("is_empty", False)):
+        return "<empty file>"
+    if prefer_full_content and bool(snapshot.get("full_read", False)):
+        content = str(snapshot.get("content") or "")
+        if content:
+            return _truncate_text(content, min(2200, excerpt_chars))
+    excerpt = str(snapshot.get("focus_excerpt") or "")
+    if excerpt:
+        return _truncate_text(excerpt, min(900, excerpt_chars))
+    content = str(snapshot.get("content") or "")
+    if content and bool(snapshot.get("full_read", False)):
+        return _truncate_text(content, min(1200, excerpt_chars))
     return ""
 
 

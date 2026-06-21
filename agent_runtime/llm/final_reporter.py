@@ -38,7 +38,7 @@ class RuleBasedFinalReporter:
         has_patch = bool(
             state.get("patch")
             or state.get("edited_files")
-            or state.get("last_change_summary")
+            or state.get("change_events")
         )
         patch_status = _patch_status(state)
         next_steps = _next_steps(state, has_patch)
@@ -135,7 +135,7 @@ def _final_report_prompt(state: AgentState, context: dict[str, Any]) -> str:
             bool(
                 state.get("patch")
                 or state.get("edited_files")
-                or state.get("last_change_summary")
+                or state.get("change_events")
             )
         ),
         tool_calls=json.dumps(tool_call_summaries(state), ensure_ascii=False, default=str),
@@ -165,7 +165,7 @@ def _normalize_final_report(
         "has_patch": bool(
             state.get("patch")
             or state.get("edited_files")
-            or state.get("last_change_summary")
+            or state.get("change_events")
         ),
         "patch_status": str(data.get("patch_status") or fallback.get("patch_status") or "").strip()[:500],
         "next_steps": _clean_string_list(data.get("next_steps") or fallback.get("next_steps"), 8, 280),
@@ -253,9 +253,11 @@ def _patch_status(state: AgentState) -> str:
     """
     if state.get("patch_summary"):
         return str(state["patch_summary"])
-    last_change = state.get("last_change_summary")
-    if isinstance(last_change, dict) and last_change.get("summary"):
-        return str(last_change["summary"])
+    change_summaries = state.get("change_summaries")
+    if isinstance(change_summaries, list):
+        for item in reversed(change_summaries):
+            if isinstance(item, dict) and item.get("summary"):
+                return str(item["summary"])
     if state.get("patch"):
         return "工作区存在 patch。"
     return "未发现工作区 patch。"

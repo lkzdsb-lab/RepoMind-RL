@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import difflib
 from pathlib import Path
 from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
-from rich.console import Console
+from rich.console import Console, Group
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from agent_runtime.session import AgentSession
 from tools.git_tools.diff import git_diff
@@ -28,6 +30,7 @@ class ChatShell:
         self.agent_session = agent_session
         self.repo_path = repo_path
         self.console = console or Console()
+        self._rendered_change_events = 0
         history_path = Path(history_path)
         history_path.parent.mkdir(parents=True, exist_ok=True)
         self.prompt = PromptSession(history=FileHistory(str(history_path)))
@@ -54,6 +57,7 @@ class ChatShell:
 
     def render_response(self, response: ChatResponse) -> None:
         self._render_user_updates(response.user_updates)
+        self._render_change_events(response.change_events)
         if response.type == "needs_user_input":
             body = response.reason or "The agent needs more information before continuing."
             if response.questions:
@@ -95,6 +99,7 @@ class ChatShell:
             return True
         if command == "/new":
             self.agent_session.reset()
+            self._rendered_change_events = 0
             self.console.print("[green]Started a new conversation state.[/green]")
             return True
         if command == "/diff":
@@ -150,13 +155,23 @@ class ChatShell:
         self.console.print(table)
 
     def _render_diff(self) -> None:
+        state = self.agent_session.state or {}
+        change_events = state.get("change_events", []) if isinstance(state, dict) else []
+        if isinstance(change_events, list) and change_events:
+            for index, event in enumerate(change_events, start=1):
+                if not isinstance(event, dict):
+                    continue
+                panel = _render_change_event_panel(event, title=f"Change #{index}")
+                if panel is not None:
+                    self.console.print(panel)
+            return
         output = git_diff(self.repo_path)
         if output.get("error"):
             self.console.print(f"[red]{output['error']}[/red]")
             return
         diff = str(output.get("diff") or "")
         if not diff:
-            self.console.print("[dim]No git diff.[/dim]")
+            self.console.print("[dim]No change events in this session, and no git diff.[/dim]")
             return
         self.console.print(Panel(diff[-12000:], title="git diff", border_style="blue"))
 
@@ -167,7 +182,6 @@ class ChatShell:
         _add_row(table, "trace", response.trace_path)
         _add_row(table, "edited_files", ", ".join(response.edited_files))
         _add_row(table, "candidate_files", ", ".join(response.candidate_files[:8]))
-        _add_row(table, "last_change", _format_change_summary(response.last_change_summary))
         _add_row(table, "patch", response.patch_summary)
         _add_row(table, "llm_tokens", _format_token_usage(response.llm_token_usage))
         _add_row(table, "llm_error", _format_latest_llm_error(response.llm_errors))
@@ -185,6 +199,25 @@ class ChatShell:
                 continue
             source = str(item.get("source") or "agent").strip() or "agent"
             self.console.print(f"[dim]{source}[/dim] {message}")
+
+    def _render_change_events(self, events: list[dict[str, Any]]) -> None:
+        if not isinstance(events, list) or self._rendered_change_events >= len(events):
+            return
+        for event in events[self._rendered_change_events :]:
+            if not isinstance(event, dict):
+                continue
+            panel = _render_change_event_panel(event)
+            if panel is not None:
+                self.console.print(panel)
+        self._rendered_change_events = len(events)
+
+    def render_live_change_event(self, event: dict[str, Any]) -> None:
+        if not isinstance(event, dict):
+            return
+        panel = _render_change_event_panel(event)
+        if panel is not None:
+            self.console.print(panel)
+        self._rendered_change_events += 1
 
 
 def _add_row(table: Table, key: str, value: Any) -> None:
@@ -211,6 +244,97 @@ def _format_change_summary(summary: dict[str, Any]) -> str:
         suffix = " ..." if len(files) > 5 else ""
         return "; ".join(file_parts) + suffix
     return str(summary.get("summary") or "").strip()
+
+
+def _render_change_event_panel(event: dict[str, Any], *, title: str = "Code Changes") -> Panel | None:
+    files = [str(path).strip() for path in event.get("files", []) or [] if str(path).strip()]
+    diff_summary = event.get("diff_summary") if isinstance(event.get("diff_summary"), dict) else {}
+    total_added = int(diff_summary.get("total_added") or 0)
+    total_removed = int(diff_summary.get("total_removed") or 0)
+    changed_line_count = int(event.get("changed_line_count") or 0)
+    header = Text()
+    if files:
+        header.append(", ".join(files), style="bold")
+    else:
+        header.append("Modified files", style="bold")
+    stats = f"  (+{total_added} -{total_removed}, changed {changed_line_count} lines)"
+    header.append(stats, style="dim")
+
+    body: list[Any] = [header]
+    reason = str(event.get("reason") or "").strip()
+    if reason:
+        body.append(Text(reason, style="dim"))
+
+    for file_item in event.get("hunks", []) or []:
+        if not isinstance(file_item, dict):
+            continue
+        file_path = str(file_item.get("file_path") or "").strip()
+        if file_path:
+            body.append(Text(file_path, style="bold cyan"))
+        for hunk in file_item.get("hunks", []) or []:
+            if not isinstance(hunk, dict):
+                continue
+            header_line = str(hunk.get("header") or "").strip()
+            if header_line:
+                body.append(Text(header_line, style="cyan"))
+            body.extend(_render_hunk_lines(hunk.get("lines") or []))
+
+    return Panel(Group(*body), title=title, border_style="blue")
+
+
+def _render_hunk_lines(lines: list[dict[str, Any]]) -> list[Text]:
+    rendered: list[Text] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not isinstance(line, dict):
+            index += 1
+            continue
+        line_type = str(line.get("type") or "context")
+        if (
+            line_type == "remove"
+            and index + 1 < len(lines)
+            and isinstance(lines[index + 1], dict)
+            and str(lines[index + 1].get("type") or "") == "add"
+        ):
+            remove_text = str(line.get("text") or "")
+            add_text = str(lines[index + 1].get("text") or "")
+            rendered.append(_highlight_changed_line(remove_text, add_text, removed=True))
+            rendered.append(_highlight_changed_line(remove_text, add_text, removed=False))
+            index += 2
+            continue
+        rendered.append(_plain_diff_line(str(line.get("text") or ""), line_type))
+        index += 1
+    return rendered
+
+
+def _plain_diff_line(text: str, line_type: str) -> Text:
+    style = "dim"
+    if line_type == "add":
+        style = "green"
+    elif line_type == "remove":
+        style = "red"
+    return Text(text, style=style)
+
+
+def _highlight_changed_line(remove_text: str, add_text: str, *, removed: bool) -> Text:
+    source = remove_text if removed else add_text
+    base_style = "red" if removed else "green"
+    accent_style = "bold white on red" if removed else "bold black on green"
+    matcher = difflib.SequenceMatcher(a=remove_text[1:], b=add_text[1:])
+    text = Text(source[:1], style=base_style)
+    source_body = source[1:]
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if removed:
+            segment = source_body[i1:i2]
+            changed = tag in {"replace", "delete"}
+        else:
+            segment = source_body[j1:j2]
+            changed = tag in {"replace", "insert"}
+        if not segment:
+            continue
+        text.append(segment, style=accent_style if changed else base_style)
+    return text
 
 
 def _format_token_usage(usage: dict[str, Any]) -> str:

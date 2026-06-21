@@ -100,12 +100,9 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
         if _is_denied_path(file_path):
             return {"error": f"Editing protected path is not allowed: {file_path}", "applied": False}
         if require_read and operation != "create" and file_path not in allowed_files:
-            return {
-                "error": f"File must be read in this run before editing: {file_path}",
-                "applied": False,
-                "needs_more_context": True,
-                "suggested_next_action": "read_file",
-            }
+            return _needs_more_context_response(
+                f"File must be read in this run before editing: {file_path}"
+            )
 
         try:
             target = _safe_path(repo, file_path)
@@ -136,34 +133,23 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
             read_content = str(read_contents.get(file_path) or "")
             if operation == "append":
                 if require_read and file_path not in allowed_files:
-                    return {
-                        "error": f"File must be read in this run before editing: {file_path}",
-                        "applied": False,
-                        "needs_more_context": True,
-                        "suggested_next_action": "read_file",
-                    }
+                    return _needs_more_context_response(
+                        f"File must be read in this run before editing: {file_path}"
+                    )
                 planned_contents[file_path] = current + new_text
                 if file_path not in changed_files:
                     changed_files.append(file_path)
                 continue
             if operation == "replace" and old_text == "":
                 if current != "":
-                    return {
-                        "error": (
-                            "Empty old_text is only allowed when replacing the full content "
-                            f"of an empty file: {file_path}"
-                        ),
-                        "applied": False,
-                        "needs_more_context": True,
-                        "suggested_next_action": "read_file",
-                    }
+                    return _needs_more_context_response(
+                        "Empty old_text is only allowed when replacing the full content "
+                        f"of an empty file: {file_path}"
+                    )
                 if require_read and file_path not in allowed_files:
-                    return {
-                        "error": f"File must be read in this run before editing: {file_path}",
-                        "applied": False,
-                        "needs_more_context": True,
-                        "suggested_next_action": "read_file",
-                    }
+                    return _needs_more_context_response(
+                        f"File must be read in this run before editing: {file_path}"
+                    )
                 planned_contents[file_path] = new_text
                 if file_path not in changed_files:
                     changed_files.append(file_path)
@@ -175,16 +161,16 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
                         f"old_text: {old_text}\n"
                         f"read_content: {read_content}"
                     )
-                    return {
-                        "error": (
+                    return _recoverable_conflict(
+                        file_path=file_path,
+                        error=(
                             "Anchor old_text must come from content read during this run: "
                             f"{file_path}"
                         ),
-                        "applied": False,
-                        "needs_more_context": True,
-                        "suggested_next_action": "read_file",
-                        "conflict_context": _conflict_context(read_content or current, old_text),
-                    }
+                        current_content=read_content or current,
+                        old_text=old_text,
+                        recovery_kind="refresh_patch_anchor",
+                    )
                 expected_or_err = _validate_occurrences(raw_change, current, old_text, file_path)
                 if isinstance(expected_or_err, dict):
                     return expected_or_err
@@ -197,16 +183,16 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
                     changed_files.append(file_path)
                 continue
             if require_read and old_text not in read_content:
-                return {
-                    "error": (
+                return _recoverable_conflict(
+                    file_path=file_path,
+                    error=(
                         "old_text must come from content read during this run: "
                         f"{file_path}"
                     ),
-                    "applied": False,
-                    "needs_more_context": True,
-                    "suggested_next_action": "read_file",
-                    "conflict_context": _conflict_context(read_content or current, old_text),
-                }
+                    current_content=read_content or current,
+                    old_text=old_text,
+                    recovery_kind="refresh_patch_anchor",
+                )
             expected_or_err = _validate_occurrences(raw_change, current, old_text, file_path)
             if isinstance(expected_or_err, dict):
                 return expected_or_err
@@ -409,6 +395,35 @@ def _needs_user_input(reason: str, questions: list[str]) -> dict[str, Any]:
     }
 
 
+def _needs_more_context_response(error: str, *, suggested_next_action: str = "read_file") -> dict[str, Any]:
+    return {
+        "error": error,
+        "applied": False,
+        "needs_more_context": True,
+        "suggested_next_action": suggested_next_action,
+    }
+
+
+def _recoverable_conflict(
+    *,
+    file_path: str,
+    error: str,
+    current_content: str,
+    old_text: str,
+    recovery_kind: str,
+) -> dict[str, Any]:
+    response = _needs_more_context_response(error)
+    response.update(
+        {
+            "recoverable_conflict": True,
+            "recovery_kind": recovery_kind,
+            "recovery_file": file_path,
+            "conflict_context": _conflict_context(current_content, old_text),
+        }
+    )
+    return response
+
+
 def _validate_occurrences(raw_change: Dict[str, Any], current: str, old_text: str, file_path: str) -> \
 Union[int, Dict[str, Any]]:
     """ 校验文本匹配次数"""
@@ -422,14 +437,14 @@ Union[int, Dict[str, Any]]:
     occurrences = current.count(old_text)
     if occurrences != expected:
         logger.error(f"文本匹配次数不同")
-        return {
-            "error": (
+        return _recoverable_conflict(
+            file_path=file_path,
+            error=(
                 f"Expected anchor old_text to occur {expected} time(s) in {file_path}, "
                 f"found {occurrences}."
             ),
-            "applied": False,
-            "needs_more_context": True,
-            "suggested_next_action": "read_file",
-            "conflict_context": _conflict_context(current, old_text),
-        }
+            current_content=current,
+            old_text=old_text,
+            recovery_kind="reread_target",
+        )
     return expected
