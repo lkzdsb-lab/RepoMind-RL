@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 from model.agent.graph import AgentState
-from completion_state import _completion_signal_present
 
 
 ACTIVE_STATUSES = {"pending", "in_progress", "blocked"}
@@ -30,7 +29,13 @@ def normalize_execution_queue(queue: list[dict[str, Any]] | None) -> list[dict[s
     return items
 
 
+def _completion_signal_present(state: AgentState) -> bool:
+    judgement = state.get("completion_judgement") or {}
+    return str(judgement.get("decision") or "").strip().lower() == "complete"
+
+
 def current_execution_item(state: AgentState) -> dict[str, Any] | None:
+    """ 从执行队列拿出一个 action 来执行"""
     for item in normalize_execution_queue(state.get("execution_queue", [])):
         if str(item.get("status") or "") in ACTIVE_STATUSES:
             return item
@@ -38,7 +43,7 @@ def current_execution_item(state: AgentState) -> dict[str, Any] | None:
 
 
 def reconcile_execution_queue(state: AgentState) -> list[dict[str, Any]]:
-    """ 处理执行队列的状态"""
+    """ 修正执行队列的状态"""
     queue = normalize_execution_queue(state.get("execution_queue", []))
     if not queue:
         return queue
@@ -46,6 +51,8 @@ def reconcile_execution_queue(state: AgentState) -> list[dict[str, Any]]:
     verification_stale = bool(state.get("verification_stale", False))
     pending_resolution = state.get("pending_resolution") or {}
     resolution_kind = str(pending_resolution.get("kind") or "").strip().lower()
+    # recovery 说明 patch 现在不能做，队列里的 patch 任务被标成 blocked
+    # deferred 说明 patch 任务还在处理中，但需要先补条件，所以保持 in_progress
     has_recovery = resolution_kind == "recovery"
     has_deferred = resolution_kind == "deferred"
 

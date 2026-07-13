@@ -29,6 +29,7 @@ from agent_runtime.codebase_context.retrieval import (
 )
 from agent_runtime.completion_state import derive_phase, evaluate_completion_transition
 from agent_runtime.context import ContextCompressionManager
+from agent_runtime.context.attention import build_attention_focus
 from agent_runtime.context.events import latest_tool_event, should_llm_observe_event
 from agent_runtime.logging_config import configure_from_agent_config
 from agent_runtime.llm.llm_policy import LLMActionPolicy
@@ -84,6 +85,7 @@ from agent_runtime.user_updates import (
     set_change_event_sink,
     set_user_update_sink,
 )
+from agent_runtime.verification import infer_lightweight_verification_command
 from agent_runtime.execution_queue import current_execution_item as queue_current_execution_item
 from ext.focus_files import current_execution_item, execution_target_files
 from model.agent.graph import AgentState, AgentRunResult
@@ -251,6 +253,7 @@ class DebugAgent:
             "pending_resolution": state.get("pending_resolution", {}),
             "phase": state.get("phase", ""),
             "runtime_decision": state.get("runtime_decision", {}),
+            "attention_focus": state.get("attention_focus", {}),
             "user_updates": state.get("user_updates", []),
             "last_user_update": state.get("last_user_update"),
             "llm_calls": state.get("llm_calls", []),
@@ -318,11 +321,25 @@ class DebugAgent:
         run_logger = logger.bind(task_id=state.get("task_id"), repo_path=self.config.repo_path)
         while state.get("loop_count", 0) < state.get("max_loops", self.config.max_loops):
             state = self._sync_runtime_state(state)
+            state = self._update_attention_focus(state)
             state = self._prepare_context(state)
             state = self._sync_runtime_state(state)
+            state = self._update_attention_focus(state)
             runtime_decision = state.get("runtime_decision") or {}
             if bool(runtime_decision.get("is_complete")):
                 action = Action("finish", thought="Runtime completion evaluator marked the run complete.")
+            elif _should_force_completion_judgement(state, runtime_decision):
+                action = Action(
+                    "finish",
+                    args={
+                        "forced_completion_judgement": True,
+                        "runtime_blockers": list(runtime_decision.get("blockers", []) or []),
+                    },
+                    thought=(
+                        "Runtime is near max_loops without hard blockers; "
+                        "force formal completion judgement."
+                    ),
+                )
             else:
                 action = self.policy.next_action(state)
             limit_events = self.rl_action_space.consume_last_limit_events()
@@ -391,6 +408,15 @@ class DebugAgent:
             "execution_queue": decision.get("execution_queue", state.get("execution_queue", [])),
             "phase": phase,
             "runtime_decision": decision,
+        }
+
+    def _update_attention_focus(self, state: AgentState) -> AgentState:
+        attention_focus = build_attention_focus(state)
+        if attention_focus == state.get("attention_focus"):
+            return state
+        return {
+            **state,
+            "attention_focus": attention_focus,
         }
 
     def _finish_run(self, state: AgentState, started_at: float) -> AgentRunResult:
@@ -474,6 +500,7 @@ class DebugAgent:
             archive_context="",
             context_sections={},
             memory_candidates=[],
+            attention_focus={},
             short_term_memories=[],
             promoted_memories=[],
             consolidated_skills=[],
@@ -540,7 +567,19 @@ class DebugAgent:
             task_type = "BUG_FIX"
         verification_required = bool(analysis.get("verification_required", True))
         verification_reason = str(analysis.get("verification_reason") or "")
+        verification_required, verification_reason, verify_command = _apply_verification_default(
+            state,
+            task_type=task_type,
+            verification_required=verification_required,
+            verification_reason=verification_reason,
+        )
         task_category = str(analysis.get("task_category") or state.get("task_category") or "")
+        analysis = {
+            **analysis,
+            "task_type": task_type,
+            "verification_required": verification_required,
+            "verification_reason": verification_reason,
+        }
         observations = state.get("observations", []) + [
             {"type": "task_analysis", "content": analysis}
         ]
@@ -551,6 +590,7 @@ class DebugAgent:
             "task_type": task_type,
             "verification_required": verification_required,
             "verification_reason": verification_reason,
+            "verify_command": verify_command,
             "task_category": task_category,
             "task_analysis": analysis,
             "observations": observations,
@@ -1498,8 +1538,17 @@ class DebugAgent:
             }
             return state, False, False, output
         if bool(runtime_decision.get("is_complete")):
+            judgement = {
+                "decision": "complete",
+                "reason": "Runtime completion evaluator found no blockers and a meaningful task result.",
+                "questions": [],
+                "suggested_next_action": "",
+                "confidence": 1.0,
+                "source": "runtime_transition",
+            }
+            state = self._record_completion_judgement(state, judgement)
             state = self._finalize(state)
-            return state, True, True, {"completion_judgement": {"decision": "complete", "source": "runtime_transition"}}
+            return state, True, True, {"completion_judgement": judgement}
         judgement = self.completion_judge.judge(state)
         output = {"completion_judgement": judgement}
         state = self._record_completion_judgement(state, judgement)
@@ -1518,6 +1567,33 @@ class DebugAgent:
                 return state, False, False, output
             return state, True, False, output
         if decision == "continue":
+            next_action_input = state.get("next_action_input")
+            forced_completion_judgement = (
+                isinstance(next_action_input, dict)
+                and bool(next_action_input.get("forced_completion_judgement"))
+            )
+            if forced_completion_judgement:
+                blockers = []
+                if isinstance(next_action_input, dict):
+                    blockers = [
+                        str(item)
+                        for item in next_action_input.get("runtime_blockers", []) or []
+                        if str(item)
+                    ]
+                state = {
+                    **state,
+                    "error": (
+                        "Forced completion judgement returned continue near max_loops. "
+                        f"Runtime blockers: {blockers or ['none']}."
+                    ),
+                    "runtime_decision": {
+                        **dict(state.get("runtime_decision") or {}),
+                        "forced_completion_judgement_failed": True,
+                        "forced_completion_judgement_blockers": blockers,
+                    },
+                }
+                state = self._finalize(state)
+                return state, True, True, output
             attempts = int(state.get("completion_judge_continue_count", 0)) + 1
             state = {
                 **state,
@@ -1966,6 +2042,51 @@ def _verification_required(state: AgentState) -> bool:
     return bool(state.get("verification_required", True))
 
 
+def _apply_verification_default(
+    state: AgentState,
+    *,
+    task_type: str,
+    verification_required: bool,
+    verification_reason: str,
+) -> tuple[bool, str, str]:
+    verify_command = str(state.get("verify_command") or "").strip()
+    if verification_required:
+        return verification_required, verification_reason, verify_command
+    if task_type != "BUG_FIX":
+        return verification_required, verification_reason, verify_command
+    repo_path = str(state.get("repo_path") or ".")
+    if not _repo_has_test_files(repo_path):
+        return verification_required, verification_reason, verify_command
+    inferred = infer_lightweight_verification_command(
+        repo_path,
+        configured=verify_command,
+        candidate_files=list(state.get("candidate_files", []) or []),
+    )
+    return (
+        True,
+        "Bug-fix task in a repository with tests should run the inferred verification command.",
+        inferred,
+    )
+
+
+def _repo_has_test_files(repo_path: str) -> bool:
+    root = Path(repo_path or ".")
+    if not root.exists():
+        return False
+    ignored_dirs = {".git", ".repomind", ".venv", "venv", "node_modules", "vendor"}
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if any(part in ignored_dirs for part in path.parts):
+            continue
+        name = path.name.lower()
+        if name.endswith("_test.go") or name.startswith("test_") or name.endswith("_test.py"):
+            return True
+        if name in {"package.json", "pom.xml", "build.gradle", "build.gradle.kts"}:
+            return True
+    return False
+
+
 def _requires_post_edit_verification(state: AgentState) -> bool:
     if state.get("error"):
         return False
@@ -1992,6 +2113,36 @@ def _can_finalize_at_loop_limit(state: AgentState) -> bool:
     if _requires_post_edit_verification(state):
         return False
     return _has_meaningful_task_result(state)
+
+
+def _should_force_completion_judgement(
+    state: AgentState,
+    runtime_decision: dict[str, Any],
+) -> bool:
+    """ 接近 max loop 后进行强行裁断"""
+    loop_count = int(state.get("loop_count", 0) or 0)
+    max_loops = int(state.get("max_loops", 0) or 0)
+    if max_loops <= 0 or loop_count < max_loops - 1:
+        return False
+    if bool(runtime_decision.get("is_complete")):
+        return False
+    blockers = [
+        str(item)
+        for item in runtime_decision.get("blockers", []) or []
+        if str(item)
+    ]
+    return not _has_hard_completion_blocker(blockers)
+
+
+def _has_hard_completion_blocker(blockers: list[str]) -> bool:
+    hard_blockers = {
+        "error",
+        "awaiting_user_input",
+        "plan_mode_active",
+        "pending_resolution:recovery",
+        "verification_stale",
+    }
+    return any(blocker in hard_blockers for blocker in blockers)
 
 
 def _is_git_repo(repo_path: str) -> bool:

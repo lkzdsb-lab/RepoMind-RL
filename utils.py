@@ -85,6 +85,28 @@ def _clean_string_list(value: Any, limit: int, max_chars: int | None) -> list[st
             break
     return cleaned
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+def _append_unique(target: list[str], values: list[str]) -> None:
+    for value in values:
+        item = str(value or "").strip()
+        if item and item not in target:
+            target.append(item)
+
+def _latest_dict(value: Any) -> dict[str, Any]:
+    if not isinstance(value, list) or not value:
+        return {}
+    latest = value[-1]
+    return latest if isinstance(latest, dict) else {}
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
 def _as_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value

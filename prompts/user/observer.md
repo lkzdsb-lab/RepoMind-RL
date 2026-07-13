@@ -1,5 +1,6 @@
 Return JSON with keys: latest_tool, status, summary, new_findings, hypotheses, invalidated_hypotheses, facts, risks, next_actions, memory_candidates, missing_context, next_search_terms, confidence, user_update.
 status must be one of ok, error, inconclusive, complete.
+status=complete is only an observation for later review; final task termination is decided by completion_judgement.
 Use short list fields. If uncertain, use empty lists instead of guessing.
 facts should capture stable information useful for future actions.
 memory_candidates should expose potential memory entries only; do not assume they will be written.

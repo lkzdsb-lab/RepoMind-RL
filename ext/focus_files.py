@@ -23,6 +23,7 @@ def execution_target_files(state: AgentState) -> list[str]:
 
 
 def edited_files_needing_reread(state: AgentState) -> list[str]:
+    """ 重新读一下 edit 后没有读过的文件"""
     edited_files = [
         str(path).strip()
         for path in state.get("edited_files", []) or []
@@ -32,6 +33,7 @@ def edited_files_needing_reread(state: AgentState) -> list[str]:
         return []
     calls = state.get("tool_calls", []) or []
     latest_edit_index = -1
+    # 找最后一次成功的 apply_code_patch
     for index, call in enumerate(calls):
         if not isinstance(call, dict) or call.get("name") != "apply_code_patch":
             continue
@@ -41,6 +43,8 @@ def edited_files_needing_reread(state: AgentState) -> list[str]:
     if latest_edit_index < 0:
         return []
     read_after_edit: set[str] = set()
+    # 找这次 patch 之后读过哪些文件
+    # 它只看 latest_edit_index 之后的 read_file 调用，把成功读过的文件放到 read_after_edit
     for call in calls[latest_edit_index + 1 :]:
         if not isinstance(call, dict) or call.get("name") != "read_file":
             continue
@@ -61,6 +65,9 @@ def current_focus_files(
     *,
     limit: int = 4,
 ) -> list[str]:
+    attention_files = _attention_focus_files(state)
+    if attention_files:
+        return attention_files[:limit]
     files: list[str] = []
     _append_unique(files, execution_target_files(state))
     _append_unique(files, edited_files_needing_reread(state))
@@ -86,6 +93,17 @@ def current_focus_files(
             ],
         )
     return files[:limit]
+
+
+def _attention_focus_files(state: AgentState) -> list[str]:
+    focus = state.get("attention_focus")
+    if not isinstance(focus, dict):
+        return []
+    return [
+        str(path).strip()
+        for path in focus.get("focus_files", []) or []
+        if str(path).strip()
+    ]
 
 
 def _append_unique(target: list[str], values: list[str]) -> None:

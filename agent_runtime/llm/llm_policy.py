@@ -468,6 +468,10 @@ def _action_prompt(
             json.dumps(_selected_code_context_summary(state), ensure_ascii=False, default=str),
             2200,
         ),
+        attention_focus=_truncate_text(
+            json.dumps(state.get("attention_focus", {}), ensure_ascii=False, default=str),
+            1800,
+        ),
         candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),
         read_files=json.dumps(
             read_file_summaries(state, limit=6, excerpt_chars=900),
@@ -617,7 +621,46 @@ def _action_constraints(
         "candidate_action_names": [spec.name for spec in legal_specs],
         "guard_allow_list": list(getattr(guard, "allow_list", []) or [])[:6],
         "fallback_action": fallback_action.name,
+        "plan_readiness": _plan_readiness(state),
     }
+
+
+def _plan_readiness(state: AgentState) -> dict[str, Any]:
+    required_reads = full_read_requirements(state)
+    missing: list[str] = []
+    if required_reads:
+        missing.append("full_read_requirements")
+    if bool(state.get("verification_required", True)) and not _verification_command_available(state):
+        missing.append("verification_command")
+    if bool(state.get("editing_enabled", False)) and not current_focus_files(state, limit=1):
+        missing.append("patch_targets")
+    return {
+        "can_exit": bool(state.get("debug_technical_plan")) and not missing,
+        "missing": missing,
+        "full_read_required_files": [
+            str(item.get("file_path") or "").strip()
+            for item in required_reads
+            if isinstance(item, dict) and str(item.get("file_path") or "").strip()
+        ],
+        "has_verification_command": _verification_command_available(state),
+        "has_patch_targets": bool(current_focus_files(state, limit=1)),
+    }
+
+
+def _verification_command_available(state: AgentState) -> bool:
+    if str(state.get("verify_command") or "").strip():
+        return True
+    for item in state.get("plan_verification_commands", []) or []:
+        if str(item or "").strip():
+            return True
+    for item in state.get("verification_commands", []) or []:
+        if isinstance(item, dict):
+            command = str(item.get("command") or "").strip()
+        else:
+            command = str(item or "").strip()
+        if command:
+            return True
+    return False
 
 
 def _action_phase(state: AgentState) -> str:

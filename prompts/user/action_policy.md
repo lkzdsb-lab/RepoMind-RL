@@ -14,6 +14,7 @@ plan_mode_evaluation={{ plan_mode_evaluation }}
 selected_skills={{ selected_skills }}
 skill_context={{ skill_context }}
 selected_code_context_summary={{ selected_code_context_summary }}
+attention_focus={{ attention_focus }}
 candidate_files={{ candidate_files }}
 read_files={{ read_files }}
 full_read_requirements={{ full_read_requirements }}
@@ -34,6 +35,7 @@ Each legal action includes a short description, required_fields when applicable,
 Return an ordered candidate_actions list so the q-table guard can truncate your choices after selection.
 Put the single best next action first.
 Use action_constraints as the compact summary of current execution-phase restrictions, focus files, full-read requirements, and fallback routing.
+Use attention_focus as an advisory scope lens for the next decision. It should narrow attention, but it does not override legal_actions, pending_resolution, full_read_requirements, or verification rules.
 If a selected tool has required_fields, you must fill them. Do not leave required fields blank.
 Include user_update as a short user-facing progress message when useful, or an empty string. Do not reveal chain-of-thought.
 
@@ -43,9 +45,13 @@ Selection rules:
 - When plan_mode is true, do not choose any code-changing action. Your only implementation-related job is to refine/evaluate the technical plan, ask the user if uncertainty remains, then choose ExitPlanMode.
 - When plan_mode is true and debug_technical_plan is already present, do not choose EnterPlanMode again.
 - Choose ExitPlanMode only when debug_technical_plan is concrete, risks are evaluated, verification commands are identified, and remaining_uncertainties is empty.
+- When action_constraints.plan_readiness.can_exit is false, do not choose ExitPlanMode. Resolve the listed missing items first.
+- If action_constraints.plan_readiness.full_read_required_files is non-empty, choose read_file for one of those files before any search or ExitPlanMode.
 - If candidate_files is empty and code_context is not available yet, prefer search_code_context.
 - Use search_text for focused regex/fixed-string grep when structured context is missing, stale, or too broad.
+- For search_text, put file names or path filters in globs, not in pattern. Example: pattern="func Test", globs=["*_test.go"].
 - Use selected_code_context_summary as the primary structured evidence about where the relevant logic lives.
+- Prefer files, symbols, and evidence listed in attention_focus when choosing among otherwise valid next actions.
 - Treat full_read_requirements as a hard signal: when a file appears there, summaries/excerpts are not enough yet, so read the complete file before concluding it is already correct or before patching it.
 - If candidate_files contains unread files, prefer read_file only when you need exact source text for the file you intend to patch or when selected_code_context_summary is still insufficient.
 - If a candidate file is already present in read_files with full_read=true, use that evidence instead of requesting it again. Treat read_files as durable memory for this run.

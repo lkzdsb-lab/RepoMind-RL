@@ -2,12 +2,21 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent_runtime.execution_queue import current_execution_item, reconcile_execution_queue
+from agent_runtime.execution_queue import (
+    _completion_signal_present,
+    current_execution_item,
+    reconcile_execution_queue,
+)
 from model.agent.graph import AgentState
 
 
-def derive_phase(state: AgentState) -> str:
-    queue = reconcile_execution_queue(state)
+def derive_phase(
+    state: AgentState,
+    execution_queue: list[dict[str, Any]] | None = None,
+) -> str:
+    """ 推断下一个阶段"""
+    queue = execution_queue if execution_queue is not None else reconcile_execution_queue(state)
+    reconciled_state = {**state, "execution_queue": queue}
     status = str(state.get("status") or "").strip().lower()
     if status in {"finished", "failed"}:
         return "complete"
@@ -22,7 +31,7 @@ def derive_phase(state: AgentState) -> str:
         return "resolve_action"
     if bool(state.get("verification_stale", False)):
         return "verify"
-    execution = current_execution_item({**state, "execution_queue": queue})
+    execution = current_execution_item(reconciled_state)
     if isinstance(execution, dict):
         kind = str(execution.get("kind") or "").strip().lower()
         if kind == "verify":
@@ -31,7 +40,7 @@ def derive_phase(state: AgentState) -> str:
             return "execute_patch"
     if not state.get("code_context") and not state.get("selected_code_context"):
         return "collect_context"
-    if bool(state.get("plan_mode_approved", False)) and not current_execution_item({**state, "execution_queue": queue}):
+    if bool(state.get("plan_mode_approved", False)) and not current_execution_item(reconciled_state):
         return "complete"
     return "collect_context"
 
@@ -39,7 +48,9 @@ def derive_phase(state: AgentState) -> str:
 def evaluate_completion_transition(state: AgentState) -> dict[str, Any]:
     """ 评估下一个 action"""
     queue = reconcile_execution_queue(state)
-    phase = derive_phase({**state, "execution_queue": queue})
+    reconciled_state = {**state, "execution_queue": queue}
+    phase = derive_phase(state, execution_queue=queue)
+    # 阻塞队列
     blockers: list[str] = []
     next_action = ""
     pending_resolution = state.get("pending_resolution") or {}
@@ -62,7 +73,7 @@ def evaluate_completion_transition(state: AgentState) -> dict[str, Any]:
         blockers.append("verification_stale")
         next_action = next_action or "run_shell_command"
 
-    execution = current_execution_item({**state, "execution_queue": queue})
+    execution = current_execution_item(reconciled_state)
     completion_signal = _completion_signal_present(state)
     if isinstance(execution, dict) and str(execution.get("status") or "pending") == "pending":
         kind = str(execution.get("kind") or "").strip().lower()
@@ -85,18 +96,6 @@ def evaluate_completion_transition(state: AgentState) -> dict[str, Any]:
         "completion_signal": completion_signal,
         "execution_queue": queue,
     }
-
-
-def _completion_signal_present(state: AgentState) -> bool:
-    judgement = state.get("completion_judgement") or {}
-    if str(judgement.get("decision") or "").strip().lower() == "complete":
-        return True
-    for item in reversed(state.get("llm_observations", []) or []):
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("status") or "").strip().lower() == "complete":
-            return True
-    return False
 
 
 def _has_meaningful_task_result(state: AgentState) -> bool:

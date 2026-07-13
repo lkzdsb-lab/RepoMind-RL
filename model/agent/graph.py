@@ -108,6 +108,7 @@ class AgentState(TypedDict, total=False):
     archive_context: str
     context_sections: Dict[str, List[str]]
     memory_candidates: List[Dict[str, Any]]
+    attention_focus: Dict[str, Any]
 
     # 记忆持久话相关
     short_term_memories: List[Dict[str, Any]]

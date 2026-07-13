@@ -62,8 +62,8 @@ class ActionSpace:
 
     def legal_specs(self, state: AgentState) -> list[ActionSpec]:
         self._last_limit_events = []
-        runtime_decision = evaluate_completion_transition(state)
-        phase = str(runtime_decision.get("phase") or derive_phase(state))
+        runtime_decision = _runtime_decision_or_evaluate(state)
+        phase = str(runtime_decision.get("phase") or state.get("phase") or derive_phase(state))
         if state.get("status") in {"finished", "failed"} or phase == "complete":
             return [ActionSpec("finish", "Finish terminal task.")]
 
@@ -85,6 +85,7 @@ class ActionSpace:
         }
         verification_stale = bool(state.get("verification_stale", False))
 
+        # 如果当前待解决的类型为 recovery ，则先处理 recovery 的内容
         if str(pending_resolution.get("kind") or "") == "recovery" and str(
             pending_resolution.get("target_file") or ""
         ).strip():
@@ -108,6 +109,33 @@ class ActionSpace:
                 return self._limit_specs(state, self._finish_safe_specs(recovery_specs, allow_finish=False))
 
         if plan_mode:
+            if full_read_needed:
+                read_specs: list[ActionSpec] = []
+                required_files = [
+                    str(item.get("file_path") or "").strip()
+                    for item in full_read_needed
+                    if str(item.get("file_path") or "").strip()
+                ]
+                target = required_files[0] if required_files else "the required file"
+                if "read_file" in available:
+                    read_specs.append(
+                        ActionSpec(
+                            "read_file",
+                            f"Fully read {target} before continuing the technical plan.",
+                        )
+                    )
+                if "request_user_input" in available:
+                    read_specs.append(
+                        ActionSpec(
+                            "request_user_input",
+                            "Pause only if the required file cannot be read or the target is ambiguous.",
+                        )
+                    )
+                if read_specs:
+                    return self._limit_specs(
+                        state,
+                        self._finish_safe_specs(read_specs, allow_finish=False),
+                    )
             # EnterPlanMode is the gate into planning. Once a plan exists, keep the
             # model moving toward ExitPlanMode or a concrete user question instead
             # of letting it spend loops rewriting the same plan.
@@ -175,7 +203,7 @@ class ActionSpace:
             return self._limit_specs(state, self._finish_safe_specs(specs, allow_finish=False))
 
         # 如果校验过期并且当权执行队列没有 edit 操作时才会
-        if verification_stale and not (current_execution and current_execution.get("kind") == "patch"):
+        if verification_stale and not (current_execution and current_execution.get("kind") in {"patch", "verify"}):
             stale_specs: list[ActionSpec] = []
             if "read_file" in available and edited_files_needing_reread(state):
                 stale_specs.append(
@@ -491,7 +519,7 @@ class ActionSpace:
         return files
 
     def _can_finish(self, state: AgentState) -> bool:
-        decision = evaluate_completion_transition(state)
+        decision = _runtime_decision_or_evaluate(state)
         return bool(decision.get("is_complete")) or int(state.get("loop_count", 0)) >= int(
             state.get("max_loops", 8)
         ) - 1
@@ -675,3 +703,11 @@ class ActionSpace:
         if allow_finish and state is not None and (self._can_finish(state) or not non_question_specs):
             specs.append(ActionSpec("finish", "Finish the current run."))
         return specs
+
+
+def _runtime_decision_or_evaluate(state: AgentState) -> dict[str, Any]:
+    """ 提取 state 中的 runtime_decision"""
+    decision = state.get("runtime_decision")
+    if isinstance(decision, dict) and decision:
+        return decision
+    return evaluate_completion_transition(state)

@@ -5,6 +5,8 @@ main.py
 pyproject.toml
 utils.py
 agent_runtime/__init__.py
+agent_runtime/completion_state.py
+agent_runtime/execution_queue.py
 agent_runtime/executor.py
 agent_runtime/logging_config.py
 agent_runtime/planning.py
