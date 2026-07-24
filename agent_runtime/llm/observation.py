@@ -7,9 +7,10 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from agent_runtime.context.events import latest_tool_event
-from agent_runtime.execution_queue import current_execution_item as queue_current_execution_item
+from agent_runtime.lifecycle.execution_queue import current_execution_item as queue_current_execution_item
 from agent_runtime.llm.llm_nodes import LLMJsonNode
 from config import LLMConfig
+from ext.tool_summaries import read_file_summaries
 from model.agent.graph import AgentState
 from model.llm import ObservationResponse
 from prompts.templates import load_prompt, render_prompt
@@ -163,6 +164,11 @@ def _observation_prompt(state: AgentState, context: dict[str, Any]) -> str:
         observation_delta=json.dumps(delta, ensure_ascii=False, default=str),
         current_execution=json.dumps(_current_execution_item(state), ensure_ascii=False, default=str),
         recent_observations=json.dumps(_recent_relevant_observations(state), ensure_ascii=False, default=str),
+        read_file_context=json.dumps(
+            read_file_summaries(state, limit=6, excerpt_chars=2500),
+            ensure_ascii=False,
+            default=str,
+        ),
     )
 
 
@@ -193,7 +199,7 @@ def _normalize_observation(
         "missing_context": _clean_string_list(data.get("missing_context"), 6, OBSERVATION_MAX_CHAR),
         "next_search_terms": _clean_string_list(data.get("next_search_terms"), 10, OBSERVATION_MAX_CHAR),
         "confidence": _clamp_float(data.get("confidence"), 0.5, "invalid observer confidence from LLM"),
-        "user_update": str(data.get("user_update") or "").strip()[:240],
+        "user_update": str(data.get("user_update") or "").strip()[:1000],
     }
     score = _observation_delta_score(state, observation)
     # 可配置的 observe 写入阈值

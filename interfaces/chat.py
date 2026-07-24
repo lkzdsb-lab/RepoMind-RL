@@ -146,7 +146,6 @@ class ChatShell:
             "status",
             "current_step",
             "repo_path",
-            "verify_command",
             "loop_count",
             "max_loops",
         ):

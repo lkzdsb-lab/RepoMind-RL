@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent_runtime.execution_queue import (
+from agent_runtime.lifecycle.execution_queue import (
     _completion_signal_present,
     current_execution_item,
     reconcile_execution_queue,
 )
+from agent_runtime.lifecycle.goal_contract import goal_contract_satisfied
+from agent_runtime.lifecycle.obligations import derive_next_obligation, required_action_for_obligation
 from model.agent.graph import AgentState
 
 
@@ -29,8 +31,6 @@ def derive_phase(
         return "recover"
     if str(pending_resolution.get("kind") or "") == "deferred":
         return "resolve_action"
-    if bool(state.get("verification_stale", False)):
-        return "verify"
     execution = current_execution_item(reconciled_state)
     if isinstance(execution, dict):
         kind = str(execution.get("kind") or "").strip().lower()
@@ -38,6 +38,8 @@ def derive_phase(
             return "verify"
         if kind == "patch":
             return "execute_patch"
+    if bool(state.get("verification_stale", False)):
+        return "verify"
     if not state.get("code_context") and not state.get("selected_code_context"):
         return "collect_context"
     if bool(state.get("plan_mode_approved", False)) and not current_execution_item(reconciled_state):
@@ -46,10 +48,17 @@ def derive_phase(
 
 
 def evaluate_completion_transition(state: AgentState) -> dict[str, Any]:
-    """ 评估下一个 action"""
-    queue = reconcile_execution_queue(state)
-    reconciled_state = {**state, "execution_queue": queue}
-    phase = derive_phase(state, execution_queue=queue)
+    """ 评估下一个 action，判断是否需要终止"""
+    goal_contract = state.get("goal_contract") if isinstance(state.get("goal_contract"), dict) else {}
+    progress_ledger = state.get("progress_ledger") if isinstance(state.get("progress_ledger"), dict) else {}
+    obligation = derive_next_obligation(goal_contract, progress_ledger)
+    queue = reconcile_execution_queue(state, obligation=obligation)
+    reconciled_state = {
+        **state,
+        "execution_queue": queue,
+        "next_obligation": obligation,
+    }
+    phase = derive_phase(reconciled_state, execution_queue=queue)
     # 阻塞队列
     blockers: list[str] = []
     next_action = ""
@@ -73,18 +82,16 @@ def evaluate_completion_transition(state: AgentState) -> dict[str, Any]:
         blockers.append("verification_stale")
         next_action = next_action or "run_shell_command"
 
-    execution = current_execution_item(reconciled_state)
     completion_signal = _completion_signal_present(state)
-    if isinstance(execution, dict) and str(execution.get("status") or "pending") == "pending":
-        kind = str(execution.get("kind") or "").strip().lower()
-        if not completion_signal or kind == "verify":
-            blockers.append(f"execution_queue_pending:{kind or 'unknown'}")
-            if not next_action:
-                next_action = "run_shell_command" if kind == "verify" else "apply_code_patch"
-
-    is_complete = not blockers and (
-        _has_meaningful_task_result(state) or completion_signal or phase == "complete"
-    )
+    if goal_contract and str(obligation.get("kind") or "") != "complete":
+        blockers.append(f"obligation:{obligation.get('kind')}")
+        next_action = next_action or required_action_for_obligation(obligation)
+        if phase == "complete":
+            phase = _phase_for_obligation(obligation)
+    if goal_contract:
+        is_complete = not blockers and goal_contract_satisfied(goal_contract, progress_ledger)
+    else:
+        is_complete = not blockers and (completion_signal or phase == "complete")
     if is_complete:
         phase = "complete"
         next_action = "finish"
@@ -95,14 +102,16 @@ def evaluate_completion_transition(state: AgentState) -> dict[str, Any]:
         "required_next_action": next_action,
         "completion_signal": completion_signal,
         "execution_queue": queue,
+        "next_obligation": obligation,
     }
 
 
-def _has_meaningful_task_result(state: AgentState) -> bool:
-    return bool(
-        state.get("edited_files")
-        or state.get("patch_summary") is not None
-        or state.get("test_results")
-        or state.get("verification_commands")
-        or state.get("change_events")
-    )
+def _phase_for_obligation(obligation: dict[str, Any]) -> str:
+    kind = str(obligation.get("kind") or "")
+    if kind == "diagnose":
+        return "collect_context"
+    if kind == "implement":
+        return "execute_patch"
+    if kind == "verify":
+        return "verify"
+    return "collect_context"

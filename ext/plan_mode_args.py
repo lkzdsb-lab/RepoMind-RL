@@ -15,7 +15,7 @@ def build_enter_plan_mode_args(
     read_files: list[str],
     default_verification_command: str,
 ) -> dict[str, Any]:
-    technical_plan = str(state.get("debug_technical_plan") or "").strip()
+    technical_plan = str(state.get("technical_plan") or "").strip()
     if not technical_plan:
         technical_plan = _synthesized_technical_plan(state, query=query, focus_files=focus_files)
     return {
@@ -41,7 +41,7 @@ def build_exit_plan_mode_args(
     default_verification_command: str,
 ) -> dict[str, Any]:
     uncertainties = _plan_uncertainties(state, focus_files=focus_files, read_files=read_files)
-    approved = bool(state.get("debug_technical_plan")) and not uncertainties
+    approved = bool(state.get("technical_plan")) and not uncertainties
     next_step = (
         "Apply the planned code change and then run the selected verification command."
         if approved

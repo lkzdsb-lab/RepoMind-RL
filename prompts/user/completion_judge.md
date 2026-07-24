@@ -1,6 +1,4 @@
-Return JSON with keys: decision, reason, questions, suggested_next_action, confidence, user_update.
-confidence must be a number from 0.0 to 1.0.
-user_update should be a short user-facing progress message when useful, or an empty string. Do not reveal chain-of-thought.
+# Task And Runtime State
 
 title={{ title }}
 description={{ description }}
@@ -14,9 +12,12 @@ verification_stale={{ verification_stale }}
 verification_commands={{ verification_commands }}
 plan_mode={{ plan_mode }}
 plan_mode_approved={{ plan_mode_approved }}
-debug_technical_plan={{ debug_technical_plan }}
+technical_plan={{ technical_plan }}
 plan_mode_evaluation={{ plan_mode_evaluation }}
 task_analysis={{ task_analysis }}
+goal_contract={{ goal_contract }}
+progress_ledger={{ progress_ledger }}
+next_obligation={{ next_obligation }}
 plan={{ plan }}
 candidate_files={{ candidate_files }}
 read_files={{ read_files }}
@@ -31,7 +32,8 @@ selected_skills={{ selected_skills }}
 skill_context={{ skill_context }}
 fallback_judgement={{ fallback_judgement }}
 
-Rules:
+# Decision Rules
+- Treat goal_contract, progress_ledger, and next_obligation as authoritative runtime evidence. If next_obligation.kind is not complete, do not claim that required work is complete.
 - If plan_mode is true, choose continue and set suggested_next_action to ExitPlanMode unless unresolved uncertainty requires needs_user_input.
 - If code has been changed and verification_stale is true, choose continue and set suggested_next_action to run_shell_command.
 - If read_files and observations answer the task, choose complete.
@@ -42,3 +44,9 @@ Rules:
 - If available search/read tools could not identify the target file after trying focused searches, choose needs_user_input instead of complete.
 - If the missing evidence is still available through search_code_context, search_text, read_file, run_shell_command, run_tests, or git_diff, choose continue and set suggested_next_action to the most useful tool name.
 - If verification_required is false, do not choose continue just to run tests.
+
+# Output Schema
+
+Return JSON with keys: decision, reason, questions, suggested_next_action, confidence, user_update.
+confidence must be a number from 0.0 to 1.0.
+user_update should be a short user-facing progress message when useful, or an empty string. Do not reveal chain-of-thought.

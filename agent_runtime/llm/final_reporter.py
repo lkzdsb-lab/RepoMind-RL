@@ -118,7 +118,7 @@ def _final_report_prompt(state: AgentState, context: dict[str, Any]) -> str:
         ),
         plan_mode=json.dumps(bool(state.get("plan_mode", False))),
         plan_mode_approved=json.dumps(bool(state.get("plan_mode_approved", False))),
-        debug_technical_plan=state.get("debug_technical_plan", ""),
+        technical_plan=state.get("technical_plan", ""),
         plan_mode_evaluation=state.get("plan_mode_evaluation", ""),
         plan=json.dumps(state.get("plan", []), ensure_ascii=False),
         candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),
@@ -207,7 +207,7 @@ def _test_result_summaries(state: AgentState) -> list[str]:
     for item in state.get("test_results", [])[-5:]:
         if not isinstance(item, dict):
             continue
-        command = str(item.get("command") or state.get("verify_command") or "").strip()
+        command = str(item.get("command") or "").strip()
         if item.get("skipped"):
             results.append(f"{command or 'verify command'} skipped: {item.get('reason', '')}")
             continue

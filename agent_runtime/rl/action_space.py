@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from loguru import logger
 from typing import Any, Iterable
 
-from agent_runtime.completion_state import derive_phase, evaluate_completion_transition
+from agent_runtime.lifecycle.completion import derive_phase, evaluate_completion_transition
+from agent_runtime.lifecycle.execution_queue import current_execution_item
 from ext.focus_files import (
-    current_execution_item as state_current_execution_item,
     edited_files_needing_reread,
     execution_target_files as state_execution_target_files,
 )
@@ -15,16 +14,10 @@ from ext.file_requirements import (
     choose_read_file_target,
     full_read_requirements,
     is_full_read,
-    recommended_read_file_args,
 )
-from ext.plan_mode_args import (
-    build_enter_plan_mode_args,
-    build_exit_plan_mode_args,
-    collect_plan_focus_files,
-)
-from agent_runtime.verification import infer_lightweight_verification_command
 from agent_runtime.search_query import SearchQueryPlanner
-from model.agent.actions import Action, ActionSpec
+from agent_runtime.verification.capabilities import recommended_verification_command
+from model.agent.actions import ActionSpec
 from model.agent.graph import AgentState
 
 
@@ -84,6 +77,24 @@ class ActionSpace:
             "FEATURE_IMPL",
         }
         verification_stale = bool(state.get("verification_stale", False))
+        obligation = state.get("next_obligation") if isinstance(state.get("next_obligation"), dict) else {}
+        obligation_kind = str(obligation.get("kind") or "").strip()
+
+        if obligation_kind and obligation_kind != "complete":
+            obligation_specs = self._obligation_specs(
+                state,
+                obligation=obligation,
+                current_execution=current_execution,
+                available=available,
+                full_read_needed=full_read_needed,
+                unread=unread,
+                plan_approved=plan_approved,
+            )
+            if obligation_specs:
+                return self._limit_specs(
+                    state,
+                    self._finish_safe_specs(obligation_specs, allow_finish=False),
+                )
 
         # 如果当前待解决的类型为 recovery ，则先处理 recovery 的内容
         if str(pending_resolution.get("kind") or "") == "recovery" and str(
@@ -174,7 +185,7 @@ class ActionSpace:
             if (
                 "EnterPlanMode" in available
                 and bool(state.get("llm_action_inputs_enabled", False))
-                and not bool(state.get("debug_technical_plan"))
+                and not bool(state.get("technical_plan"))
             ):
                 specs.append(
                     ActionSpec(
@@ -185,7 +196,7 @@ class ActionSpace:
             if (
                 "ExitPlanMode" in available
                 and bool(state.get("llm_action_inputs_enabled", False))
-                and bool(state.get("debug_technical_plan"))
+                and bool(state.get("technical_plan"))
             ):
                 specs.append(
                     ActionSpec(
@@ -377,127 +388,10 @@ class ActionSpace:
 
         return self._limit_specs(state, self._finish_safe_specs(specs, allow_finish=True, state=state))
 
-    def legal_actions(self, state: AgentState) -> list[Action]:
-        return [self.to_action(spec, state) for spec in self.legal_specs(state)]
-
     def consume_last_limit_events(self) -> list[dict[str, Any]]:
         events = list(self._last_limit_events)
         self._last_limit_events = []
         return events
-
-    # 将 action 语义 convert to llm 的思考
-    def to_action(self, spec: ActionSpec, state: AgentState) -> Action:
-        """ 根据不同的 action spec 返回不同的 action"""
-        if spec.name == "search_code_context":
-            query_plan = self.query_planner.plan(state)
-            return Action(
-                "search_code_context",
-                {"query": query_plan.query, "query_plan": query_plan.to_dict()},
-                thought=f"RL 选择结构化代码上下文搜索：`{query_plan.query}`。",
-            )
-        if spec.name == "read_file":
-            current_execution = self._current_execution_item(state)
-            execution_targets = self._execution_target_files(current_execution) if current_execution else []
-            reread = edited_files_needing_reread(state)
-            if execution_targets:
-                reread = [path for path in reread if path in execution_targets]
-            required_full_reads = [
-                str(item.get("file_path") or "").strip()
-                for item in full_read_requirements(
-                    state,
-                    candidate_files=execution_targets or list(state.get("candidate_files", [])),
-                )
-                if str(item.get("file_path") or "").strip()
-            ]
-            unread = [
-                path
-                for path in (execution_targets or list(state.get("candidate_files", [])))
-                if path not in self._read_files(state)
-            ]
-            targets = reread or required_full_reads or unread or list(state.get("edited_files", []) or [])
-            if not targets and execution_targets:
-                targets = execution_targets
-            if not targets:
-                targets = list(state.get("candidate_files", []) or [])
-            file_path = choose_read_file_target(
-                state,
-                default_path=targets[0] if targets else "",
-            )
-            read_args = recommended_read_file_args(state, file_path)
-            return Action(
-                "read_file",
-                {"file_path": file_path, "max_chars": read_args["max_chars"]},
-                thought=f"RL 选择阅读文件 `{file_path}`。",
-            )
-        if spec.name == "run_tests":
-            command = self._default_verification_command(state)
-            return Action(
-                "run_tests",
-                {"command": command},
-                thought=f"RL 选择运行验证命令 `{command}`。",
-            )
-        if spec.name == "search_text":
-            query_plan = self.query_planner.plan(state)
-            return Action(
-                "search_text",
-                {
-                    "pattern": query_plan.query,
-                    "regex": True,
-                    "globs": [],
-                    "context_lines": 0,
-                    "max_results": 50,
-                },
-                thought=f"LLM 可在默认搜索词 `{query_plan.query}` 基础上补充 regex/fixed-string 搜索参数。",
-            )
-        if spec.name == "run_shell_command":
-            current_execution = self._current_execution_item(state)
-            command = self._execution_command(current_execution, state) if current_execution else self._default_verification_command(state)
-            return Action(
-                "run_shell_command",
-                {
-                    "command": command,
-                    "purpose": "verification",
-                    "timeout": 120,
-                    "reason": "Verify the latest code changes before finishing.",
-                    "allow_shell": False,
-                },
-                thought=f"RL 选择运行验证命令 `{command}`。",
-            )
-        if spec.name == "list_files":
-            return Action("list_files", thought="RL 选择读取仓库结构。")
-        if spec.name == "EnterPlanMode":
-            args = self._default_enter_plan_mode_args(state)
-            logger.debug(
-                "EnterPlanMode",
-                f"technical_plan: {args['technical_plan']}",
-            )
-            return Action(
-                "EnterPlanMode",
-                args,
-                thought="LLM 需要进入 Plan Mode 并给出 Debug/重构技术方案。",
-            )
-        if spec.name == "ExitPlanMode":
-            args = self._default_exit_plan_mode_args(state)
-            return Action(
-                "ExitPlanMode",
-                args,
-                thought="LLM 需要评估方案可行性后退出 Plan Mode。",
-            )
-        if spec.name == "apply_code_patch":
-            return Action(
-                "apply_code_patch",
-                thought="LLM 需要提供受限的 exact-replacement 修改内容。",
-            )
-        if spec.name == "request_user_input":
-            return Action(
-                "request_user_input",
-                thought="当前存在不确定信息，向用户询问具体问题。",
-            )
-        if spec.name == "git_diff":
-            return Action("git_diff", thought="RL 选择检查当前 diff。")
-        if spec.name == "write_memory":
-            return Action("write_memory", thought="RL 选择写入 reward-gated memory。")
-        return Action("finish", thought="RL 选择结束当前任务。")
 
     def extract_keyword(self, state: AgentState) -> str:
         return self.query_planner.plan(state).query
@@ -520,9 +414,7 @@ class ActionSpace:
 
     def _can_finish(self, state: AgentState) -> bool:
         decision = _runtime_decision_or_evaluate(state)
-        return bool(decision.get("is_complete")) or int(state.get("loop_count", 0)) >= int(
-            state.get("max_loops", 8)
-        ) - 1
+        return bool(decision.get("is_complete"))
 
     def _has_applied_edit(self, state: AgentState) -> bool:
         return any(
@@ -536,16 +428,87 @@ class ActionSpace:
             state.get("verification_stale", False)
         )
 
-    def _default_verification_command(self, state: AgentState) -> str:
-        return infer_lightweight_verification_command(
-            str(state.get("repo_path") or "."),
-            configured=str(state.get("verify_command") or ""),
-            changed_files=list(state.get("edited_files", []) or []),
-            candidate_files=list(state.get("candidate_files", []) or []),
+    def _obligation_specs(
+        self,
+        state: AgentState,
+        *,
+        obligation: dict[str, Any],
+        current_execution: dict[str, Any] | None,
+        available: set[str],
+        full_read_needed: list[dict[str, Any]],
+        unread: list[str],
+        plan_approved: bool,
+    ) -> list[ActionSpec]:
+        specs: list[ActionSpec] = []
+        capability = str(obligation.get("required_capability") or "")
+        target_files = self._execution_target_files(current_execution)
+        target_unread = [path for path in target_files if path not in self._read_files(state)]
+        target_full_read_needed = full_read_requirements(
+            state,
+            candidate_files=target_files,
+        ) if target_files else []
+        queue_target_ready = (
+            bool(target_files)
+            and not target_unread
+            and not target_full_read_needed
+        ) or (
+            not target_files
+            and bool(self._read_files(state))
+            and not full_read_needed
         )
+        if capability == "read_code":
+            if "read_file" in available and (unread or full_read_needed):
+                specs.append(ActionSpec("read_file", "Read focused files required to complete diagnosis."))
+            if "run_shell_command" in available and bool(state.get("llm_action_inputs_enabled", False)):
+                specs.append(ActionSpec("run_shell_command", "Run an allowed verification command to collect failure evidence."))
+            if "search_code_context" in available and not state.get("code_context"):
+                specs.append(ActionSpec("search_code_context", "Search structured code context for diagnostic targets."))
+            return specs
+        if capability == "patch":
+            if "read_file" in available and (
+                target_unread
+                or target_full_read_needed
+                or (not target_files and (unread or full_read_needed))
+                or edited_files_needing_reread(state)
+            ):
+                description = (
+                    f"Read the current queue target before implementation: {target_files[0]}."
+                    if target_files
+                    else "Read exact target source before implementation."
+                )
+                specs.append(ActionSpec("read_file", description))
+            if (
+                "EnterPlanMode" in available
+                and bool(state.get("llm_action_inputs_enabled", False))
+                and not plan_approved
+            ):
+                specs.append(ActionSpec("EnterPlanMode", "Create or refine the implementation plan for the unresolved obligation."))
+            if (
+                "apply_code_patch" in available
+                and bool(state.get("editing_enabled", False))
+                and bool(state.get("llm_action_inputs_enabled", False))
+                and plan_approved
+                and queue_target_ready
+            ):
+                specs.append(ActionSpec("apply_code_patch", "Apply the code change required by the goal contract."))
+            if "request_user_input" in available:
+                specs.append(ActionSpec("request_user_input", "Ask only if the required implementation behavior is ambiguous."))
+            return specs
+        if capability == "verification":
+            if "read_file" in available and edited_files_needing_reread(state):
+                specs.append(ActionSpec("read_file", "Re-read edited files before verification."))
+            if "run_shell_command" in available and bool(state.get("llm_action_inputs_enabled", False)):
+                specs.append(ActionSpec("run_shell_command", "Run an allowed verification command selected from project capabilities."))
+            elif "run_tests" in available:
+                specs.append(ActionSpec("run_tests", "Run an allowed verification command."))
+            return specs
+        return specs
+
+    def _default_verification_command(self, state: AgentState) -> str:
+        return recommended_verification_command(state)
 
     def _current_execution_item(self, state: AgentState) -> dict[str, Any] | None:
-        return state_current_execution_item(state)
+        return current_execution_item(state)
 
     def _execution_target_files(self, item: dict[str, Any] | None) -> list[str]:
         if not isinstance(item, dict):
@@ -581,11 +544,8 @@ class ActionSpace:
         for spec in specs:
             signature = self._spec_signature(spec, state)
             limit = self._limit_for_signature(spec.name, signature)
-            count = max(
-                counts.get(signature, 0),
-                counts.get(f"action:{spec.name}", 0),
-            )
-            if limit > 0 and count >= limit:
+            count = counts.get(signature, 0)
+            if 0 < limit <= count:
                 blocked.append(
                     {
                         "action": spec.name,
@@ -610,12 +570,8 @@ class ActionSpace:
             if not isinstance(item, dict):
                 continue
             signature = str(item.get("signature") or "").strip()
-            action = str(item.get("action") or "").strip()
             if signature:
                 counts[signature] = counts.get(signature, 0) + 1
-            if action:
-                key = f"action:{action}"
-                counts[key] = counts.get(key, 0) + 1
         return counts
 
     def _limit_for_signature(self, action_name: str, signature: str) -> int:
@@ -657,25 +613,6 @@ class ActionSpace:
             )
             return f"request_user_input:{missing or 'generic'}"
         return f"action:{spec.name}"
-
-    def _default_enter_plan_mode_args(self, state: AgentState) -> dict[str, Any]:
-        """ 特殊处理 enter plan mode 的 arg"""
-        return build_enter_plan_mode_args(
-            state,
-            query=self.query_planner.plan(state).query,
-            focus_files=collect_plan_focus_files(state),
-            read_files=sorted(self._read_files(state)),
-            default_verification_command=self._default_verification_command(state),
-        )
-
-    def _default_exit_plan_mode_args(self, state: AgentState) -> dict[str, Any]:
-        """ 特殊处理 exit plan mode 的 arg"""
-        return build_exit_plan_mode_args(
-            state,
-            focus_files=collect_plan_focus_files(state),
-            read_files=sorted(self._read_files(state)),
-            default_verification_command=self._default_verification_command(state),
-        )
 
     def _available_action_names(self, state: AgentState) -> set[str]:
         """

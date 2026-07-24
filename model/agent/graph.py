@@ -42,6 +42,10 @@ class AgentState(TypedDict, total=False):
     task_category: str
     verification_required: bool
     verification_reason: str
+    verification_capabilities: Dict[str, Any]
+    goal_contract: Dict[str, Any]
+    progress_ledger: Dict[str, Any]
+    next_obligation: Dict[str, Any]
     task_analysis: Dict[str, Any]
     selected_skills: list[str]
     skill_selection: Dict[str, Any]
@@ -51,8 +55,6 @@ class AgentState(TypedDict, total=False):
     is_git_repo: bool
     project_profile: Dict[str, Any] # 项目语言和文件概况
     branch: str # 仓库分支
-    verify_command: str # 权限认证相关命令
-
     plan: List[str] # llm 给的 plan
     current_step: str
 
@@ -121,7 +123,6 @@ class AgentState(TypedDict, total=False):
     rl_enabled: bool
     rl_transitions: List[Dict[str, Any]]
     rl_last_reward: Dict[str, Any]
-    llm_guard_events: List[Dict[str, Any]]
     action_history: List[Dict[str, Any]]
     action_limit_events: List[Dict[str, Any]]
 
@@ -129,7 +130,7 @@ class AgentState(TypedDict, total=False):
     plan_mode: bool
     plan_mode_entered: bool
     plan_mode_approved: bool
-    debug_technical_plan: str
+    technical_plan: str
     plan_verification_commands: List[str]
     plan_mode_evaluation: str
     plan_mode_events: List[Dict[str, Any]]

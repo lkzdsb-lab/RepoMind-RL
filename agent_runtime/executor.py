@@ -27,10 +27,11 @@ from agent_runtime.codebase_context.retrieval import (
     LLMCodeContextReranker,
     merge_code_context_outputs,
 )
-from agent_runtime.completion_state import derive_phase, evaluate_completion_transition
+from agent_runtime.lifecycle.completion import derive_phase, evaluate_completion_transition
 from agent_runtime.context import ContextCompressionManager
 from agent_runtime.context.attention import build_attention_focus
 from agent_runtime.context.events import latest_tool_event, should_llm_observe_event
+from agent_runtime.lifecycle.goal_contract import build_goal_contract
 from agent_runtime.logging_config import configure_from_agent_config
 from agent_runtime.llm.llm_policy import LLMActionPolicy
 from agent_runtime.llm.completion_judge import (
@@ -51,18 +52,20 @@ from agent_runtime.llm.observation import (
 )
 from agent_runtime.llm.task_analysis import DisabledTaskAnalyzer, LLMTaskAnalyzer, TaskAnalyzer
 from agent_runtime.memory.manager import LayeredMemoryManager
+from agent_runtime.memory.cards import MemoryContextPack
 from agent_runtime.memory.retrieval import (
     DisabledMemoryQueryPlanner,
     DisabledMemoryReranker,
     LLMMemoryQueryPlanner,
     LLMMemoryReranker,
     MemoryQueryPlanner,
+    MemoryRerankDecision,
     MemoryReranker,
     merge_memory_packs,
 )
 from agent_runtime.memory.store import JsonlMemoryStore
 from agent_runtime.planning import HeuristicPlanner, LLMPlanner, Planner
-from agent_runtime.policy import HeuristicDebugPolicy
+from agent_runtime.actions import ActionPolicy
 from agent_runtime.registry import RegistryManager, RegistrySnapshot
 from agent_runtime.rl import (
     ActionSpace,
@@ -85,9 +88,18 @@ from agent_runtime.user_updates import (
     set_change_event_sink,
     set_user_update_sink,
 )
-from agent_runtime.verification import infer_lightweight_verification_command
-from agent_runtime.execution_queue import current_execution_item as queue_current_execution_item
-from ext.focus_files import current_execution_item, execution_target_files
+from agent_runtime.lifecycle.obligations import derive_next_obligation
+from agent_runtime.lifecycle.progress_ledger import initial_progress_ledger, update_progress_ledger
+from agent_runtime.verification.capabilities import build_verification_capabilities
+from agent_runtime.verification.guard import (
+    invalid_verification_resolution,
+    validate_verification_command,
+)
+from agent_runtime.lifecycle.execution_queue import (
+    current_execution_item,
+    validate_execution_queue,
+)
+from ext.focus_files import execution_target_files
 from model.agent.graph import AgentState, AgentRunResult
 from model.agent.actions import Action
 from config import CompressionConfig, DebugAgentConfig, LLMConfig
@@ -104,7 +116,7 @@ class DebugAgent:
     def __init__(
         self,
         config: DebugAgentConfig,
-        policy: HeuristicDebugPolicy | None = None,
+        policy: ActionPolicy | None = None,
         planner: Planner | None = None,
         task_analyzer: TaskAnalyzer | None = None,
         observer: Observer | None = None,
@@ -245,11 +257,11 @@ class DebugAgent:
             "plan_mode": bool(state.get("plan_mode", False)),
             "plan_mode_entered": bool(state.get("plan_mode_entered", False)),
             "plan_mode_approved": bool(state.get("plan_mode_approved", False)),
-            "debug_technical_plan": state.get("debug_technical_plan", ""),
+            "technical_plan": state.get("technical_plan", ""),
             "plan_verification_commands": state.get("plan_verification_commands", []),
             "plan_mode_evaluation": state.get("plan_mode_evaluation", ""),
             "plan_mode_events": state.get("plan_mode_events", []),
-            "execution_queue": state.get("execution_queue", []),
+            "execution_queue": validate_execution_queue(state.get("execution_queue", [])),
             "pending_resolution": state.get("pending_resolution", {}),
             "phase": state.get("phase", ""),
             "runtime_decision": state.get("runtime_decision", {}),
@@ -341,7 +353,26 @@ class DebugAgent:
                     ),
                 )
             else:
-                action = self.policy.next_action(state)
+                try:
+                    action = self.policy.next_action(state)
+                except Exception as exc:
+                    run_logger.exception("action decision failed")
+                    state = self.recorder.append(
+                        {
+                            **state,
+                            "status": "failed",
+                            "current_step": "select_action",
+                            "error": f"Action decision failed: {exc}",
+                        },
+                        node="select_action",
+                        thought="Action policy failed without a downgrade policy.",
+                        observation={
+                            "type": "action_decision_failed",
+                            "error": str(exc),
+                            "fallback": False,
+                        },
+                    )
+                    break
             limit_events = self.rl_action_space.consume_last_limit_events()
             if limit_events:
                 action = Action(
@@ -401,13 +432,31 @@ class DebugAgent:
         return self._finish_run(state, started_at)
 
     def _sync_runtime_state(self, state: AgentState) -> AgentState:
+        goal_contract = state.get("goal_contract") if isinstance(state.get("goal_contract"), dict) else {}
+        progress_ledger = (
+            state.get("progress_ledger") if isinstance(state.get("progress_ledger"), dict) else {}
+        )
+        if goal_contract and (
+            int(goal_contract.get("version", 0) or 0) != 2
+            or not isinstance(progress_ledger.get("criteria"), dict)
+        ):
+            goal_contract = build_goal_contract(state)
+            progress_ledger = initial_progress_ledger(goal_contract)
+            state = {
+                **state,
+                "goal_contract": goal_contract, # 要完成什么，保持稳定
+                "progress_ledger": progress_ledger, # 已经完成到哪里，持续更新
+                "verification_required": bool(goal_contract.get("requires_verification", False)),
+            }
         decision = evaluate_completion_transition(state)
         phase = str(decision.get("phase") or derive_phase(state))
+        next_obligation = derive_next_obligation(goal_contract, progress_ledger)
         return {
             **state,
             "execution_queue": decision.get("execution_queue", state.get("execution_queue", [])),
             "phase": phase,
             "runtime_decision": decision,
+            "next_obligation": next_obligation,
         }
 
     def _update_attention_focus(self, state: AgentState) -> AgentState:
@@ -452,7 +501,10 @@ class DebugAgent:
             branch="",
             verification_required=True,
             verification_reason="Task analysis has not run yet.",
-            verify_command=self.config.verify_command,
+            verification_capabilities={},
+            goal_contract={},
+            progress_ledger={},
+            next_obligation={},
             task_analysis={},
             plan=[],
             current_step="created",
@@ -508,14 +560,13 @@ class DebugAgent:
             rl_enabled=self.rl_enabled,
             rl_transitions=[],
             rl_last_reward={},
-            llm_guard_events=[],
             action_history=[],
             action_limit_events=[],
             llm_action_inputs_enabled=_llm_action_inputs_enabled(self.config),
             plan_mode=False,
             plan_mode_entered=False,
             plan_mode_approved=False,
-            debug_technical_plan="",
+            technical_plan="",
             plan_verification_commands=[],
             plan_mode_evaluation="",
             plan_mode_events=[],
@@ -565,15 +616,23 @@ class DebugAgent:
         task_type = str(analysis.get("task_type") or state.get("task_type") or "BUG_FIX").upper()
         if task_type not in {"BUG_FIX", "FEATURE_IMPL", "DIAGNOSE"}:
             task_type = "BUG_FIX"
-        verification_required = bool(analysis.get("verification_required", True))
-        verification_reason = str(analysis.get("verification_reason") or "")
-        verification_required, verification_reason, verify_command = _apply_verification_default(
-            state,
-            task_type=task_type,
-            verification_required=verification_required,
-            verification_reason=verification_reason,
-        )
         task_category = str(analysis.get("task_category") or state.get("task_category") or "")
+        contract_seed = {
+            **state,
+            "task_type": task_type,
+            "task_category": task_category,
+            "task_analysis": analysis,
+        }
+        goal_contract = build_goal_contract(contract_seed)
+        verification_required = bool(goal_contract.get("requires_verification", False))
+        verification_reason = (
+            "Goal contract requires verification evidence."
+            if verification_required
+            else "Goal contract does not require command-based verification."
+        )
+        verification_capabilities = build_verification_capabilities(contract_seed)
+        progress_ledger = initial_progress_ledger(goal_contract)
+        next_obligation = derive_next_obligation(goal_contract, progress_ledger)
         analysis = {
             **analysis,
             "task_type": task_type,
@@ -590,7 +649,10 @@ class DebugAgent:
             "task_type": task_type,
             "verification_required": verification_required,
             "verification_reason": verification_reason,
-            "verify_command": verify_command,
+            "verification_capabilities": verification_capabilities,
+            "goal_contract": goal_contract,
+            "progress_ledger": progress_ledger,
+            "next_obligation": next_obligation,
             "task_category": task_category,
             "task_analysis": analysis,
             "observations": observations,
@@ -669,23 +731,31 @@ class DebugAgent:
     def _retrieve_memories(self, state: AgentState) -> AgentState:
         try:
             query_plan = self.memory_query_planner.plan(state)
-            packs = [
-                self.memory_manager.retrieve(
-                    query,
+            if query_plan.queries:
+                packs = [
+                    self.memory_manager.retrieve(
+                        query,
+                        state,
+                        self._registry(),
+                        limit=self.config.memory_query_limit,
+                        touch=False,
+                    )
+                    for query in query_plan.queries
+                ]
+                candidate_pack = merge_memory_packs(packs)
+                memory_pack, rerank_decision = self.memory_reranker.rerank(
                     state,
-                    self._registry(),
-                    limit=self.config.memory_query_limit,
-                    touch=False,
+                    query_plan,
+                    candidate_pack,
                 )
-                for query in query_plan.queries
-            ]
-            candidate_pack = merge_memory_packs(packs)
-            memory_pack, rerank_decision = self.memory_reranker.rerank(
-                state,
-                query_plan,
-                candidate_pack,
-            )
-            self.memory_manager.touch_retrieved(memory_pack, state)
+                self.memory_manager.touch_retrieved(memory_pack, state)
+            else:
+                candidate_pack = MemoryContextPack()
+                memory_pack = MemoryContextPack()
+                rerank_decision = MemoryRerankDecision(
+                    source="skipped",
+                    rationale="Memory query planner determined retrieval was unnecessary.",
+                )
         except Exception as exc:
             logger.bind(task_id=state.get("task_id")).exception(
                 "memory retrieval failed without fallback"
@@ -804,24 +874,11 @@ class DebugAgent:
             "action selected args={}",
             action.args,
         )
-        pending_resolution = dict(state.get("pending_resolution") or {})
-        deferred = action.metadata.get("deferred_action") if isinstance(action.metadata, dict) else None
         limit_events = []
         if isinstance(action.metadata, dict):
             raw_limit_events = action.metadata.get("action_limit_events")
             if isinstance(raw_limit_events, list):
                 limit_events = [event for event in raw_limit_events if isinstance(event, dict)]
-        if isinstance(deferred, dict):
-            pending_resolution = {
-                "kind": "deferred",
-                "action": str(deferred.get("action") or action.name),
-                "required_next_action": str(deferred.get("action") or action.name),
-                "target_file": "",
-                "reason": str(deferred.get("reason") or "").strip(),
-                "details": deferred,
-            }
-        elif pending_resolution:
-            pending_resolution = {}
         action_history = list(state.get("action_history", []) or [])
         action_history.append(self._action_history_entry(state, action))
         observations = list(state.get("observations", []) or [])
@@ -840,7 +897,7 @@ class DebugAgent:
             **state,
             "next_action": action.name,
             "next_action_input": action.args,
-            "pending_resolution": pending_resolution,
+            "pending_resolution": {},
             "action_history": action_history,
             "action_limit_events": action_limit_events,
             "observations": observations,
@@ -872,18 +929,9 @@ class DebugAgent:
         started_at = time.perf_counter()
         action_logger.info("action execution started")
         try:
-            deferred = action.metadata.get("deferred_action") if isinstance(action.metadata, dict) else None
-            if isinstance(deferred, dict):
+            if action.name == "run_tests" and not _verification_required(state):
                 output = {
-                    "skipped": True,
-                    "needs_more_context": True,
-                    "deferred_action": deferred.get("action"),
-                    "missing_required_args": deferred.get("missing_required_args", []),
-                    "message": deferred.get("message") or "Action deferred until required arguments are inferred from repository context.",
-                }
-            elif action.name == "run_tests" and not _verification_required(state):
-                output = {
-                    "command": action.args.get("command", self.config.verify_command),
+                    "command": action.args.get("command", ""),
                     "skipped": True,
                     "reason": "verification_required=false",
                 }
@@ -927,12 +975,33 @@ class DebugAgent:
                     action_args.setdefault("index_path", self.config.code_context_index_path)
                 if action.name == "apply_code_patch":
                     action_args["_guard"] = self._edit_guard(state)
-                output = self._registry().run_tool(
-                    action.name,
-                    self.config.repo_path,
-                    action_args,
-                    allowed_permissions=self._allowed_tool_permissions(),
-                )
+                if action.name in {"run_shell_command", "run_tests"}:
+                    guard_output = self._guard_verification_command(state, action.name, action_args)
+                    if guard_output is not None:
+                        output = guard_output
+                        action_args = {}
+                    else:
+                        output = self._registry().run_tool(
+                            action.name,
+                            self.config.repo_path,
+                            action_args,
+                            allowed_permissions=self._allowed_tool_permissions(),
+                        )
+                        if action_args != action.args:
+                            action = Action(
+                                action.name,
+                                action_args,
+                                thought=action.thought,
+                                metadata=action.metadata,
+                            )
+                        action_args = {}
+                if action_args:
+                    output = self._registry().run_tool(
+                        action.name,
+                        self.config.repo_path,
+                        action_args,
+                        allowed_permissions=self._allowed_tool_permissions(),
+                    )
         except Exception as exc:
             action_logger.exception("action execution raised exception")
             output = {"error": str(exc), "exception_type": exc.__class__.__name__}
@@ -1241,6 +1310,10 @@ class DebugAgent:
             updates["memory_written"] = True
             updates["promoted_memories"] = output.get("promoted", [])
             updates["consolidated_skills"] = output.get("consolidated", [])
+        if isinstance(output.get("pending_resolution"), dict):
+            updates["pending_resolution"] = output["pending_resolution"]
+        transition_state = {**state, **updates}
+        updates["progress_ledger"] = update_progress_ledger(transition_state, action, output)
 
         tool_calls = state.get("tool_calls", []) + [
             {
@@ -1293,6 +1366,45 @@ class DebugAgent:
                 tags=[action.name],
             )
         return new_state
+
+    def _guard_verification_command(
+        self,
+        state: AgentState,
+        action_name: str,
+        action_args: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        purpose = str(action_args.get("purpose") or "verification").strip().lower()
+        if action_name == "run_tests":
+            purpose = "verification"
+            action_args["purpose"] = "verification"
+        if purpose != "verification":
+            return None
+        capabilities = (
+            state.get("verification_capabilities")
+            if isinstance(state.get("verification_capabilities"), dict)
+            else build_verification_capabilities(state)
+        )
+        decision = validate_verification_command(str(action_args.get("command") or ""), capabilities)
+        if decision.allowed:
+            action_args["command"] = decision.command
+            action_args["purpose"] = "verification"
+            action_args["allow_shell"] = False
+            action_args["verification_guard"] = decision.to_dict()
+            return None
+        resolution = invalid_verification_resolution(
+            str(action_args.get("command") or ""),
+            decision,
+            capabilities,
+        )
+        return {
+            "error": decision.reason,
+            "needs_more_context": True,
+            "command": str(action_args.get("command") or ""),
+            "purpose": "verification",
+            "exit_code": -1,
+            "verification_guard": decision.to_dict(),
+            "pending_resolution": resolution,
+        }
 
     def _observe(self, state: AgentState) -> AgentState:
         latest = state.get("tool_calls", [{}])[-1]
@@ -1540,7 +1652,7 @@ class DebugAgent:
         if bool(runtime_decision.get("is_complete")):
             judgement = {
                 "decision": "complete",
-                "reason": "Runtime completion evaluator found no blockers and a meaningful task result.",
+                "reason": "Runtime completion evaluator found no blockers and all required criteria passed.",
                 "questions": [],
                 "suggested_next_action": "",
                 "confidence": 1.0,
@@ -1551,9 +1663,9 @@ class DebugAgent:
             return state, True, True, {"completion_judgement": judgement}
         judgement = self.completion_judge.judge(state)
         output = {"completion_judgement": judgement}
-        state = self._record_completion_judgement(state, judgement)
         decision = str(judgement.get("decision") or "complete").strip().lower()
         if decision == "needs_user_input":
+            state = self._record_completion_judgement(state, judgement)
             state = self._await_user_input(state, judgement)
             if state.get("status") != "awaiting_user_input":
                 state = {
@@ -1567,6 +1679,7 @@ class DebugAgent:
                 return state, False, False, output
             return state, True, False, output
         if decision == "continue":
+            state = self._record_completion_judgement(state, judgement)
             next_action_input = state.get("next_action_input")
             forced_completion_judgement = (
                 isinstance(next_action_input, dict)
@@ -1603,11 +1716,32 @@ class DebugAgent:
             # todo 考虑配置化
             if attempts >= 2:
                 logger.bind(task_id=state.get("task_id")).warning(
-                    "completion judge requested continue repeatedly; finalizing to avoid loop"
+                    "completion judge requested continue repeatedly; runtime contract remains authoritative"
                 )
-                state = self._finalize(state)
-                return state, True, True, output
             return state, False, False, output
+        if state.get("goal_contract"):
+            runtime_decision = evaluate_completion_transition(state)
+            blocked_judgement = {
+                **judgement,
+                "decision": "continue",
+                "reason": (
+                    "Completion judge proposed completion, but required runtime criteria remain unmet: "
+                    f"{runtime_decision.get('blockers', [])}."
+                ),
+                "suggested_next_action": runtime_decision.get("required_next_action", ""),
+                "source": "runtime_contract_gate",
+            }
+            state = self._record_completion_judgement(state, blocked_judgement)
+            state = {
+                **state,
+                "current_step": "select_action",
+                "completion_judge_continue_count": int(
+                    state.get("completion_judge_continue_count", 0)
+                )
+                + 1,
+            }
+            return state, False, False, {"completion_judgement": blocked_judgement}
+        state = self._record_completion_judgement(state, judgement)
         state = self._finalize(state)
         return state, True, True, output
 
@@ -1862,8 +1996,7 @@ class DebugAgent:
             return False
         return bool(state.get("plan_mode")) or not bool(state.get("plan_mode_approved"))
 
-    # 后面都是降级策略，项目完全实现后考虑删除。
-    def _default_policy(self):
+    def _default_policy(self) -> ActionPolicy:
         mode = (self.config.action_policy_mode or "").strip().lower()
         if mode == "llm":
             return LLMActionPolicy(
@@ -1871,16 +2004,15 @@ class DebugAgent:
                 action_space=self.rl_action_space,
                 q_table=self.rl_q_table,
                 encoder=self.rl_encoder,
-                fallback=HeuristicDebugPolicy(),
             )
-        if not self.rl_enabled and mode not in {"rl"}:
-            return HeuristicDebugPolicy()
-        return QLearningDebugPolicy(
-            q_table=self.rl_q_table,
-            epsilon=self.config.rl_epsilon,
-            encoder=self.rl_encoder,
-            action_space=self.rl_action_space,
-        )
+        if mode == "rl":
+            return QLearningDebugPolicy(
+                q_table=self.rl_q_table,
+                epsilon=self.config.rl_epsilon,
+                encoder=self.rl_encoder,
+                action_space=self.rl_action_space,
+            )
+        raise ValueError(f"Unsupported action policy mode: {mode}")
 
     def _default_planner(self) -> Planner:
         mode = (self.config.planner_mode or "").strip().lower()
@@ -2040,51 +2172,6 @@ def _llm_config_enabled(value: LLMConfig) -> bool:
 
 def _verification_required(state: AgentState) -> bool:
     return bool(state.get("verification_required", True))
-
-
-def _apply_verification_default(
-    state: AgentState,
-    *,
-    task_type: str,
-    verification_required: bool,
-    verification_reason: str,
-) -> tuple[bool, str, str]:
-    verify_command = str(state.get("verify_command") or "").strip()
-    if verification_required:
-        return verification_required, verification_reason, verify_command
-    if task_type != "BUG_FIX":
-        return verification_required, verification_reason, verify_command
-    repo_path = str(state.get("repo_path") or ".")
-    if not _repo_has_test_files(repo_path):
-        return verification_required, verification_reason, verify_command
-    inferred = infer_lightweight_verification_command(
-        repo_path,
-        configured=verify_command,
-        candidate_files=list(state.get("candidate_files", []) or []),
-    )
-    return (
-        True,
-        "Bug-fix task in a repository with tests should run the inferred verification command.",
-        inferred,
-    )
-
-
-def _repo_has_test_files(repo_path: str) -> bool:
-    root = Path(repo_path or ".")
-    if not root.exists():
-        return False
-    ignored_dirs = {".git", ".repomind", ".venv", "venv", "node_modules", "vendor"}
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        if any(part in ignored_dirs for part in path.parts):
-            continue
-        name = path.name.lower()
-        if name.endswith("_test.go") or name.startswith("test_") or name.endswith("_test.py"):
-            return True
-        if name in {"package.json", "pom.xml", "build.gradle", "build.gradle.kts"}:
-            return True
-    return False
 
 
 def _requires_post_edit_verification(state: AgentState) -> bool:
@@ -2417,7 +2504,7 @@ def _action_signature(action: Action, state: AgentState | None = None) -> str:
     if action.name == "read_file":
         file_path = str(action.args.get("file_path") or "").strip()
         if not file_path and isinstance(state, dict):
-            current = _current_execution_item(state)
+            current = current_execution_item(state)
             if isinstance(current, dict):
                 for path in current.get("target_files", []) or []:
                     file_path = str(path).strip()
@@ -2441,7 +2528,7 @@ def _action_signature(action: Action, state: AgentState | None = None) -> str:
                 if str(path).strip()
             ]
         if not targets and isinstance(state, dict):
-            current = _current_execution_item(state)
+            current = current_execution_item(state)
             if isinstance(current, dict):
                 targets = [
                     str(path).strip()
@@ -2470,9 +2557,6 @@ def _action_signature(action: Action, state: AgentState | None = None) -> str:
         return f"request_user_input:{missing or 'generic'}"
     return f"action:{action.name}"
 
-
-def _current_execution_item(state: AgentState) -> dict[str, Any] | None:
-    return queue_current_execution_item(state)
 
 
 def _build_project_profile(repo_path: str, max_files: int = 3000) -> dict[str, Any]:

@@ -94,20 +94,20 @@ def collect_context_events(state: AgentState) -> list[ContextEvent]:
             )
         )
 
-    if state.get("debug_technical_plan"):
+    if state.get("technical_plan"):
         events.append(
             ContextEvent(
                 event_id="plan:technical",
                 event_type="plan_event",
-                source="debug_technical_plan",
-                summary=_truncate(str(state.get("debug_technical_plan") or ""), 500),
+                source="technical_plan",
+                summary=_truncate(str(state.get("technical_plan") or ""), 500),
                 payload={
                     "approved": bool(state.get("plan_mode_approved", False)),
                     "evaluation": _truncate(str(state.get("plan_mode_evaluation") or ""), 600),
                 },
                 importance="high",
                 retention="working",
-                raw_ref={"state": "debug_technical_plan"},
+                raw_ref={"state": "technical_plan"},
                 loop_count=loop_count,
             )
         )

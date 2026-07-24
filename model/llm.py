@@ -20,50 +20,34 @@ def _coerce_score(value: Any) -> Any:
     return value
 
 
-def _coerce_string_list(value: Any) -> Any:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return []
-        lines = [
-            line.strip().lstrip("-*•").strip()
-            for line in text.splitlines()
-            if line.strip()
-        ]
-        if len(lines) > 1:
-            return lines
-        return [text]
-    return [str(value).strip()] if str(value).strip() else []
-
-
 class PlanResponse(BaseModel):
     plan: list[str] = Field(default_factory=list)
     user_update: str = ""
 
-    @field_validator("plan", mode="before")
-    @classmethod
-    def _normalize_plan(cls, value: Any) -> Any:
-        return _coerce_string_list(value)
 
+class CompletionCriterionResponse(BaseModel):
+    id: str = Field(min_length=1, max_length=80, pattern=r"^[a-z][a-z0-9_]*$")
+    kind: Literal["diagnose", "implement", "verify"]
+    description: str = Field(min_length=1, max_length=500)
+    required: bool = True
+    depends_on: list[str] = Field(default_factory=list, max_length=8)
+    evidence_policy: Literal[
+        "repository_evidence",
+        "diagnosis_evidence",
+        "command_evidence",
+        "patch_applied",
+        "verification_passed",
+    ]
 
 class TaskAnalysisResponse(BaseModel):
     task_type: Literal["BUG_FIX", "FEATURE_IMPL", "DIAGNOSE"]
-    verification_required: bool = True
-    verification_reason: str = ""
     task_category: str
     entities: list[str]
     acceptance_criteria: list[str]
+    completion_criteria: list[CompletionCriterionResponse] = Field(default_factory=list, max_length=12)
     risk_notes: list[str]
     search_hints: list[str]
     user_update: str = ""
-
-    @field_validator("entities", "acceptance_criteria", "risk_notes", "search_hints", mode="before")
-    @classmethod
-    def _normalize_lists(cls, value: Any) -> Any:
-        return _coerce_string_list(value)
-
 
 class ObservationResponse(BaseModel):
     latest_tool: str = "unknown"
@@ -97,12 +81,6 @@ class FinalReportResponse(BaseModel):
     next_steps: list[str] = Field(default_factory=list)
     user_update: str = ""
 
-    @field_validator("work_done", "candidate_files", "test_results", "next_steps", mode="before")
-    @classmethod
-    def _normalize_lists(cls, value: Any) -> Any:
-        return _coerce_string_list(value)
-
-
 class CompletionJudgeResponse(BaseModel):
     decision: Literal["complete", "needs_user_input", "continue"] = "complete"
     reason: str = ""
@@ -116,22 +94,10 @@ class CompletionJudgeResponse(BaseModel):
     def _normalize_confidence(cls, value: Any) -> Any:
         return _coerce_score(value)
 
-    @field_validator("questions", mode="before")
-    @classmethod
-    def _normalize_questions(cls, value: Any) -> Any:
-        return _coerce_string_list(value)
-
-
 class MemoryQueryPlanResponse(BaseModel):
     queries: list[str]
     rationale: str = ""
     user_update: str = ""
-
-    @field_validator("queries", mode="before")
-    @classmethod
-    def _normalize_queries(cls, value: Any) -> Any:
-        return _coerce_string_list(value)
-
 
 class MemorySelectionResponse(BaseModel):
     memory_id: str
@@ -153,12 +119,6 @@ class CodeContextQueryPlanResponse(BaseModel):
     queries: list[str]
     rationale: str = ""
     user_update: str = ""
-
-    @field_validator("queries", mode="before")
-    @classmethod
-    def _normalize_queries(cls, value: Any) -> Any:
-        return _coerce_string_list(value)
-
 
 class CodeContextSelectionResponse(BaseModel):
     candidate_id: str
@@ -195,8 +155,7 @@ class SkillSelectorResponse(BaseModel):
 
 
 class ActionChoiceResponse(BaseModel):
-    action: str = ""
-    candidate_actions: list[str] = Field(default_factory=list)
+    action: str = Field(min_length=1)
     reason: str = ""
     action_input: dict[str, Any] = Field(default_factory=dict)
     uncertainty_questions: list[str] = Field(default_factory=list)
@@ -265,7 +224,6 @@ class GuardDecision:
     hard_denied: dict[str, float]
     allow_list: list[str]
     allow_scores: dict[str, float]
-    fallback_forced: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -275,5 +233,4 @@ class GuardDecision:
             "hard_denied": self.hard_denied,
             "allow_list": self.allow_list,
             "allow_scores": self.allow_scores,
-            "fallback_forced": self.fallback_forced,
         }

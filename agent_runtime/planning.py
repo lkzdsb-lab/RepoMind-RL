@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from agent_runtime.llm.llm_nodes import LLMJsonNode
-from agent_runtime.verification import infer_lightweight_verification_command
+from agent_runtime.verification.capabilities import recommended_verification_command
 from config import LLMConfig
 from model.agent.graph import AgentState
 from model.llm import PlanResponse
@@ -22,19 +22,19 @@ class Planner(Protocol):
 @dataclass
 class HeuristicPlanner:
     def make_plan(self, state: AgentState) -> list[str]:
-        verify_command = _verification_command(state)
+        verification_example = _verification_example(state)
         verification_step = (
-            "跳过验证命令（LLM 判定本任务不需要命令验证）"
+            "Skip command verification because the task contract does not require it."
             if not _verification_required(state)
-            else f"运行验证命令：{verify_command}"
+            else f"Run an allowed verification command, for example: {verification_example}"
         )
         return [
-            "解析 issue，提取代码搜索关键词",
-            "使用结构化代码上下文搜索候选文件",
-            "阅读候选文件建立上下文",
+            "Analyze the task and extract code search keywords.",
+            "Search structured code context for candidate files.",
+            "Read candidate files to build exact context.",
             verification_step,
-            "查看 git diff 并汇总当前补丁状态",
-            "按 reward gate 写入分层记忆，必要时沉淀到 skill",
+            "Inspect git diff and summarize the current patch state.",
+            "Write layered memory only when the reward gate allows it.",
         ]
 
 
@@ -79,7 +79,9 @@ def _planner_node_prompt(state: AgentState, context: dict) -> str:
         compressed_context=str(state.get("compressed_context", ""))[:3000],
         verification_required=json.dumps(_verification_required(state)),
         verification_reason=state.get("verification_reason", ""),
-        verify_command=state.get("verify_command", ""),
+        verification_capabilities=json.dumps(
+            state.get("verification_capabilities", {}), ensure_ascii=False
+        ),
         default_plan=json.dumps(fallback_plan, ensure_ascii=False),
     )
 
@@ -99,10 +101,5 @@ def _verification_required(state: AgentState) -> bool:
     return bool(state.get("verification_required", True))
 
 
-def _verification_command(state: AgentState) -> str:
-    return infer_lightweight_verification_command(
-        str(state.get("repo_path") or "."),
-        configured=str(state.get("verify_command") or ""),
-        changed_files=list(state.get("edited_files", []) or []),
-        candidate_files=list(state.get("candidate_files", []) or []),
-    )
+def _verification_example(state: AgentState) -> str:
+    return recommended_verification_command(state)

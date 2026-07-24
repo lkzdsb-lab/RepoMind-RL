@@ -78,9 +78,12 @@ def _completion_judge_prompt(state: AgentState, context: dict[str, Any]) -> str:
         ),
         plan_mode=json.dumps(bool(state.get("plan_mode", False))),
         plan_mode_approved=json.dumps(bool(state.get("plan_mode_approved", False))),
-        debug_technical_plan=_truncate_text(str(state.get("debug_technical_plan", "")), 5000),
+        technical_plan=_truncate_text(str(state.get("technical_plan", "")), 5000),
         plan_mode_evaluation=_truncate_text(str(state.get("plan_mode_evaluation", "")), 3000),
         task_analysis=json.dumps(state.get("task_analysis", {}), ensure_ascii=False, default=str),
+        goal_contract=json.dumps(state.get("goal_contract", {}), ensure_ascii=False, default=str),
+        progress_ledger=json.dumps(state.get("progress_ledger", {}), ensure_ascii=False, default=str),
+        next_obligation=json.dumps(state.get("next_obligation", {}), ensure_ascii=False, default=str),
         plan=json.dumps(state.get("plan", []), ensure_ascii=False),
         candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),
         read_files=json.dumps(

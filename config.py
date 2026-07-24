@@ -62,7 +62,6 @@ class DebugAgentConfig:
     """
     # 仓库路径
     repo_path: str = ""
-    verify_command: str = ""
     max_loops: int = 8
     env_file: str | None = ".env"
     env_override: bool = False
@@ -109,7 +108,7 @@ class DebugAgentConfig:
     final_reporter_llm_config: LLMConfig = field(default_factory=LLMConfig)
     completion_judge_llm_config: LLMConfig = field(default_factory=LLMConfig)
     planner_mode: str = "heuristic"
-    action_policy_mode: str = "heuristic"
+    action_policy_mode: str = "llm"
     task_analyzer_mode: str = "disabled"
     observer_mode: str = "disabled"
     observer_use_delta: bool = True
@@ -171,7 +170,6 @@ def default_config_payload() -> dict[str, Any]:
             "description": "",
         },
         "repo_path": ".",
-        "verify_command": config.verify_command,
         "max_loops": config.max_loops,
         "env_file": config.env_file,
         "env_override": config.env_override,
@@ -367,7 +365,6 @@ def apply_debug_agent_config(config: DebugAgentConfig, data: dict[str, Any]) -> 
         data,
         {
             "repo": "repo_path",
-            "verify": "verify_command",
             "step_approval": "require_step_approval",
             "require_step_approval": "require_step_approval",
         },
@@ -562,7 +559,7 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         config.context_compressor_mode,
         {"disabled", "rule_based", "llm"},
     )
-    _validate_choice("action_policy_mode", config.action_policy_mode, {"heuristic", "rl", "llm"})
+    _validate_choice("action_policy_mode", config.action_policy_mode, {"rl", "llm"})
     _validate_choice("final_reporter_mode", config.final_reporter_mode, {"rule_based", "llm"})
     _validate_choice("completion_judge_mode", config.completion_judge_mode, {"auto", "rule_based", "llm"})
     for field_name in (

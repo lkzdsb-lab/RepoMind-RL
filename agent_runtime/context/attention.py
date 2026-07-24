@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent_runtime.execution_queue import current_execution_item
+from agent_runtime.lifecycle.execution_queue import current_execution_item
 from model.agent.graph import AgentState
 from utils import _append_unique, _as_dict, _clean_string_list, _latest_dict, _positive_int, _truncate
 
@@ -103,7 +103,7 @@ def _focus_actions(
     if execution_kind == "patch":
         _append_unique(actions, ["read_file", "apply_code_patch"])
     if phase == "plan":
-        if state.get("debug_technical_plan"):
+        if state.get("technical_plan"):
             _append_unique(actions, ["ExitPlanMode"])
         else:
             _append_unique(actions, ["EnterPlanMode"])

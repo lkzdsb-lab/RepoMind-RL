@@ -9,10 +9,7 @@ from utils import  _clean_string_list, _as_bool
 def enter_plan_mode(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
     """Record a technical plan and enter the non-mutating planning gate."""
     del repo_path
-    technical_plan = _clean_text(
-        args.get("technical_plan") or args.get("plan") or args.get("debug_plan"),
-        limit=12000,
-    )
+    technical_plan = _clean_text(args.get("technical_plan"), limit=12000)
     if not technical_plan:
         return {
             "entered": False,

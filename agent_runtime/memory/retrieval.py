@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
-from loguru import logger
-
 from agent_runtime.llm.llm_nodes import LLMJsonNode
 from agent_runtime.memory.cards import MemoryContextPack, MemorySearchResult
 from config import LLMConfig
@@ -83,8 +81,6 @@ class LLMMemoryQueryPlanner:
     def plan(self, state: AgentState) -> MemoryQueryPlan:
         data = self.node.run(state, {"max_queries": self.max_queries})
         queries = [str(item).strip() for item in data.get("queries", []) if str(item).strip()]
-        if not queries:
-            raise ValueError("LLM memory query planner returned no queries")
         return MemoryQueryPlan(
             queries=queries[: self.max_queries],
             source="llm",
@@ -108,11 +104,6 @@ class LLMMemoryQueryPlanner:
                 queries.append(query[:300])
             if len(queries) >= max_queries:
                 break
-        if not queries:
-            logger.warning(
-                f"memory query planner returned no queries \n"
-                f"raw_queries: {raw_queries}\n")
-            raise ValueError("memory query planner response returned empty queries")
         return {
             "queries": queries,
             "rationale": str(data.get("rationale", "")).strip()[:500],

@@ -77,6 +77,8 @@ def configure_logging(
     root = logging.getLogger()
     root.handlers = [InterceptHandler()]
     root.setLevel(_parse_stdlib_level(level_name))
+    for logger_name in ("openai", "httpx", "httpcore"):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
     logging.captureWarnings(True)
 
     _CONFIGURED = True

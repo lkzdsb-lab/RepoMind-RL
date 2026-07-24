@@ -91,10 +91,11 @@ class OpenAICompatibleLLMClient:
         content = _extract_chat_content(raw)
         if not content and parsed is not None:
             content = json.dumps(_parsed_to_plain(parsed), ensure_ascii=False)
+        logged_content = _format_json_for_log(content)
         logger.info(
-            "llm request completed model={} content={} parsed={} usage={}",
+            "llm request completed model={} content=\n{}\nparsed={} usage={}",
             raw.get("model") or model,
-            content,
+            logged_content,
             parsed is not None,
             raw.get("usage") or {},
         )
@@ -105,7 +106,6 @@ class OpenAICompatibleLLMClient:
             parsed=parsed,
             usage=_extract_usage(raw),
         )
-
     def _message_to_dict(self, message: LLMMessage | dict[str, str]) -> dict[str, str]:
         if isinstance(message, dict):
             return {"role": str(message.get("role", "")), "content": str(message.get("content", ""))}
@@ -140,6 +140,14 @@ class OpenAICompatibleLLMClient:
                 f"LLM structured parse failed: {original_error}; manual JSON recovery also failed: {manual_exc}"
             ) from manual_exc
         return completion, parsed
+
+
+def _format_json_for_log(content: str) -> str:
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError):
+        return content
+    return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
 
 
 def build_llm_client(config: LLMConfig) -> LLMClient:

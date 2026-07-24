@@ -49,6 +49,8 @@ class LLMJsonNode:
         self,
         state: AgentState,
         context: dict[str, Any] | None = None,
+        *,
+        publish_update: bool = True,
     ) -> dict[str, Any]:
         context = dict(context or {})
         try:
@@ -87,7 +89,8 @@ class LLMJsonNode:
             user_update = _clean_user_update(data.get("user_update"))
             if user_update:
                 data["user_update"] = user_update
-                _append_user_update(state, self.name, user_update)
+                if publish_update:
+                    publish_user_update(state, self.name, user_update)
             return data
         except Exception as exc:
             _record_llm_error(state, self.name, exc)
@@ -123,8 +126,14 @@ def _parsed_payload_to_dict(parsed: Any) -> dict[str, Any]:
 
 
 def _clean_user_update(value: Any) -> str:
-    text = " ".join(str(value or "").strip().split())
-    return text[:240]
+    lines = [" ".join(line.split()) for line in str(value or "").splitlines() if line.strip()]
+    return "\n".join(lines)[:1000]
+
+
+def publish_user_update(state: AgentState, source: str, message: Any) -> None:
+    cleaned = _clean_user_update(message)
+    if cleaned:
+        _append_user_update(state, source, cleaned)
 
 
 def _append_user_update(state: AgentState, source: str, message: str) -> None:

@@ -276,7 +276,7 @@ lee-agent \
 
 ## RL Policy
 
-默认仍使用 `HeuristicDebugPolicy`。开启 `--rl-enabled` 后，Agent 会切换到 epsilon-greedy Q-learning policy，并在每个 action 后记录 transition、计算 reward、在线更新 Q-table。
+默认使用 LLM action policy。将 `action_policy_mode` 设置为 `rl` 后，Agent 会切换到 epsilon-greedy Q-learning policy，并在每个 action 后记录 transition、计算 reward、在线更新 Q-table。
 
 RL 模块位于：
 

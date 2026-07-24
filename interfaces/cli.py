@@ -40,7 +40,6 @@ def default(
     repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
     config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
     no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
-    verify: Optional[str] = typer.Option(None, "--verify", help="Verification command."),
     max_loops: Optional[int] = typer.Option(None, "--max-loops", help="Maximum agent loops."),
     manifest_dir: Optional[str] = typer.Option(None, "--manifest-dir", help="Runtime registry manifest directory."),
     code_context_index_path: Optional[str] = typer.Option(
@@ -60,7 +59,7 @@ def default(
     action_policy_mode: Optional[str] = typer.Option(
         None,
         "--action-policy-mode",
-        help="Action policy mode: heuristic, rl, or llm.",
+        help="Action policy mode: llm or rl.",
     ),
     log_level: Optional[str] = typer.Option(None, "--log-level", help="Runtime log level."),
     console_log: bool = typer.Option(False, "--console-log", help="Also print runtime logs."),
@@ -72,7 +71,6 @@ def default(
         repo=repo,
         config_path=config_path,
         no_config=no_config,
-        verify=verify,
         max_loops=max_loops,
         manifest_dir=manifest_dir,
         code_context_index_path=code_context_index_path,
@@ -92,7 +90,6 @@ def chat(
     repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
     config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
     no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
-    verify: Optional[str] = typer.Option(None, "--verify", help="Verification command."),
     max_loops: Optional[int] = typer.Option(None, "--max-loops", help="Maximum agent loops."),
     manifest_dir: Optional[str] = typer.Option(None, "--manifest-dir", help="Runtime registry manifest directory."),
     code_context_index_path: Optional[str] = typer.Option(
@@ -112,7 +109,7 @@ def chat(
     action_policy_mode: Optional[str] = typer.Option(
         None,
         "--action-policy-mode",
-        help="Action policy mode: heuristic, rl, or llm.",
+        help="Action policy mode: llm or rl.",
     ),
     log_level: Optional[str] = typer.Option(None, "--log-level", help="Runtime log level."),
     console_log: bool = typer.Option(False, "--console-log", help="Also print runtime logs."),
@@ -123,7 +120,6 @@ def chat(
             repo=repo,
             config_path=config_path,
             no_config=no_config,
-            verify=verify,
             max_loops=max_loops,
             manifest_dir=manifest_dir,
             code_context_index_path=code_context_index_path,
@@ -160,7 +156,6 @@ def _build_config(
     repo: str | None,
     config_path: str,
     no_config: bool,
-    verify: str | None,
     max_loops: int | None,
     manifest_dir: str | None,
     code_context_index_path: str | None,
@@ -178,8 +173,6 @@ def _build_config(
     config = debug_agent_config_from_dict(payload)
     if repo:
         config.repo_path = repo
-    if verify is not None:
-        config.verify_command = verify
     if max_loops is not None:
         config.max_loops = max_loops
     if manifest_dir is not None:
@@ -192,8 +185,6 @@ def _build_config(
         config.rl_epsilon = rl_epsilon
     if enable_editing:
         config.editing_enabled = True
-        if not action_policy_mode:
-            config.action_policy_mode = "llm"
     if require_step_approval:
         config.require_step_approval = True
     if action_policy_mode:

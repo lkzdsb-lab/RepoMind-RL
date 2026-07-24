@@ -21,7 +21,7 @@ from agent_runtime.memory.store import (
     RedisMemoryStore,
 )
 from agent_runtime.registry import RegistrySnapshot
-from agent_runtime.verification import infer_lightweight_verification_command
+from agent_runtime.verification.capabilities import recommended_verification_command
 from model.agent.graph import AgentState
 from config import DebugAgentConfig
 from loguru import logger
@@ -296,7 +296,7 @@ class LayeredMemoryManager:
         status = "verified" if passed else "draft"
         evidence = []
         if latest_test:
-            evidence.append(f"verify_command={latest_test.get('command', '')}")
+            evidence.append(f"verification_command={latest_test.get('command', '')}")
             evidence.append(f"exit_code={latest_test.get('exit_code')}")
         if has_patch:
             evidence.append("git_diff_present=true")
@@ -480,12 +480,7 @@ class LayeredMemoryManager:
         )
 
     def _procedural_content(self, state: AgentState) -> str:
-        command = infer_lightweight_verification_command(
-            str(state.get("repo_path") or "."),
-            configured=str(state.get("verify_command") or ""),
-            changed_files=list(state.get("edited_files", []) or []),
-            candidate_files=list(state.get("candidate_files", []) or []),
-        )
+        command = recommended_verification_command(state)
         if not state.get("verification_required", True):
             return (
                 f"Procedure for similar inspection tasks: search using task-specific keywords, "

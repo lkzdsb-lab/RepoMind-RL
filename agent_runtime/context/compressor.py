@@ -57,7 +57,7 @@ class RuleBasedContextCompressor:
         constraints = [
             f"repo_path={state.get('repo_path', '')}",
             f"verification_required={bool(state.get('verification_required', True))}",
-            f"verify_command={state.get('verify_command', '')}",
+            f"verification_capabilities={json.dumps(state.get('verification_capabilities', {}), ensure_ascii=False, default=str)[:800]}",
         ]
         if latest_error:
             constraints.append(f"latest_error={latest_error}")

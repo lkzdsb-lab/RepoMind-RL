@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from agent_runtime.execution_queue import current_execution_item
+from agent_runtime.lifecycle.execution_queue import current_execution_item
 from model.agent.graph import AgentState
 
 FULL_READ_MAX_CHARS = 200000
@@ -32,7 +32,7 @@ def collect_active_queries(state: AgentState) -> list[str]:
                 _append_query(queries, partial_args.get(key))
 
     for plan_like in (
-        state.get("debug_technical_plan"),
+        state.get("technical_plan"),
         state.get("plan_mode_evaluation"),
     ):
         _append_query(queries, plan_like)

@@ -1,10 +1,5 @@
-Return JSON with keys: latest_tool, status, summary, new_findings, hypotheses, invalidated_hypotheses, facts, risks, next_actions, memory_candidates, missing_context, next_search_terms, confidence, user_update.
-status must be one of ok, error, inconclusive, complete.
-status=complete is only an observation for later review; final task termination is decided by completion_judgement.
-Use short list fields. If uncertain, use empty lists instead of guessing.
-facts should capture stable information useful for future actions.
-memory_candidates should expose potential memory entries only; do not assume they will be written.
-user_update should be a short user-facing progress message when useful, or an empty string. Do not reveal chain-of-thought.
+# Observation Scope
+
 Focus on the latest delta first. Do not re-open the whole task unless observation_mode is full or the latest delta clearly invalidates the current execution plan.
 If the latest action only confirms an already-known fact, return minimal output and avoid inventing new next_actions.
 When current_execution is present, keep the observation scoped to that execution item. Do not redirect unrelated files or rewrite the overall plan.
@@ -25,3 +20,15 @@ latest_tool_call={{ latest_tool_call }}
 observation_delta={{ observation_delta }}
 current_execution={{ current_execution }}
 recent_observations={{ recent_observations }}
+read_file_context={{ read_file_context }}
+
+# Output Schema
+
+Return JSON with keys: latest_tool, status, summary, new_findings, hypotheses, invalidated_hypotheses, facts, risks, next_actions, memory_candidates, missing_context, next_search_terms, confidence, user_update.
+status must be one of ok, error, inconclusive, complete.
+status=complete is only an observation for later review; final task termination is decided by completion_judgement.
+Use short list fields. If uncertain, use empty lists instead of guessing.
+facts should capture stable information useful for future actions.
+memory_candidates should expose potential memory entries only; do not assume they will be written.
+When concrete failures or findings exist, user_update should report the useful evidence rather than only a finding count. Include relevant file paths or line numbers, observed behavior, and whether the root cause is confirmed or still being investigated. Use concise line-separated bullets when there are multiple findings.
+user_update may be empty when there is no meaningful progress to report. Do not reveal chain-of-thought.

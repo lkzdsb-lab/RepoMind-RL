@@ -20,11 +20,11 @@ from tools.code_tools.search_text import search_text
 from tools.git_tools.diff import git_diff
 from tools.plan_tools.mode import enter_plan_mode, exit_plan_mode
 from tools.shell_tools.command import run_shell_command
-from agent_runtime.execution_queue import (
+from agent_runtime.lifecycle.execution_queue import (
     advance_execution_queue_for_patch,
     advance_execution_queue_for_verification,
+    validate_execution_queue,
 )
-from agent_runtime.verification import infer_lightweight_verification_command
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -380,6 +380,7 @@ def reduce_run_tests_output(
     if output.get("exit_code") == 0:
         updates["verification_stale"] = False
         updates["last_verified_edit_loop"] = state.get("loop_count", 0)
+        updates["execution_queue"] = advance_execution_queue_for_verification(state)
     return updates
 
 
@@ -531,7 +532,7 @@ def reduce_apply_code_patch_output(
             updates["change_events"] = state.get("change_events", []) + [change_event]
     if output.get("applied"):
         updates["status"] = "patching"
-        updates["verification_stale"] = True
+        updates["verification_stale"] = bool(state.get("verification_required", True))
         updates["last_edit_at_loop"] = state.get("loop_count", 0)
         changed_files = {
             str(path).strip()
@@ -614,7 +615,7 @@ def reduce_enter_plan_mode_output(
         "plan_mode": True,
         "plan_mode_entered": True,
         "plan_mode_approved": False,
-        "debug_technical_plan": output.get("technical_plan", ""),
+        "technical_plan": output.get("technical_plan", ""),
         "plan_verification_commands": output.get("verification_commands", []),
         "plan_mode_events": events,
         "status": "planning",
@@ -666,7 +667,7 @@ def _build_execution_queue(
     plan_text = "\n".join(
         part
         for part in (
-            str(state.get("debug_technical_plan") or ""),
+            str(state.get("technical_plan") or ""),
             str(output.get("evaluation") or ""),
             str(output.get("next_step") or ""),
         )
@@ -695,43 +696,68 @@ def _build_execution_queue(
             lowered = path.lower()
             if lowered.endswith((".py", ".go", ".ts", ".tsx", ".js", ".jsx", ".java", ".rb")):
                 patch_targets.append(path)
-    queue: list[Dict[str, Any]] = [
-        {"kind": "patch", "target_files": [path], "status": "pending"}
-        for path in patch_targets[:6]
+    contract = state.get("goal_contract") if isinstance(state.get("goal_contract"), dict) else {}
+    ledger = state.get("progress_ledger") if isinstance(state.get("progress_ledger"), dict) else {}
+    progress = ledger.get("criteria") if isinstance(ledger.get("criteria"), dict) else {}
+    # 获取还没有实现的 criteria
+    criteria = [
+        item
+        for item in contract.get("criteria", []) or []
+        if isinstance(item, dict)
+        and bool(item.get("required", True))
+        and not _criterion_progress_passed(progress, str(item.get("id") or ""))
     ]
-    verification_commands = _planned_verification_commands(state)
-    if bool(state.get("verification_required", True)) or verification_commands:
+    queue: list[Dict[str, Any]] = []
+    assigned_targets: set[str] = set()
+    implement_criteria = [item for item in criteria if item.get("kind") == "implement"]
+    # 添加相应的 patch 任务
+    for criterion_index, criterion in enumerate(implement_criteria):
+        criterion_id = str(criterion.get("id") or "")
+        description = str(criterion.get("description") or "")
+        targets = [
+            path
+            for path in patch_targets
+            if path in description and path not in assigned_targets
+        ]
+        if not targets and criterion_index == 0:
+            targets = [path for path in patch_targets if path not in assigned_targets]
+        for target_index, path in enumerate(targets[:6]):
+            assigned_targets.add(path)
+            queue.append(
+                {
+                    "id": f"{criterion_id}:patch:{target_index + 1}",
+                    "criterion_id": criterion_id,
+                    "kind": "patch",
+                    "required_capability": "patch",
+                    "required": True,
+                    "target_files": [path],
+                    "commands": [],
+                    "status": "pending",
+                }
+            )
+    # 生成 verify item
+    for criterion in criteria:
+        if criterion.get("kind") != "verify":
+            continue
+        criterion_id = str(criterion.get("id") or "")
         queue.append(
             {
+                "id": f"{criterion_id}:verify",
+                "criterion_id": criterion_id,
                 "kind": "verify",
+                "required_capability": "verification",
+                "required": True,
                 "target_files": patch_targets[:],
-                "commands": verification_commands,
+                "commands": [],
                 "status": "pending",
             }
         )
-    return queue
+    return validate_execution_queue(queue)
 
 
-def _planned_verification_commands(state: Dict[str, Any]) -> list[str]:
-    commands: list[str] = []
-    for item in state.get("plan_verification_commands", []) or []:
-        command = str(item or "").strip()
-        if command and command not in commands:
-            commands.append(command)
-    if commands:
-        return commands[:5]
-    for event in reversed(state.get("plan_mode_events", []) or []):
-        if not isinstance(event, dict):
-            continue
-        if str(event.get("tool") or "") != "EnterPlanMode":
-            continue
-        for item in event.get("verification_commands", []) or []:
-            command = str(item or "").strip()
-            if command and command not in commands:
-                commands.append(command)
-        if commands:
-            break
-    return commands[:5]
+def _criterion_progress_passed(progress: Dict[str, Any], criterion_id: str) -> bool:
+    entry = progress.get(criterion_id)
+    return isinstance(entry, dict) and entry.get("status") in {"passed", "not_required"}
 
 
 def _extract_files_from_search(matches: list[str]) -> list[str]:
@@ -1051,10 +1077,10 @@ class ToolRegistry:
                 runner=lambda repo, args: run_shell_command(
                     repo,
                     {
-                        "command": str(args.get("command") or infer_lightweight_verification_command(repo)),
+                        "command": str(args.get("command") or ""),
                         "purpose": "verification",
                         "timeout": int(args.get("timeout", 120)),
-                        "reason": str(args.get("reason", "configured verification command")),
+                        "reason": str(args.get("reason", "LLM-selected verification command")),
                         "allow_shell": False,
                     },
                 ),

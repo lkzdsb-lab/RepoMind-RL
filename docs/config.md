@@ -9,11 +9,9 @@ are still supported, but only explicitly provided flags override the file.
 `llm` at the root is only the default LLM config. It does not mean every LLM
 module is enabled.
 
-Whether the agent should run `verify_command` is not a config switch. When
-`modes.task_analyzer` is `llm`, the task analyzer returns
-`verification_required`; the action policy only offers `run_tests` when that
-LLM decision is true. If task analysis is disabled, verification defaults to
-required.
+Verification commands are not configured in `config.json`. The agent derives
+verification capabilities from the project, lets the LLM choose an allowed
+command, and validates the command through the runtime guard before execution.
 
 Each module is enabled by `modes`. If a mode is `disabled`, that module will not
 call the LLM even when the root `llm` provider/model/key are configured.

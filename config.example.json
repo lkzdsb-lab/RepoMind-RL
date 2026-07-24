@@ -5,7 +5,6 @@
     "description": ""
   },
   "repo_path": ".",
-  "verify_command": "",
   "max_loops": 8,
   "env_file": ".env",
   "env_override": false,
