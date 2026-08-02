@@ -45,6 +45,7 @@ def run_shell_command(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
     allow_shell = bool(args.get("allow_shell", False))
     timeout = max(1, min(int(_safe_int(args.get("timeout"), 120)), 1800))
     purpose = _clean_purpose(args.get("purpose"))
+    verification_kind = _clean_verification_kind(args.get("verification_kind"))
     reason = str(args.get("reason") or "").strip()[:500]
 
     denied = _deny_reason(command, allow_shell=allow_shell)
@@ -54,6 +55,7 @@ def run_shell_command(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
             "needs_more_context": True,
             "command": command,
             "purpose": purpose,
+            "verification_kind": verification_kind,
             "exit_code": -1,
         }
 
@@ -86,6 +88,7 @@ def run_shell_command(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "command": command,
             "purpose": purpose,
+            "verification_kind": verification_kind,
             "reason": reason,
             "exit_code": -1,
             "stdout": _tail(exc.stdout or "", 6000),
@@ -98,6 +101,7 @@ def run_shell_command(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "command": command,
             "purpose": purpose,
+            "verification_kind": verification_kind,
             "reason": reason,
             "exit_code": -1,
             "stdout": "",
@@ -110,6 +114,7 @@ def run_shell_command(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "command": command,
         "purpose": purpose,
+        "verification_kind": verification_kind,
         "reason": reason,
         "exit_code": result.returncode,
         "stdout": _tail(result.stdout, 6000),
@@ -155,6 +160,11 @@ def _clean_purpose(value: Any) -> str:
     if purpose not in {"verification", "diagnostic", "search", "build"}:
         return "diagnostic"
     return purpose
+
+
+def _clean_verification_kind(value: Any) -> str:
+    kind = str(value or "standard").strip().lower()
+    return kind if kind in {"standard", "smoke"} else "standard"
 
 
 def _safe_int(value: Any, default: int) -> int:

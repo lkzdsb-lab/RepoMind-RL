@@ -42,8 +42,9 @@ def run_tool_spec(
     args: Dict[str, Any] | None = None,
     *,
     allowed_permissions: Iterable[str] | None = None,
+    runtime_context: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    """Validate, authorize, execute, and normalize one tool call."""
+    """Validate user-facing args, then execute with trusted runtime context."""
     raw_args = args or {}
     permission_error = _permission_error(spec, allowed_permissions)
     if permission_error:
@@ -53,7 +54,10 @@ def run_tool_spec(
     if validation_error:
         return normalize_tool_result(validation_error, tool_name=spec.name)
 
-    output = spec.runner(repo_path, validated_args)
+    execution_args = dict(validated_args)
+    if runtime_context:
+        execution_args["_runtime_context"] = dict(runtime_context)
+    output = spec.runner(repo_path, execution_args)
     if not isinstance(output, dict):
         output = {"result": output}
     return normalize_tool_result(output, tool_name=spec.name)

@@ -4,16 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent_runtime.lifecycle.execution_queue import current_execution_item
 from agent_runtime.search_query import SearchQueryPlanner
 from agent_runtime.verification.capabilities import recommended_verification_command
-from ext.file_requirements import (
-    choose_read_file_target,
-    full_read_requirements,
-    is_full_read,
-    recommended_read_file_args,
-)
-from ext.focus_files import edited_files_needing_reread, execution_target_files
 from ext.plan_mode_args import (
     build_enter_plan_mode_args,
     build_exit_plan_mode_args,
@@ -21,7 +13,7 @@ from ext.plan_mode_args import (
 )
 from model.agent.actions import Action, ActionSpec
 from model.agent.graph import AgentState
-from utils import _as_bool, _clamp_float, _clean_string_list
+from utils import _as_bool, _clean_string_list, _is_informative_query
 
 
 class ActionFactory:
@@ -38,11 +30,11 @@ class ActionFactory:
         proposed_args: dict[str, Any] | None = None,
         resolved_args: dict[str, Any] | None = None,
         reason: str = "",
-        confidence: Any = None,
         uncertainty_questions: Any = None,
         thought: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> Action:
+        """ 根据上下文构建参数正确的 action"""
         if resolved_args is not None:
             args = resolved_args
         else:
@@ -55,7 +47,6 @@ class ActionFactory:
                 proposed_args=proposed_args,
                 default_args=default_args,
                 reason=reason,
-                confidence=confidence,
                 uncertainty_questions=uncertainty_questions,
             )
         return self.create(
@@ -84,7 +75,6 @@ class ActionFactory:
         proposed_args: dict[str, Any],
         default_args: dict[str, Any] | None = None,
         reason: str = "",
-        confidence: Any = None,
         uncertainty_questions: Any = None,
     ) -> dict[str, Any]:
         """ 根据 action 提取需要的参数"""
@@ -95,14 +85,7 @@ class ActionFactory:
         if action_name == "apply_code_patch":
             return {
                 "changes": raw_input.get("changes", []),
-                "reason": str(raw_input.get("reason") or reason or "").strip(),
-                "confidence": _clamp_float(confidence, 0.5, "invalid confidence from LLM"),
                 "assumptions": _clean_string_list(raw_input.get("assumptions"), -1, 500),
-                "uncertainty_questions": _clean_string_list(
-                    raw_input.get("uncertainty_questions") or uncertainty_questions,
-                    -1,
-                    500,
-                ),
                 "dry_run": bool(raw_input.get("dry_run", False)),
             }
         if action_name == "request_user_input":
@@ -116,37 +99,37 @@ class ActionFactory:
                 "questions": questions[:3],
             }
         if action_name == "read_file":
-            requested_path = str(
-                raw_input.get("file_path") or defaults.get("file_path") or ""
-            ).strip()
+            requested_path = str(raw_input.get("file_path") or "").strip()
             file_path = self._normalize_read_file_target(
                 state,
                 requested_path=requested_path,
-                default_path=str(defaults.get("file_path") or "").strip(),
+                default_path="",
             )
-            recommended = recommended_read_file_args(
-                state,
-                file_path,
-                requested_max_chars=raw_input.get("max_chars", defaults.get("max_chars", 8000)),
-                default_max_chars=int(defaults.get("max_chars", 8000) or 8000),
-            )
+            max_chars = raw_input.get("max_chars", defaults.get("max_chars", 8000))
             return {
                 "file_path": file_path,
                 "max_chars": _bounded_int(
-                    recommended.get("max_chars"),
-                    default=int(recommended.get("max_chars") or 8000),
+                    max_chars,
+                    default=int(defaults.get("max_chars", 8000) or 8000),
                     minimum=1,
                     maximum=200000,
                 ),
                 "start_line": _optional_bounded_int(raw_input.get("start_line"), minimum=1),
                 "end_line": _optional_bounded_int(raw_input.get("end_line"), minimum=1),
             }
+        if action_name == "search_code_context":
+            return {
+                "query": str(raw_input.get("query") or "").strip(),
+                "max_results": _bounded_int(
+                    raw_input.get("max_results", 10),
+                    default=10,
+                    minimum=1,
+                    maximum=100,
+                ),
+            }
         if action_name == "search_text":
             pattern = str(
                 raw_input.get("pattern")
-                or raw_input.get("query")
-                or defaults.get("pattern")
-                or defaults.get("query")
                 or ""
             ).strip()
             return {
@@ -168,10 +151,24 @@ class ActionFactory:
                     maximum=200,
                 ),
             }
+        if action_name == "run_tests":
+            return {
+                "command": str(raw_input.get("command") or "").strip(),
+                "timeout": _bounded_int(
+                    raw_input.get("timeout", 120),
+                    default=120,
+                    minimum=1,
+                    maximum=1800,
+                ),
+            }
         if action_name == "run_shell_command":
             return {
-                "command": str(raw_input.get("command") or defaults.get("command") or "").strip(),
+                "command": str(raw_input.get("command") or "").strip(),
                 "purpose": _clean_purpose(raw_input.get("purpose") or defaults.get("purpose")),
+                "verification_kind": _clean_verification_kind(
+                    raw_input.get("verification_kind")
+                    or defaults.get("verification_kind")
+                ),
                 "timeout": _bounded_int(
                     raw_input.get("timeout", defaults.get("timeout", 120)),
                     default=120,
@@ -223,6 +220,18 @@ class ActionFactory:
             }
         return defaults
 
+    def invalid_args(self, action_name: str, action_args: dict[str, Any]) -> list[str]:
+        invalid: list[str] = []
+        if action_name == "search_code_context" and not _is_informative_query(
+            action_args.get("query")
+        ):
+            invalid.append("query must contain a searchable word, identifier, filename, or number")
+        if action_name == "search_text" and not _is_informative_query(
+            action_args.get("pattern")
+        ):
+            invalid.append("pattern must contain searchable content, not punctuation alone")
+        return invalid
+
     def default_args(self, spec: ActionSpec, state: AgentState) -> dict[str, Any]:
         action_name = spec.name
         if action_name == "search_code_context":
@@ -230,8 +239,12 @@ class ActionFactory:
             return {"query": query_plan.query, "query_plan": query_plan.to_dict()}
         if action_name == "read_file":
             file_path = self._default_read_file_target(state)
-            read_args = recommended_read_file_args(state, file_path)
-            return {"file_path": file_path, "max_chars": read_args["max_chars"]}
+            return {
+                "file_path": file_path,
+                "max_chars": 8000,
+                "start_line": None,
+                "end_line": None,
+            }
         if action_name == "run_tests":
             return {"command": recommended_verification_command(state)}
         if action_name == "search_text":
@@ -247,6 +260,7 @@ class ActionFactory:
             return {
                 "command": self._default_execution_command(state),
                 "purpose": "verification",
+                "verification_kind": "standard",
                 "timeout": 120,
                 "reason": "Verify the latest code changes before finishing.",
                 "allow_shell": False,
@@ -301,40 +315,24 @@ class ActionFactory:
             "apply_code_patch": "Policy selected a guarded code patch.",
             "request_user_input": "Policy selected a clarification request.",
             "git_diff": "Policy selected current diff inspection.",
-            "write_memory": "Policy selected reward-gated memory write.",
             "finish": "Policy selected task completion.",
         }.get(action_name, f"Policy selected `{action_name}`.")
 
     def _default_read_file_target(self, state: AgentState) -> str:
-        execution_targets = execution_target_files(state)
-        reread = edited_files_needing_reread(state)
-        if execution_targets:
-            reread = [path for path in reread if path in execution_targets]
-        required_full_reads = [
-            str(item.get("file_path") or "").strip()
-            for item in full_read_requirements(
-                state,
-                candidate_files=execution_targets or list(state.get("candidate_files", [])),
-            )
-            if str(item.get("file_path") or "").strip()
+        candidates = [
+            str(path).strip()
+            for path in state.get("candidate_files", []) or []
+            if str(path).strip()
         ]
         unread = [
             path
-            for path in (execution_targets or list(state.get("candidate_files", [])))
+            for path in candidates
             if path not in _state_read_files(state)
         ]
-        targets = reread or required_full_reads or unread or list(state.get("edited_files", []) or [])
-        if not targets:
-            targets = execution_targets or list(state.get("candidate_files", []) or [])
-        return choose_read_file_target(state, default_path=targets[0] if targets else "")
+        targets = unread or list(state.get("edited_files", []) or []) or candidates
+        return str(targets[0]).strip() if targets else ""
 
     def _default_execution_command(self, state: AgentState) -> str:
-        item = current_execution_item(state)
-        if isinstance(item, dict):
-            for command in item.get("commands", []) or []:
-                text = str(command or "").strip()
-                if text:
-                    return text
         return recommended_verification_command(state)
 
     def _normalize_read_file_target(
@@ -350,43 +348,6 @@ class ActionFactory:
             if recovery_file:
                 return recovery_file
 
-        required_target = choose_read_file_target(
-            state,
-            requested_path=requested_path,
-            default_path=default_path,
-        )
-        if required_target and not is_full_read(state, required_target):
-            return required_target
-
-        targets = execution_target_files(state)
-        if targets:
-            if requested_path in targets:
-                return requested_path
-            if default_path in targets:
-                return default_path
-
-        reread = edited_files_needing_reread(state)
-        if reread:
-            if requested_path in reread:
-                return requested_path
-            if default_path in reread:
-                return default_path
-            return reread[0]
-
-        candidates = [
-            str(path).strip()
-            for path in state.get("candidate_files", []) or []
-            if str(path).strip()
-        ]
-        unread = [path for path in candidates if path not in _state_read_files(state)]
-        if unread:
-            scoped = [path for path in unread if path in targets] if targets else []
-            choices = scoped or unread
-            if requested_path in choices:
-                return requested_path
-            if default_path in choices:
-                return default_path
-            return choices[0]
         return requested_path or default_path
 
 
@@ -405,7 +366,13 @@ def _required_action_fields(state: AgentState, action_name: str) -> list[str]:
 def _state_read_files(state: AgentState) -> set[str]:
     cache = state.get("read_file_cache")
     if isinstance(cache, dict) and cache:
-        return {str(path).strip() for path in cache if str(path).strip()}
+        return {
+            str(path).strip()
+            for path, snapshot in cache.items()
+            if str(path).strip()
+            and isinstance(snapshot, dict)
+            and (snapshot.get("spans") or snapshot.get("is_empty"))
+        }
     files: set[str] = set()
     for observation in state.get("observations", []):
         if not isinstance(observation, dict):
@@ -448,3 +415,8 @@ def _optional_bounded_int(
 def _clean_purpose(value: Any) -> str:
     purpose = str(value or "diagnostic").strip().lower()
     return purpose if purpose in {"verification", "diagnostic", "search", "build"} else "diagnostic"
+
+
+def _clean_verification_kind(value: Any) -> str:
+    kind = str(value or "standard").strip().lower()
+    return kind if kind in {"standard", "smoke"} else "standard"

@@ -1,3 +1,4 @@
+import hashlib
 import os
 from pathlib import Path
 from typing import Any, Dict, List
@@ -54,7 +55,8 @@ def read_file(
     if start_line is not None and end_line is not None and end_line < start_line:
         return {"error": "end_line must be greater than or equal to start_line."}
 
-    content = target.read_text(encoding="utf-8", errors="ignore")
+    raw = target.read_bytes()
+    content = raw.decode("utf-8", errors="ignore")
     lines = content.splitlines(keepends=True)
     total_lines = len(lines)
     selected_start = start_line or 1
@@ -69,12 +71,16 @@ def read_file(
 
     truncated = len(selected) > max_chars
     selected = selected[:max_chars]
+    selected_line_count = len(selected.splitlines())
+    actual_end = selected_start + max(0, selected_line_count - 1)
     return {
         "file_path": file_path,
         "content": selected,
         "truncated": truncated,
         "start_line": selected_start,
-        "end_line": selected_end,
+        "end_line": actual_end if selected else selected_start,
+        "requested_end_line": selected_end,
         "total_lines": total_lines,
         "line_range_requested": start_line is not None or end_line is not None,
+        "file_revision": hashlib.sha256(raw).hexdigest(),
     }

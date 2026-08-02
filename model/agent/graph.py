@@ -33,6 +33,7 @@ class TrajectoryStep(TypedDict, total=False):
 # 记录 agent 活动状态格式
 class AgentState(TypedDict, total=False):
     task_id: str  # 后续考虑是否添加 trace id 跟踪任务流程
+    session_id: str
     task_type: Literal["BUG_FIX", "FEATURE_IMPL", "DIAGNOSE"]
     title: str
     description: str
@@ -43,9 +44,9 @@ class AgentState(TypedDict, total=False):
     verification_required: bool
     verification_reason: str
     verification_capabilities: Dict[str, Any]
-    goal_contract: Dict[str, Any]
-    progress_ledger: Dict[str, Any]
-    next_obligation: Dict[str, Any]
+    task_brief: Dict[str, Any]
+    work_plan: Dict[str, Any]
+    runtime_facts: Dict[str, Any]
     task_analysis: Dict[str, Any]
     selected_skills: list[str]
     skill_selection: Dict[str, Any]
@@ -62,6 +63,8 @@ class AgentState(TypedDict, total=False):
     # todo 考虑使用本地缓存实现
     read_file_cache: Dict[str, Dict[str, Any]]
     read_file_order: List[str]
+    file_cache_access_seq: int
+    file_cache_last_touch_loop: int
     code_context: Dict[str, Any]
     selected_code_context: Dict[str, Any]
     code_context_query_plan: Dict[str, Any]
@@ -84,6 +87,7 @@ class AgentState(TypedDict, total=False):
 
     # 需要用户补充信息时的暂停/恢复状态
     completion_judgement: Dict[str, Any]
+    draft_findings: List[Dict[str, Any]]
     pending_user_questions: List[str]
     needs_user_input_reason: str
     completion_judge_continue_count: int
@@ -92,11 +96,8 @@ class AgentState(TypedDict, total=False):
     pending_step_approval: Dict[str, Any]
     step_approval_history: List[Dict[str, Any]]
 
-    # 查询过的记忆记录
-    retrieved_memories: Dict[str, Any]
-    selected_memories: Dict[str, Any]
-    memory_query_plan: Dict[str, Any]
-    memory_rerank: Dict[str, Any]
+    # 会话级记忆在任务分析前准备，不参与在线晋升。
+    session_memory: Dict[str, Any]
     memory_context: str
 
     # 上下文压缩
@@ -111,13 +112,6 @@ class AgentState(TypedDict, total=False):
     context_sections: Dict[str, List[str]]
     memory_candidates: List[Dict[str, Any]]
     attention_focus: Dict[str, Any]
-
-    # 记忆持久话相关
-    short_term_memories: List[Dict[str, Any]]
-    promoted_memories: List[Dict[str, Any]]
-    consolidated_skills: List[Dict[str, Any]]
-    memory_written: bool
-    """ 是否已经写过 memory 标记"""
 
     # rl 模块相关
     rl_enabled: bool
@@ -134,8 +128,6 @@ class AgentState(TypedDict, total=False):
     plan_verification_commands: List[str]
     plan_mode_evaluation: str
     plan_mode_events: List[Dict[str, Any]]
-    execution_queue: List[Dict[str, Any]]
-    """ plan 后的执行队列"""
     editing_enabled: bool
     editing_config: Dict[str, Any]
     edit_results: List[Dict[str, Any]]

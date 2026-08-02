@@ -12,7 +12,7 @@ from config import LLMConfig
 from model.agent.graph import AgentState
 from model.llm import CodeContextQueryPlanResponse, CodeContextRerankResponse
 from prompts.templates import load_prompt, render_prompt
-from utils import _truncate_text, _clamp_float
+from utils import _clamp_float, _is_informative_query, _truncate_text
 from agent_runtime.codebase_context.models import CodeContextRerankDecision, CodeContextQueryPlan
 
 
@@ -119,9 +119,12 @@ class LLMCodeContextQueryPlanner:
         if not isinstance(raw_queries, list):
             raise ValueError("code context query planner response missing queries list")
         queries: list[str] = []
+        default_query = " ".join(str(context.get("default_query") or "").split())
+        if _is_informative_query(default_query):
+            queries.append(default_query[:300])
         for item in raw_queries:
             query = " ".join(str(item).split())
-            if query and query not in queries:
+            if _is_informative_query(query) and query not in queries:
                 queries.append(query[:300])
             if len(queries) >= max_queries:
                 break

@@ -15,6 +15,7 @@ default_query={{ default_query }}
 
 Generate up to {{ max_queries }} codebase context search queries.
 Start from the default query when useful, then expand into focused route, handler, service, repository, model, interface, or test queries supported by the task.
+Every query must contain searchable words, identifiers, filenames, or numbers. Never return punctuation-only placeholders such as ":".
 Do not infer a programming language from generic words such as "main", "app", "server", or "index".
 For an unspecified main function or file, begin with language-neutral queries and filenames supported by repository evidence.
 Use project_profile as the primary language evidence. Generate language-specific queries only when the user, project_profile, task_analysis, skill_context, or repository candidates provide concrete support.

@@ -24,13 +24,15 @@ class DisabledTaskAnalyzer:
 
     def analyze(self, state: AgentState) -> dict[str, Any]:
         return {
+            "intent": "diagnose",
             "task_type": state.get("task_type", "BUG_FIX"),
             "task_category": "",
             "entities": [],
             "acceptance_criteria": [],
-            "completion_criteria": [],
             "risk_notes": [],
+            "review_focus": [],
             "search_hints": [],
+            "historical_context": [],
             "source": "disabled",
         }
 
@@ -56,6 +58,11 @@ class LLMTaskAnalyzer:
 
 
 def _task_analysis_prompt(state: AgentState, context: dict[str, Any]) -> str:
+    session_memory = state.get("session_memory", {})
+    if isinstance(session_memory, dict):
+        session_memory = {
+            key: value for key, value in session_memory.items() if key != "rendered"
+        }
     return render_prompt(
         "user/task_analyzer.md",
         title=state.get("title", ""),
@@ -63,4 +70,5 @@ def _task_analysis_prompt(state: AgentState, context: dict[str, Any]) -> str:
         current_task_type=state.get("task_type", ""),
         project_profile=json.dumps(state.get("project_profile", {}), ensure_ascii=False),
         registry_snapshot=json.dumps(state.get("registry_snapshot", {}), ensure_ascii=False),
+        session_memory=json.dumps(session_memory, ensure_ascii=False),
     )

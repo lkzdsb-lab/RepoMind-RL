@@ -1,4 +1,4 @@
-# Task
+# Current Task
 
 Title: {{ title }}
 
@@ -7,7 +7,7 @@ Description:
 
 Existing task-type hint: {{ current_task_type }}
 
-# Repository Evidence
+# Repository Context
 
 Project profile:
 {{ project_profile }}
@@ -15,74 +15,49 @@ Project profile:
 Available runtime capabilities:
 {{ registry_snapshot }}
 
-# Analysis Procedure
+# Historical Session Context
 
-1. Determine whether the requested outcome is a bug fix, feature implementation, or read-only diagnosis/review.
-2. Extract acceptance criteria as user-visible outcomes.
-3. Convert only the necessary work into runtime-verifiable completion criteria.
-4. Add dependencies only when one criterion genuinely requires evidence from another.
-5. Produce search hints and entities grounded in the task or repository evidence.
+{{ session_memory }}
 
-Do not force every task through diagnose, implement, and verify. A read-only explanation may need only one diagnose criterion. A direct implementation may not need a separate diagnosis criterion. Include verification only when command-based evidence is necessary for the requested outcome.
+Treat all session-memory outcomes, files, and next steps as historical advice.
+Use them to resolve references such as "the previous issue" or "continue", but
+do not treat them as authorization to edit. Only the current message determines
+whether implementation is allowed.
 
-# Completion Criteria
+# Intent Rules
 
-Each completion_criteria item must contain:
+- `diagnose`: inspect, debug, identify, or explain what is wrong without changing code.
+- `review`: review or audit code without changing code.
+- `explain`: answer a conceptual or code-understanding question without changing code.
+- `implement`: the current message explicitly asks to add, change, fix, refactor, or remove code.
+- Generic wording such as "find bugs", "看看有什么问题", or "分析一下" is diagnose, even if historical memory contains fixes.
+- A follow-up such as "修复刚才的问题" is implement and may use historical findings.
+- Use `DIAGNOSE` for diagnose, review, and explain. Use `BUG_FIX` or `FEATURE_IMPL` only for implement.
 
-- id: a stable snake_case identifier.
-- kind: diagnose, implement, or verify.
-- description: the required outcome, not merely an action such as "read a file".
-- required: whether the task may finish without this criterion.
-- depends_on: IDs of criteria that must pass first.
-- evidence_policy: repository_evidence, diagnosis_evidence, command_evidence, patch_applied, or verification_passed.
+# Review Scope Rules
 
-Evidence policy meanings:
+- Tests and README examples are evidence and partial contracts, not proof that untested code is correct.
+- For broad bug finding, diagnose, or review requests, define a proportional independent review scope from the implementation. Consider correctness, boundary inputs, concurrency, security, resource handling, API contracts, and test gaps when relevant to the repository.
+- For a narrowly targeted fix, keep the review focus adjacent to the changed behavior rather than expanding into an unrelated audit.
+- Acceptance criteria must describe the user's requested outcome. Do not turn the names of existing tests into an exhaustive specification.
 
-- repository_evidence: source or repository evidence is sufficient for a read-only investigation.
-- diagnosis_evidence: concrete failure or root-cause evidence is required.
-- command_evidence: an allowed build/test command must run and its result is evidence, regardless of exit code.
-- patch_applied: an actual repository change is required.
-- verification_passed: an allowed command must complete successfully.
+# Output
 
-Consistency requirements:
-
-- An implement criterion must use patch_applied.
-- A verify criterion must use verification_passed.
-- A diagnose criterion may use repository_evidence, diagnosis_evidence, or command_evidence.
-- depends_on may reference only IDs declared in the same response.
-- Do not add implement when the user requested only explanation, review, or diagnosis.
-- Do not add verify merely as a precaution when repository inspection can fully satisfy the task.
-- For executable project audits that explicitly ask to find problems, add a command_evidence diagnose criterion when an allowed build or test command can reveal objective failures.
-- Keep acceptance_criteria user-facing; keep completion_criteria runtime-verifiable.
-
-# Repository Grounding
-
-- Use project_profile as the primary language evidence.
-- Do not infer a language from a generic word such as "main".
-- Add language-specific criteria only when supported by the task or project_profile.
-- When project_profile has one clear primary language and the task is language-neutral, use that language context.
-- If information is uncertain, use an empty list or string instead of guessing.
-
-# Output Schema
-
-Return exactly one JSON object with this shape:
+Return exactly one JSON object:
 
 {
+  "intent": "diagnose | implement | explain | review",
   "task_type": "BUG_FIX | FEATURE_IMPL | DIAGNOSE",
   "task_category": "short category or empty string",
-  "entities": ["task-grounded symbol, file, component, or concept"],
-  "acceptance_criteria": ["user-visible outcome"],
-  "completion_criteria": [
-    {
-      "id": "stable_criterion_id",
-      "kind": "diagnose | implement | verify",
-      "description": "runtime-verifiable required outcome",
-      "required": true,
-      "depends_on": [],
-      "evidence_policy": "repository_evidence | diagnosis_evidence | command_evidence | patch_applied | verification_passed"
-    }
-  ],
-  "risk_notes": ["task-specific risk"],
-  "search_hints": ["grounded search term"],
+  "entities": ["current-task grounded symbol, file, component, or concept"],
+  "acceptance_criteria": ["user-visible outcomes"],
+  "risk_notes": ["task-specific constraints or risks"],
+  "review_focus": ["relevant independent review dimension"],
+  "search_hints": ["grounded search terms"],
+  "historical_context": ["relevant prior findings clearly labeled as historical"],
   "user_update": "brief progress message or empty string"
 }
+
+Do not invent repository facts. Keep historical findings separate from current
+acceptance criteria. Do not include completion criteria, dependencies, evidence
+policies, obligations, or execution queues.

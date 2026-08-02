@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from agent_runtime.llm.llm_nodes import LLMJsonNode
-from ext.tool_summaries import read_file_summaries, tool_call_summaries
+from ext.tool_summaries import (
+    candidate_evidence_packets,
+    read_file_summaries,
+    tool_call_summaries,
+)
 from config import LLMConfig
 from model.agent.graph import AgentState
 from model.llm import CompletionJudgeResponse
@@ -22,14 +26,16 @@ class CompletionJudge(Protocol):
 
 @dataclass
 class RuleBasedCompletionJudge:
-    """Deterministic fallback that preserves the historical finish behavior."""
+    """Conservative fallback that never claims semantic completion."""
 
     def judge(self, state: AgentState) -> dict[str, Any]:
         return {
-            "decision": "complete",
-            "reason": "Rule-based completion judge preserves existing finish behavior.",
+            "decision": "continue",
+            "reason": "Semantic completion could not be evaluated by the configured LLM.",
             "questions": [],
-            "suggested_next_action": "",
+            "suggested_next_action": "read_file",
+            "reviewed_findings": [],
+            "missing_evidence": [],
             "confidence": 0.5,
             "source": "rule_based",
         }
@@ -76,14 +82,27 @@ def _completion_judge_prompt(state: AgentState, context: dict[str, Any]) -> str:
             ensure_ascii=False,
             default=str,
         ),
+        step_approval_history=json.dumps(
+            state.get("step_approval_history", [])[-5:],
+            ensure_ascii=False,
+            default=str,
+        ),
         plan_mode=json.dumps(bool(state.get("plan_mode", False))),
         plan_mode_approved=json.dumps(bool(state.get("plan_mode_approved", False))),
         technical_plan=_truncate_text(str(state.get("technical_plan", "")), 5000),
         plan_mode_evaluation=_truncate_text(str(state.get("plan_mode_evaluation", "")), 3000),
         task_analysis=json.dumps(state.get("task_analysis", {}), ensure_ascii=False, default=str),
-        goal_contract=json.dumps(state.get("goal_contract", {}), ensure_ascii=False, default=str),
-        progress_ledger=json.dumps(state.get("progress_ledger", {}), ensure_ascii=False, default=str),
-        next_obligation=json.dumps(state.get("next_obligation", {}), ensure_ascii=False, default=str),
+        task_brief=json.dumps(state.get("task_brief", {}), ensure_ascii=False, default=str),
+        work_plan=json.dumps(state.get("work_plan", {}), ensure_ascii=False, default=str),
+        runtime_facts=json.dumps(state.get("runtime_facts", {}), ensure_ascii=False, default=str),
+        draft_findings=json.dumps(
+            state.get("draft_findings", []), ensure_ascii=False, default=str
+        ),
+        candidate_evidence_packets=json.dumps(
+            candidate_evidence_packets(state, state.get("draft_findings", [])),
+            ensure_ascii=False,
+            default=str,
+        ),
         plan=json.dumps(state.get("plan", []), ensure_ascii=False),
         candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),
         read_files=json.dumps(
@@ -120,9 +139,9 @@ def _normalize_completion_judge(
     state: AgentState,
     context: dict[str, Any],
 ) -> dict[str, Any]:
-    decision = str(data.get("decision") or "complete").strip().lower()
+    decision = str(data.get("decision") or "continue").strip().lower()
     if decision not in {"complete", "needs_user_input", "continue"}:
-        decision = "complete"
+        decision = "continue"
     questions = _clean_string_list(data.get("questions"), 3, 300)
     reason = str(data.get("reason") or "").strip()[:1000]
     suggested_next_action = str(data.get("suggested_next_action") or "").strip()[:120]
@@ -132,13 +151,74 @@ def _normalize_completion_judge(
     if decision != "needs_user_input":
         questions = []
     confidence = _safe_float(data.get("confidence"), default=0.5)
+    reviewed_findings = _normalize_reviewed_findings(
+        data.get("reviewed_findings"),
+        state.get("draft_findings", []),
+    )
+    missing_evidence = _clean_string_list(data.get("missing_evidence"), 12, 500)
+    expected_ids = {
+        str(item.get("candidate_id") or "").strip()
+        for item in state.get("draft_findings", []) or []
+        if isinstance(item, dict) and str(item.get("candidate_id") or "").strip()
+    }
+    reviewed_ids = {item["candidate_id"] for item in reviewed_findings}
+    omitted_ids = sorted(expected_ids - reviewed_ids)
+    if omitted_ids:
+        missing_evidence.extend(f"candidate not reviewed: {candidate_id}" for candidate_id in omitted_ids)
+    if omitted_ids or any(
+        item.get("verdict") == "needs_more_evidence" for item in reviewed_findings
+    ):
+        decision = "continue"
+        suggested_next_action = suggested_next_action or "read_file"
+    if decision != "needs_user_input":
+        questions = []
     return {
         "decision": decision,
         "reason": reason,
         "questions": questions,
         "suggested_next_action": suggested_next_action,
+        "reviewed_findings": reviewed_findings,
+        "missing_evidence": missing_evidence[:12],
         "confidence": max(0.0, min(1.0, confidence)),
     }
+
+
+def _normalize_reviewed_findings(
+    value: Any,
+    draft_findings: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    valid_ids = {
+        str(item.get("candidate_id") or "").strip()
+        for item in draft_findings or []
+        if isinstance(item, dict) and str(item.get("candidate_id") or "").strip()
+    }
+    reviewed: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in value[:20]:
+        if not isinstance(item, dict):
+            continue
+        candidate_id = str(item.get("candidate_id") or "").strip()
+        verdict = str(item.get("verdict") or "").strip().lower()
+        if candidate_id not in valid_ids or candidate_id in seen:
+            continue
+        if verdict not in {"confirmed", "rejected", "needs_more_evidence"}:
+            continue
+        seen.add(candidate_id)
+        reviewed.append(
+            {
+                "candidate_id": candidate_id,
+                "verdict": verdict,
+                "claim": str(item.get("claim") or "").strip()[:600],
+                "evidence_refs": _clean_string_list(item.get("evidence_refs"), 12, 240),
+                "reason": str(item.get("reason") or "").strip()[:800],
+                "recommended_next_action": str(
+                    item.get("recommended_next_action") or ""
+                ).strip()[:300],
+            }
+        )
+    return reviewed
 
 
 def _trim_observations(observations: Any) -> list[dict[str, Any]]:

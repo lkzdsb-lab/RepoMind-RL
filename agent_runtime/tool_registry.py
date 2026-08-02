@@ -11,6 +11,7 @@ from types import MappingProxyType
 from typing import Any, Dict, Literal, Mapping
 
 from config import FileConfig
+from agent_runtime.memory.file_cache import cache_after_patch, cache_read_result
 from model.agent.tools import ToolSpec, normalize_tool_result, run_tool_spec
 from tools.code_tools.code import search_code
 from tools.code_tools.context import build_codebase_context, search_code_context
@@ -20,17 +21,12 @@ from tools.code_tools.search_text import search_text
 from tools.git_tools.diff import git_diff
 from tools.plan_tools.mode import enter_plan_mode, exit_plan_mode
 from tools.shell_tools.command import run_shell_command
-from agent_runtime.lifecycle.execution_queue import (
-    advance_execution_queue_for_patch,
-    advance_execution_queue_for_verification,
-    validate_execution_queue,
-)
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class ToolInput(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
 
 class BuildCodebaseContextInput(ToolInput):
@@ -39,7 +35,7 @@ class BuildCodebaseContextInput(ToolInput):
 
 
 class SearchCodeContextInput(ToolInput):
-    query: str = ""
+    query: str = Field(min_length=1)
     limit: int | None = Field(default=None, ge=1, le=100)
     max_results: int = Field(default=10, ge=1, le=100)
     index_path: str = ".repomind/codebase_context/index.json"
@@ -60,6 +56,10 @@ class SearchTextInput(ToolInput):
     timeout: int = Field(default=20, ge=5, le=120)
 
 
+class ListFilesInput(ToolInput):
+    max_files: int = Field(default=FileConfig.MAX_READ_AMOUNT, ge=1)
+
+
 class ReadFileInput(ToolInput):
     file_path: str = Field(min_length=1)
     max_chars: int = Field(default=8000, ge=1, le=200000)
@@ -77,39 +77,17 @@ def reduce_read_file_output(
     file_path = str(output.get("file_path") or "").strip()
     if not file_path:
         return {}
-    cache = dict(state.get("read_file_cache") or {})
-    order = [
-        str(path).strip()
-        for path in state.get("read_file_order", []) or []
-        if str(path).strip()
-    ]
     content = str(output.get("content") or "")
     focus_excerpt, focus_ranges = _focused_file_excerpt(state, file_path, content)
-    snapshot = {
-        "file_path": file_path,
-        "content": content,
-        "total_lines": int(output.get("total_lines") or 0),
-        "truncated": bool(output.get("truncated", False)),
-        "start_line": output.get("start_line"),
-        "end_line": output.get("end_line"),
-        "line_range_requested": bool(output.get("line_range_requested", False)),
-        "is_empty": int(output.get("total_lines") or 0) == 0 and not bool(content),
-        "imports_excerpt": _imports_excerpt(file_path, content),
-        "focus_excerpt": focus_excerpt,
-        "focus_ranges": focus_ranges,
-        "full_read": (
-            not bool(output.get("line_range_requested", False))
-            and not bool(output.get("truncated", False))
-        ),
-    }
-    cache[file_path] = snapshot
-    if file_path in order:
-        order.remove(file_path)
-    order.append(file_path)
-    updates = {
-        "read_file_cache": cache,
-        "read_file_order": order[-50:],
-    }
+    updates = cache_read_result(
+        state,
+        output,
+        extra_fields={
+            "imports_excerpt": _imports_excerpt(file_path, content),
+            "focus_excerpt": focus_excerpt,
+            "focus_ranges": focus_ranges,
+        },
+    )
     pending_resolution = state.get("pending_resolution") or {}
     if (
         isinstance(pending_resolution, dict)
@@ -255,13 +233,14 @@ def _focus_ranges_from_code_context(
 class RunShellCommandInput(ToolInput):
     command: str = Field(min_length=1)
     purpose: Literal["verification", "diagnostic", "search", "build"] = "diagnostic"
+    verification_kind: Literal["standard", "smoke"] = "standard"
     timeout: int = Field(default=120, ge=1, le=1800)
     reason: str = ""
     allow_shell: bool = False
 
 
 class RunTestsInput(ToolInput):
-    command: str = ""
+    command: str = Field(min_length=1)
     timeout: int = Field(default=120, ge=1, le=1800)
 
 
@@ -275,15 +254,12 @@ class ApplyCodePatchChangeInput(ToolInput):
 
 class ApplyCodePatchInput(ToolInput):
     changes: list[ApplyCodePatchChangeInput] = Field(min_length=1)
-    reason: str = ""
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     assumptions: list[str] = Field(default_factory=list)
-    uncertainty_questions: list[str] = Field(default_factory=list)
     dry_run: bool = False
 
 
 class EnterPlanModeInput(ToolInput):
-    technical_plan: str = ""
+    technical_plan: str = Field(min_length=1)
     risks: list[str] = Field(default_factory=list)
     verification_commands: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
@@ -301,6 +277,14 @@ def reduce_search_code_output(
     output: Dict[str, Any],
 ) -> Dict[str, Any]:
     files = _extract_files_from_search(output.get("matches", []))
+    return {"candidate_files": _prioritize_candidate_files(state, files)}
+
+
+def reduce_list_files_output(
+    state: Dict[str, Any],
+    output: Dict[str, Any],
+) -> Dict[str, Any]:
+    files = [str(item).strip() for item in output.get("files", []) if str(item).strip()]
     return {"candidate_files": _prioritize_candidate_files(state, files)}
 
 
@@ -377,10 +361,14 @@ def reduce_run_tests_output(
         "verification_commands": verification_commands,
         "status": "testing",
     }
+    facts = dict(state.get("runtime_facts") or {})
+    facts["last_verification"] = verification_commands[-1]
+    updates["runtime_facts"] = facts
     if output.get("exit_code") == 0:
         updates["verification_stale"] = False
         updates["last_verified_edit_loop"] = state.get("loop_count", 0)
-        updates["execution_queue"] = advance_execution_queue_for_verification(state)
+        facts["verified_revision"] = int(facts.get("edit_revision", 0) or 0)
+        updates["runtime_facts"] = facts
     return updates
 
 
@@ -453,6 +441,7 @@ def reduce_run_shell_command_output(
                 "duration_ms": output.get("duration_ms"),
                 "reason": output.get("reason", ""),
                 "purpose": "verification",
+                "verification_kind": output.get("verification_kind", "standard"),
             }
         ]
         updates.update(
@@ -462,10 +451,14 @@ def reduce_run_shell_command_output(
                 "status": "testing",
             }
         )
+        facts = dict(state.get("runtime_facts") or {})
+        facts["last_verification"] = verification_commands[-1]
+        updates["runtime_facts"] = facts
         if output.get("exit_code") == 0:
             updates["verification_stale"] = False
             updates["last_verified_edit_loop"] = state.get("loop_count", 0)
-            updates["execution_queue"] = advance_execution_queue_for_verification(state)
+            facts["verified_revision"] = int(facts.get("edit_revision", 0) or 0)
+            updates["runtime_facts"] = facts
     return updates
 
 
@@ -514,6 +507,7 @@ def reduce_apply_code_patch_output(
             "details": {
                 "recovery_kind": str(output.get("recovery_kind") or "reread_target"),
                 "conflict_context": output.get("conflict_context", {}),
+                "suggested_range": output.get("suggested_range", {}),
             },
         }
     updates.update(_updated_read_file_cache_from_patch(state, output))
@@ -534,12 +528,10 @@ def reduce_apply_code_patch_output(
         updates["status"] = "patching"
         updates["verification_stale"] = bool(state.get("verification_required", True))
         updates["last_edit_at_loop"] = state.get("loop_count", 0)
-        changed_files = {
-            str(path).strip()
-            for path in output.get("changed_files", []) or []
-            if str(path).strip()
-        }
-        updates["execution_queue"] = advance_execution_queue_for_patch(state, changed_files)
+        facts = dict(state.get("runtime_facts") or {})
+        facts["edit_revision"] = int(facts.get("edit_revision", 0) or 0) + 1
+        facts["edited_files"] = edited_files
+        updates["runtime_facts"] = facts
     return updates
 
 
@@ -548,51 +540,7 @@ def _updated_read_file_cache_from_patch(
     output: Dict[str, Any],
 ) -> Dict[str, Any]:
     """ 应用 patch 后更新 filecache"""
-    updated_contents = output.get("updated_contents")
-    if not isinstance(updated_contents, dict) or not updated_contents:
-        return {}
-    cache = dict(state.get("read_file_cache") or {})
-    order = [
-        str(path).strip()
-        for path in state.get("read_file_order", []) or []
-        if str(path).strip()
-    ]
-    changed = False
-    for file_path, raw_content in updated_contents.items():
-        path = str(file_path or "").strip()
-        if not path:
-            continue
-        content = str(raw_content or "")
-        focus_excerpt, focus_ranges = _focused_file_excerpt(state, path, content)
-        total_lines = len(content.splitlines()) if content else 0
-        snapshot = dict(cache.get(path) or {})
-        snapshot.update(
-            {
-                "file_path": path,
-                "content": content,
-                "total_lines": total_lines,
-                "truncated": False,
-                "start_line": None,
-                "end_line": None,
-                "line_range_requested": False,
-                "is_empty": total_lines == 0 and not bool(content),
-                "imports_excerpt": _imports_excerpt(path, content),
-                "focus_excerpt": focus_excerpt,
-                "focus_ranges": focus_ranges,
-                "full_read": True,
-            }
-        )
-        cache[path] = snapshot
-        if path in order:
-            order.remove(path)
-        order.append(path)
-        changed = True
-    if not changed:
-        return {}
-    return {
-        "read_file_cache": cache,
-        "read_file_order": order[-50:],
-    }
+    return cache_after_patch(state, output)
 
 
 def reduce_enter_plan_mode_output(
@@ -645,7 +593,6 @@ def reduce_exit_plan_mode_output(
             {
                 "plan_mode": False,
                 "plan_mode_approved": True,
-                "execution_queue": _build_execution_queue(state, output),
                 "status": "running",
             }
         )
@@ -658,106 +605,6 @@ def reduce_exit_plan_mode_output(
             }
         )
     return updates
-
-
-def _build_execution_queue(
-    state: Dict[str, Any],
-    output: Dict[str, Any],
-) -> list[Dict[str, Any]]:
-    plan_text = "\n".join(
-        part
-        for part in (
-            str(state.get("technical_plan") or ""),
-            str(output.get("evaluation") or ""),
-            str(output.get("next_step") or ""),
-        )
-        if part.strip()
-    )
-    candidate_files = [
-        str(path).strip()
-        for path in state.get("candidate_files", []) or []
-        if str(path).strip()
-    ]
-    ranked = sorted(
-        candidate_files,
-        key=lambda path: (
-            plan_text.find(path) if path and path in plan_text else 10**9,
-            candidate_files.index(path),
-        ),
-    )
-    patch_targets: list[str] = []
-    for path in ranked:
-        lowered = path.lower()
-        if lowered.endswith((".py", ".go", ".ts", ".tsx", ".js", ".jsx", ".java", ".rb")) and path in plan_text:
-            if path not in patch_targets:
-                patch_targets.append(path)
-    if not patch_targets:
-        for path in candidate_files[:3]:
-            lowered = path.lower()
-            if lowered.endswith((".py", ".go", ".ts", ".tsx", ".js", ".jsx", ".java", ".rb")):
-                patch_targets.append(path)
-    contract = state.get("goal_contract") if isinstance(state.get("goal_contract"), dict) else {}
-    ledger = state.get("progress_ledger") if isinstance(state.get("progress_ledger"), dict) else {}
-    progress = ledger.get("criteria") if isinstance(ledger.get("criteria"), dict) else {}
-    # 获取还没有实现的 criteria
-    criteria = [
-        item
-        for item in contract.get("criteria", []) or []
-        if isinstance(item, dict)
-        and bool(item.get("required", True))
-        and not _criterion_progress_passed(progress, str(item.get("id") or ""))
-    ]
-    queue: list[Dict[str, Any]] = []
-    assigned_targets: set[str] = set()
-    implement_criteria = [item for item in criteria if item.get("kind") == "implement"]
-    # 添加相应的 patch 任务
-    for criterion_index, criterion in enumerate(implement_criteria):
-        criterion_id = str(criterion.get("id") or "")
-        description = str(criterion.get("description") or "")
-        targets = [
-            path
-            for path in patch_targets
-            if path in description and path not in assigned_targets
-        ]
-        if not targets and criterion_index == 0:
-            targets = [path for path in patch_targets if path not in assigned_targets]
-        for target_index, path in enumerate(targets[:6]):
-            assigned_targets.add(path)
-            queue.append(
-                {
-                    "id": f"{criterion_id}:patch:{target_index + 1}",
-                    "criterion_id": criterion_id,
-                    "kind": "patch",
-                    "required_capability": "patch",
-                    "required": True,
-                    "target_files": [path],
-                    "commands": [],
-                    "status": "pending",
-                }
-            )
-    # 生成 verify item
-    for criterion in criteria:
-        if criterion.get("kind") != "verify":
-            continue
-        criterion_id = str(criterion.get("id") or "")
-        queue.append(
-            {
-                "id": f"{criterion_id}:verify",
-                "criterion_id": criterion_id,
-                "kind": "verify",
-                "required_capability": "verification",
-                "required": True,
-                "target_files": patch_targets[:],
-                "commands": [],
-                "status": "pending",
-            }
-        )
-    return validate_execution_queue(queue)
-
-
-def _criterion_progress_passed(progress: Dict[str, Any], criterion_id: str) -> bool:
-    entry = progress.get(criterion_id)
-    return isinstance(entry, dict) and entry.get("status") in {"passed", "not_required"}
 
 
 def _extract_files_from_search(matches: list[str]) -> list[str]:
@@ -942,6 +789,7 @@ class ToolRegistry:
         args: Dict[str, Any] | None = None,
         *,
         allowed_permissions: list[str] | None = None,
+        runtime_context: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         if name not in self._tools:
             logger.warning("unknown tool requested name={}", name)
@@ -952,6 +800,7 @@ class ToolRegistry:
             repo_path,
             args or {},
             allowed_permissions=allowed_permissions,
+            runtime_context=runtime_context,
         )
 
     def names(self) -> list[str]:
@@ -997,10 +846,13 @@ class ToolRegistry:
             ToolSpec(
                 name="list_files",
                 description="List repository files with common generated directories ignored.",
+                reducer=reduce_list_files_output,
                 runner=lambda repo, args: list_files(
                     repo,
                     max_files=int(args.get("max_files", FileConfig.MAX_READ_AMOUNT)),
                 ),
+                input_schema=ListFilesInput,
+                permissions=["repo:read"],
             )
         )
         self.register(

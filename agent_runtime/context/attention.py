@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent_runtime.lifecycle.execution_queue import current_execution_item
 from model.agent.graph import AgentState
 from utils import _append_unique, _as_dict, _clean_string_list, _latest_dict, _positive_int, _truncate
 
@@ -24,7 +23,7 @@ def build_attention_focus(state: AgentState) -> dict[str, Any]:
     phase = str(state.get("phase") or "collect_context")
     runtime_decision = _as_dict(state.get("runtime_decision"))
     pending_resolution = _as_dict(state.get("pending_resolution"))
-    execution = _as_dict(current_execution_item(state))
+    execution: dict[str, Any] = {}
 
     focus_files: list[str] = []
     reasons: list[str] = []

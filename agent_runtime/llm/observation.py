@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from agent_runtime.context.events import latest_tool_event
-from agent_runtime.lifecycle.execution_queue import current_execution_item as queue_current_execution_item
+from agent_runtime.llm.findings import normalize_finding_candidates
 from agent_runtime.llm.llm_nodes import LLMJsonNode
 from config import LLMConfig
 from ext.tool_summaries import read_file_summaries
@@ -38,6 +38,7 @@ class DisabledObserver:
             "status": "disabled",
             "summary": "",
             "new_findings": [],
+            "finding_candidates": [],
             "hypotheses": [],
             "missing_context": [],
             "next_search_terms": [],
@@ -162,7 +163,6 @@ def _observation_prompt(state: AgentState, context: dict[str, Any]) -> str:
         ),
         latest_tool_call=json.dumps(_trim_tool_call(latest), ensure_ascii=False, default=str),
         observation_delta=json.dumps(delta, ensure_ascii=False, default=str),
-        current_execution=json.dumps(_current_execution_item(state), ensure_ascii=False, default=str),
         recent_observations=json.dumps(_recent_relevant_observations(state), ensure_ascii=False, default=str),
         read_file_context=json.dumps(
             read_file_summaries(state, limit=6, excerpt_chars=2500),
@@ -191,6 +191,7 @@ def _normalize_observation(
         "summary": str(data.get("summary") or "").strip()[:500],
         "facts": _clean_string_list(data.get("facts"), 8, OBSERVATION_MAX_CHAR),
         "new_findings": _clean_string_list(data.get("new_findings"), 8, OBSERVATION_MAX_CHAR),
+        "finding_candidates": normalize_finding_candidates(data.get("finding_candidates")),
         "hypotheses": _clean_string_list(data.get("hypotheses"), 6, OBSERVATION_MAX_CHAR),
         "invalidated_hypotheses": _clean_string_list(data.get("invalidated_hypotheses"), 6, OBSERVATION_MAX_CHAR),
         "risks": _clean_string_list(data.get("risks"), 6, OBSERVATION_MAX_CHAR),
@@ -236,6 +237,7 @@ def _fallback_observation(state: AgentState, context: dict[str, Any]) -> dict[st
         "summary": str(output.get("message") or output.get("error") or "LLM observer unavailable; used tool output directly.")[:500],
         "facts": facts[:8],
         "new_findings": [],
+        "finding_candidates": [],
         "hypotheses": [],
         "invalidated_hypotheses": [],
         "risks": [str(output.get("error"))[:260]] if output.get("error") else [],
@@ -314,12 +316,10 @@ def _clean_memory_candidates(value: Any) -> list[dict[str, Any]]:
 def _observation_delta(state: AgentState) -> dict[str, Any]:
     latest = _latest_tool_call(state)
     output = latest.get("output") if isinstance(latest.get("output"), dict) else {}
-    execution = _current_execution_item(state)
     return {
         "latest_tool": str(latest.get("name") or "unknown"),
         "latest_tool_input": _trim_value(latest.get("input"), 1200),
         "latest_tool_output": _trim_value(output, 1600),
-        "execution_item": execution,
         "edited_files": list(state.get("edited_files", []) or [])[-5:],
         "verification_stale": bool(state.get("verification_stale", False)),
         "latest_test_result": _trim_value((state.get("test_results") or [])[-1] if state.get("test_results") else {}, 1000),
@@ -422,21 +422,6 @@ def _recent_relevant_observations(state: AgentState) -> list[dict[str, Any]]:
     return list(reversed(relevant))
 
 
-def _current_execution_item(state: AgentState) -> dict[str, Any]:
-    item = queue_current_execution_item(state)
-    if isinstance(item, dict):
-        return {
-            "kind": str(item.get("kind") or ""),
-            "status": str(item.get("status") or ""),
-            "target_files": [
-                str(path).strip()
-                for path in item.get("target_files", []) or []
-                if str(path).strip()
-            ],
-        }
-    return {}
-
-
 def _last_llm_observation(state: AgentState) -> dict[str, Any] | None:
     items = state.get("llm_observations", []) or []
     for item in reversed(items):
@@ -482,7 +467,7 @@ def _observation_delta_score(state: AgentState, observation: dict[str, Any]) -> 
         score += 0.45
     if latest.get("name") in {"apply_code_patch", "run_shell_command", "run_tests"}:
         score += 0.25
-    if observation.get("new_findings"):
+    if observation.get("new_findings") or observation.get("finding_candidates"):
         score += 0.2
     if observation.get("missing_context"):
         score += 0.1
@@ -499,5 +484,4 @@ def _is_severe_observation(state: AgentState, observation: dict[str, Any]) -> bo
         return True
     if observation.get("status") in {"error", "inconclusive"}:
         return True
-    execution = _current_execution_item(state)
-    return str(execution.get("kind") or "") == "verify"
+    return False

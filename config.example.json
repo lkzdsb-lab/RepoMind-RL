@@ -31,8 +31,6 @@
     "action": {},
     "task_analysis": {},
     "observer": {},
-    "memory_query": {},
-    "memory_rerank": {},
     "code_context_query": {},
     "code_context_rerank": {},
     "skill_selector": {},
@@ -45,8 +43,6 @@
     "action_policy": "llm",
     "task_analyzer": "llm",
     "observer": "llm",
-    "memory_query_planner": "disabled",
-    "memory_reranker": "disabled",
     "code_context_query_planner": "llm",
     "code_context_reranker": "llm",
     "skill_selector": "llm",
@@ -54,17 +50,12 @@
     "completion_judge": "llm"
   },
   "memory": {
-    "path": ".repomind/memory.jsonl",
-    "mid_path": ".repomind/memory_mid.jsonl",
-    "long_path": ".repomind/memory_long.jsonl",
-    "skill_dir": ".repomind/skills",
-    "redis_url": null,
-    "semantic_threshold": 0.7,
-    "procedural_threshold": 1.2,
-    "skill_consolidation_threshold": 1.5,
-    "query_limit": 5,
-    "selected_limit": 12,
-    "rerank_candidate_limit": 24
+    "path": ".repomind/session_memory.db",
+    "max_turns": 6,
+    "max_chars": 12000,
+    "file_cache_max_files": 50,
+    "file_cache_max_spans": 200,
+    "file_cache_max_bytes": 10485760
   },
   "context": {
     "enabled": true,

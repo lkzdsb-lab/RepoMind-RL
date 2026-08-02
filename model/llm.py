@@ -21,39 +21,51 @@ def _coerce_score(value: Any) -> Any:
 
 
 class PlanResponse(BaseModel):
-    plan: list[str] = Field(default_factory=list)
+    plan: list[str] = Field(min_length=1, max_length=8)
     user_update: str = ""
 
 
-class CompletionCriterionResponse(BaseModel):
-    id: str = Field(min_length=1, max_length=80, pattern=r"^[a-z][a-z0-9_]*$")
-    kind: Literal["diagnose", "implement", "verify"]
-    description: str = Field(min_length=1, max_length=500)
-    required: bool = True
-    depends_on: list[str] = Field(default_factory=list, max_length=8)
-    evidence_policy: Literal[
-        "repository_evidence",
-        "diagnosis_evidence",
-        "command_evidence",
-        "patch_applied",
-        "verification_passed",
-    ]
-
 class TaskAnalysisResponse(BaseModel):
+    intent: Literal["diagnose", "implement", "explain", "review"]
     task_type: Literal["BUG_FIX", "FEATURE_IMPL", "DIAGNOSE"]
     task_category: str
     entities: list[str]
     acceptance_criteria: list[str]
-    completion_criteria: list[CompletionCriterionResponse] = Field(default_factory=list, max_length=12)
     risk_notes: list[str]
+    review_focus: list[str] = Field(default_factory=list)
     search_hints: list[str]
+    historical_context: list[str] = Field(default_factory=list)
     user_update: str = ""
+
+
+class FindingLocationResponse(BaseModel):
+    file_path: str
+    symbol: str = ""
+    start_line: int | None = Field(default=None, ge=1)
+    end_line: int | None = Field(default=None, ge=1)
+
+
+class DraftFindingResponse(BaseModel):
+    candidate_id: str = ""
+    claim: str
+    locations: list[FindingLocationResponse] = Field(default_factory=list)
+    related_tests: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    severity: Literal["low", "medium", "high", "critical"] = "medium"
+    category: str = ""
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _normalize_confidence(cls, value: Any) -> Any:
+        return _coerce_score(value)
+
 
 class ObservationResponse(BaseModel):
     latest_tool: str = "unknown"
     status: str = "inconclusive"
     summary: str = ""
     new_findings: list[str] = Field(default_factory=list)
+    finding_candidates: list[DraftFindingResponse] = Field(default_factory=list)
     hypotheses: list[str] = Field(default_factory=list)
     invalidated_hypotheses: list[str] = Field(default_factory=list)
     facts: list[str] = Field(default_factory=list)
@@ -73,6 +85,7 @@ class ObservationResponse(BaseModel):
 
 class FinalReportResponse(BaseModel):
     summary: str = ""
+    findings: list[str] = Field(default_factory=list)
     work_done: list[str] = Field(default_factory=list)
     candidate_files: list[str] = Field(default_factory=list)
     test_results: list[str] = Field(default_factory=list)
@@ -81,11 +94,22 @@ class FinalReportResponse(BaseModel):
     next_steps: list[str] = Field(default_factory=list)
     user_update: str = ""
 
+
+class ReviewedFindingResponse(BaseModel):
+    candidate_id: str
+    verdict: Literal["confirmed", "rejected", "needs_more_evidence"]
+    claim: str
+    evidence_refs: list[str] = Field(default_factory=list)
+    reason: str = ""
+    recommended_next_action: str = ""
+
 class CompletionJudgeResponse(BaseModel):
-    decision: Literal["complete", "needs_user_input", "continue"] = "complete"
+    decision: Literal["complete", "needs_user_input", "continue"] = "continue"
     reason: str = ""
     questions: list[str] = Field(default_factory=list)
     suggested_next_action: str = ""
+    reviewed_findings: list[ReviewedFindingResponse] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     user_update: str = ""
 
@@ -93,27 +117,6 @@ class CompletionJudgeResponse(BaseModel):
     @classmethod
     def _normalize_confidence(cls, value: Any) -> Any:
         return _coerce_score(value)
-
-class MemoryQueryPlanResponse(BaseModel):
-    queries: list[str]
-    rationale: str = ""
-    user_update: str = ""
-
-class MemorySelectionResponse(BaseModel):
-    memory_id: str
-    relevance: float
-    reason: str = ""
-
-    @field_validator("relevance", mode="before")
-    @classmethod
-    def _normalize_relevance(cls, value: Any) -> Any:
-        return _coerce_score(value)
-
-
-class MemoryRerankResponse(BaseModel):
-    selected: list[MemorySelectionResponse]
-    user_update: str = ""
-
 
 class CodeContextQueryPlanResponse(BaseModel):
     queries: list[str]
@@ -154,19 +157,31 @@ class SkillSelectorResponse(BaseModel):
     user_update: str = ""
 
 
+class PlanStepResponse(BaseModel):
+    id: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    status: Literal["pending", "in_progress", "done", "blocked"]
+
+
+class PlanUpdateResponse(BaseModel):
+    steps: list[PlanStepResponse] = Field(default_factory=list)
+    current_focus: str = ""
+    open_questions: list[str] = Field(default_factory=list)
+
+
 class ActionChoiceResponse(BaseModel):
     action: str = Field(min_length=1)
     reason: str = ""
     action_input: dict[str, Any] = Field(default_factory=dict)
     uncertainty_questions: list[str] = Field(default_factory=list)
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)
+    plan_update: PlanUpdateResponse = Field(default_factory=PlanUpdateResponse)
+    draft_findings: list[DraftFindingResponse] = Field(default_factory=list)
     user_update: str = ""
 
     @field_validator("confidence", mode="before")
     @classmethod
     def _normalize_confidence(cls, value: Any) -> Any:
-        if value in (None, ""):
-            return None
         return _coerce_score(value)
 
 

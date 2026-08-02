@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
+import re
 from pathlib import Path
 from typing import Any, Dict, Union
 from loguru import logger
-from utils import _safe_float, _clean_string_list, _clamp_float
+from utils import _safe_float, _clean_string_list
 
 
 DENIED_PATH_PARTS = {
@@ -23,11 +25,14 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
     Apply minimal exact-replacement edits.
 
     This tool deliberately does not accept arbitrary shell commands or raw patch
-    files. The executor injects `_guard`; LLM-provided permission fields are not
-    trusted.
+    files. The executor supplies trusted guard and decision data through the
+    internal runtime context; LLM-provided permission fields are not trusted.
     """
     # 获取注入的 安全约束
-    guard = args.get("_guard")
+    runtime_context = args.get("_runtime_context")
+    if not isinstance(runtime_context, dict):
+        runtime_context = {}
+    guard = runtime_context.get("guard")
     if not isinstance(guard, dict):
         guard = {}
         logger.info(
@@ -39,9 +44,15 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
             "applied": False,
         }
 
+    decision_context = runtime_context.get("decision")
+    if not isinstance(decision_context, dict):
+        decision_context = {}
     confidence_threshold = _safe_float(guard.get("confidence_threshold"), 0.75)
-    confidence = _clamp_float(args.get("confidence"), 0.5, "apply_code_patch invalid confidence")
-    questions = _clean_questions(args.get("uncertainty_questions"))
+    confidence = max(
+        0.0,
+        min(1.0, _safe_float(decision_context.get("confidence"), 0.0)),
+    )
+    questions = _clean_questions(decision_context.get("uncertainty_questions"))
     if questions:
         return _needs_user_input(
             "The proposed edit contains unresolved uncertainty.",
@@ -72,6 +83,12 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
     read_contents = guard.get("read_contents")
     if not isinstance(read_contents, dict):
         read_contents = {}
+    read_spans = guard.get("read_spans")
+    if not isinstance(read_spans, dict):
+        read_spans = {}
+    file_revisions = guard.get("file_revisions")
+    if not isinstance(file_revisions, dict):
+        file_revisions = {}
 
     unique_files = _unique_file_paths(changes)
     if len(unique_files) > max_files:
@@ -128,15 +145,31 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 original = str(loaded["content"])
                 original_contents[file_path] = original
             current = planned_contents.get(file_path, original)
+            expected_revision = str(file_revisions.get(file_path) or "").strip()
+            current_revision = hashlib.sha256(original.encode("utf-8")).hexdigest()
+            if require_read and expected_revision and expected_revision != current_revision:
+                return _recoverable_conflict(
+                    file_path=file_path,
+                    error=f"File changed after it was read: {file_path}",
+                    current_content=current,
+                    old_text=str(raw_change.get("old_text") or ""),
+                    recovery_kind="stale_read_revision",
+                )
             old_text = str(raw_change.get("old_text") or "")
             new_text = str(raw_change.get("new_text") or "")
             read_content = str(read_contents.get(file_path) or "")
+            spans = read_spans.get(file_path)
+            if not isinstance(spans, list):
+                spans = []
             if operation == "append":
                 if require_read and file_path not in allowed_files:
                     return _needs_more_context_response(
                         f"File must be read in this run before editing: {file_path}"
                     )
-                planned_contents[file_path] = current + new_text
+                planned_contents[file_path] = current + _convert_line_endings(
+                    new_text,
+                    _preferred_line_ending("", current),
+                )
                 if file_path not in changed_files:
                     changed_files.append(file_path)
                 continue
@@ -155,7 +188,7 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
                     changed_files.append(file_path)
                 continue
             if operation in {"insert_after", "insert_before"}:
-                if require_read and old_text not in read_content:
+                if require_read and not _anchor_grounded(old_text, read_content, spans):
                     logger.warning(
                         f"old_text not in read_content \n"
                         f"old_text: {old_text}\n"
@@ -167,7 +200,7 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
                             "Anchor old_text must come from content read during this run: "
                             f"{file_path}"
                         ),
-                        current_content=read_content or current,
+                        current_content=current,
                         old_text=old_text,
                         recovery_kind="refresh_patch_anchor",
                     )
@@ -175,21 +208,24 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 if isinstance(expected_or_err, dict):
                     return expected_or_err
                 expected = expected_or_err
-                replacement = (
-                    old_text + new_text if operation == "insert_after" else new_text + old_text
+                planned_contents[file_path] = _replace_eol_insensitive(
+                    current,
+                    old_text,
+                    new_text,
+                    expected,
+                    operation=operation,
                 )
-                planned_contents[file_path] = current.replace(old_text, replacement, expected)
                 if file_path not in changed_files:
                     changed_files.append(file_path)
                 continue
-            if require_read and old_text not in read_content:
+            if require_read and not _anchor_grounded(old_text, read_content, spans):
                 return _recoverable_conflict(
                     file_path=file_path,
                     error=(
                         "old_text must come from content read during this run: "
                         f"{file_path}"
                     ),
-                    current_content=read_content or current,
+                    current_content=current,
                     old_text=old_text,
                     recovery_kind="refresh_patch_anchor",
                 )
@@ -197,7 +233,13 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(expected_or_err, dict):
                 return expected_or_err
             expected = expected_or_err
-            planned_contents[file_path] = current.replace(old_text, new_text, expected)
+            planned_contents[file_path] = _replace_eol_insensitive(
+                current,
+                old_text,
+                new_text,
+                expected,
+                operation="replace",
+            )
         else:
             return {"error": f"Unsupported edit operation: {operation}", "applied": False}
 
@@ -220,11 +262,12 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     dry_run = bool(args.get("dry_run", False))
+    file_changes = _file_change_metadata(original_contents, planned_contents, changed_files)
     if not dry_run:
         for file_path, content in planned_contents.items():
             target = _safe_path(repo, file_path)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
+            target.write_bytes(content.encode("utf-8"))
 
     return {
         "applied": not dry_run,
@@ -232,14 +275,10 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
         "preview": dry_run,
         "would_apply": True,
         "changed_files": changed_files,
-        "updated_contents": {
-            file_path: planned_contents[file_path]
-            for file_path in changed_files
-            if file_path in planned_contents
-        },
+        "file_changes": file_changes,
         "change_count": len(changes),
         "changed_line_count": changed_line_count,
-        "reason": str(args.get("reason") or "").strip(),
+        "reason": str(decision_context.get("reason") or "").strip(),
         "assumptions": _clean_string_list(args.get("assumptions"), -1, 500),
         "diff": diff[-12000:],
         "summary": (
@@ -366,6 +405,9 @@ def _conflict_context(content: str, old_text: str, *, radius: int = 3) -> dict[s
             )
     return {
         "reason": "old_text did not match the current file content exactly.",
+        "exact_match": old_text in content,
+        "eol_insensitive_match": bool(_eol_matches(content, old_text)),
+        "detected_line_ending": _line_ending_name(content),
         "candidates": candidates[:3],
     }
 
@@ -404,6 +446,21 @@ def _needs_more_context_response(error: str, *, suggested_next_action: str = "re
     }
 
 
+def _anchor_grounded(
+    old_text: str,
+    fallback_content: str,
+    spans: list[dict[str, Any]],
+) -> bool:
+    if not old_text:
+        return False
+    for span in spans:
+        if isinstance(span, dict) and _eol_matches(
+            str(span.get("content") or ""), old_text
+        ):
+            return True
+    return bool(_eol_matches(fallback_content, old_text))
+
+
 def _recoverable_conflict(
     *,
     file_path: str,
@@ -413,12 +470,22 @@ def _recoverable_conflict(
     recovery_kind: str,
 ) -> dict[str, Any]:
     response = _needs_more_context_response(error)
+    conflict_context = _conflict_context(current_content, old_text)
+    candidates = conflict_context.get("candidates") if isinstance(conflict_context, dict) else []
+    suggested_range: dict[str, int] = {}
+    if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict):
+        line = max(1, int(candidates[0].get("line") or 1))
+        suggested_range = {
+            "start_line": max(1, line - 20),
+            "end_line": line + 40,
+        }
     response.update(
         {
             "recoverable_conflict": True,
             "recovery_kind": recovery_kind,
             "recovery_file": file_path,
-            "conflict_context": _conflict_context(current_content, old_text),
+            "conflict_context": conflict_context,
+            "suggested_range": suggested_range,
         }
     )
     return response
@@ -434,7 +501,7 @@ Union[int, Dict[str, Any]]:
             "error": "expected_occurrences must be greater than 0.",
             "applied": False,
         }
-    occurrences = current.count(old_text)
+    occurrences = len(_eol_matches(current, old_text))
     if occurrences != expected:
         logger.error(f"文本匹配次数不同")
         return _recoverable_conflict(
@@ -448,3 +515,111 @@ Union[int, Dict[str, Any]]:
             recovery_kind="reread_target",
         )
     return expected
+
+
+def _eol_matches(content: str, old_text: str) -> list[re.Match[str]]:
+    if not old_text:
+        return []
+    canonical = _normalize_newlines(old_text)
+    pattern = r"(?:\r\n|\r|\n)".join(
+        re.escape(part) for part in canonical.split("\n")
+    )
+    return list(re.finditer(pattern, content))
+
+
+def _replace_eol_insensitive(
+    current: str,
+    old_text: str,
+    new_text: str,
+    expected: int,
+    *,
+    operation: str,
+) -> str:
+    matches = _eol_matches(current, old_text)[:expected]
+    if len(matches) != expected:
+        return current
+    chunks: list[str] = []
+    cursor = 0
+    for match in matches:
+        chunks.append(current[cursor : match.start()])
+        matched_text = match.group(0)
+        eol = _preferred_line_ending(matched_text, current)
+        replacement = _convert_line_endings(new_text, eol)
+        if operation == "insert_after":
+            replacement = matched_text + replacement
+        elif operation == "insert_before":
+            replacement = replacement + matched_text
+        chunks.append(replacement)
+        cursor = match.end()
+    chunks.append(current[cursor:])
+    return "".join(chunks)
+
+
+def _normalize_newlines(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _convert_line_endings(value: str, line_ending: str) -> str:
+    return _normalize_newlines(value).replace("\n", line_ending)
+
+
+def _preferred_line_ending(matched_text: str, full_content: str) -> str:
+    if "\r\n" in matched_text:
+        return "\r\n"
+    if "\n" in matched_text:
+        return "\n"
+    if "\r" in matched_text:
+        return "\r"
+    return "\r\n" if _line_ending_name(full_content) == "CRLF" else "\n"
+
+
+def _line_ending_name(content: str) -> str:
+    crlf_count = content.count("\r\n")
+    lf_count = content.count("\n") - crlf_count
+    if crlf_count and lf_count:
+        return "MIXED_CRLF" if crlf_count >= lf_count else "MIXED_LF"
+    if crlf_count:
+        return "CRLF"
+    if lf_count:
+        return "LF"
+    return "NONE"
+
+
+def _file_change_metadata(
+    original_contents: dict[str, str],
+    planned_contents: dict[str, str],
+    changed_files: list[str],
+) -> list[dict[str, Any]]:
+    metadata: list[dict[str, Any]] = []
+    for file_path in changed_files:
+        old_content = original_contents.get(file_path, "")
+        new_content = planned_contents.get(file_path, old_content)
+        old_lines = old_content.splitlines()
+        new_lines = new_content.splitlines()
+        ranges: list[dict[str, int]] = []
+        matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
+        for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
+            if tag == "equal":
+                continue
+            ranges.append(
+                {
+                    "old_start_line": old_start + 1,
+                    "old_end_line": max(old_start + 1, old_end),
+                    "new_start_line": new_start + 1,
+                    "new_end_line": max(new_start + 1, new_end),
+                    "old_line_count": old_end - old_start,
+                    "new_line_count": new_end - new_start,
+                    "line_delta": (new_end - new_start) - (old_end - old_start),
+                }
+            )
+        metadata.append(
+            {
+                "file_path": file_path,
+                "old_revision": hashlib.sha256(old_content.encode("utf-8")).hexdigest(),
+                "new_revision": hashlib.sha256(new_content.encode("utf-8")).hexdigest(),
+                "old_total_lines": len(old_lines),
+                "new_total_lines": len(new_lines),
+                "ranges": ranges,
+            }
+        )
+    return metadata

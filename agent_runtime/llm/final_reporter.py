@@ -63,6 +63,7 @@ class RuleBasedFinalReporter:
             summary_parts.append(f"LLM 调用异常：{category}")
         return {
             "summary": "；".join(summary_parts) + "。",
+            "findings": _confirmed_finding_claims(state),
             "work_done": work_done,
             "candidate_files": candidate_files,
             "test_results": test_results,
@@ -105,12 +106,22 @@ def _final_report_prompt(state: AgentState, context: dict[str, Any]) -> str:
         description=state.get("description", ""),
         status=state.get("status", ""),
         error=state.get("error", ""),
+        completion_judgement=json.dumps(
+            state.get("completion_judgement", {}),
+            ensure_ascii=False,
+            default=str,
+        ),
         verification_required=json.dumps(_verification_required(state)),
         verification_reason=state.get("verification_reason", ""),
         verification_stale=json.dumps(bool(state.get("verification_stale", False))),
         verification_commands=json.dumps(
             _verification_command_summaries(state),
             ensure_ascii=False,
+        ),
+        step_approval_history=json.dumps(
+            state.get("step_approval_history", [])[-5:],
+            ensure_ascii=False,
+            default=str,
         ),
         command_results=json.dumps(
             _command_result_summaries(state),
@@ -159,6 +170,7 @@ def _normalize_final_report(
         fallback = RuleBasedFinalReporter().report(state)
     return {
         "summary": str(data.get("summary") or fallback.get("summary") or "").strip()[:1000],
+        "findings": _confirmed_finding_claims(state),
         "work_done": _clean_string_list(data.get("work_done") or fallback.get("work_done"), 8, 280),
         "candidate_files": _clean_string_list(state.get("candidate_files"), 12, 260),
         "test_results": _clean_string_list(data.get("test_results") or fallback.get("test_results"), 8, 320),
@@ -170,6 +182,20 @@ def _normalize_final_report(
         "patch_status": str(data.get("patch_status") or fallback.get("patch_status") or "").strip()[:500],
         "next_steps": _clean_string_list(data.get("next_steps") or fallback.get("next_steps"), 8, 280),
     }
+
+
+def _confirmed_finding_claims(state: AgentState) -> list[str]:
+    judgement = state.get("completion_judgement")
+    if not isinstance(judgement, dict):
+        return []
+    claims: list[str] = []
+    for item in judgement.get("reviewed_findings", []) or []:
+        if not isinstance(item, dict) or item.get("verdict") != "confirmed":
+            continue
+        claim = str(item.get("claim") or "").strip()
+        if claim and claim not in claims:
+            claims.append(claim[:600])
+    return claims[:20]
 
 
 def _work_done_from_tools(tool_names: list[str]) -> list[str]:
@@ -189,7 +215,6 @@ def _work_done_from_tools(tool_names: list[str]) -> list[str]:
         "run_tests": "处理验证命令",
         "run_shell_command": "执行受限终端命令",
         "git_diff": "检查工作区 diff",
-        "write_memory": "写入任务记忆",
     }
     work_done: list[str] = []
     for name in tool_names:

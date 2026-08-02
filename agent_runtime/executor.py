@@ -30,8 +30,9 @@ from agent_runtime.codebase_context.retrieval import (
 from agent_runtime.lifecycle.completion import derive_phase, evaluate_completion_transition
 from agent_runtime.context import ContextCompressionManager
 from agent_runtime.context.attention import build_attention_focus
+from agent_runtime.memory.file_cache import touch_cache_files
+from ext.focus_files import current_focus_files
 from agent_runtime.context.events import latest_tool_event, should_llm_observe_event
-from agent_runtime.lifecycle.goal_contract import build_goal_contract
 from agent_runtime.logging_config import configure_from_agent_config
 from agent_runtime.llm.llm_policy import LLMActionPolicy
 from agent_runtime.llm.completion_judge import (
@@ -39,6 +40,7 @@ from agent_runtime.llm.completion_judge import (
     LLMCompletionJudge,
     RuleBasedCompletionJudge,
 )
+from agent_runtime.llm.findings import merge_finding_candidates
 from agent_runtime.llm.final_reporter import (
     FinalReporter,
     LLMFinalReporter,
@@ -51,19 +53,6 @@ from agent_runtime.llm.observation import (
     build_action_limit_observation,
 )
 from agent_runtime.llm.task_analysis import DisabledTaskAnalyzer, LLMTaskAnalyzer, TaskAnalyzer
-from agent_runtime.memory.manager import LayeredMemoryManager
-from agent_runtime.memory.cards import MemoryContextPack
-from agent_runtime.memory.retrieval import (
-    DisabledMemoryQueryPlanner,
-    DisabledMemoryReranker,
-    LLMMemoryQueryPlanner,
-    LLMMemoryReranker,
-    MemoryQueryPlanner,
-    MemoryRerankDecision,
-    MemoryReranker,
-    merge_memory_packs,
-)
-from agent_runtime.memory.store import JsonlMemoryStore
 from agent_runtime.planning import HeuristicPlanner, LLMPlanner, Planner
 from agent_runtime.actions import ActionPolicy
 from agent_runtime.registry import RegistryManager, RegistrySnapshot
@@ -88,18 +77,11 @@ from agent_runtime.user_updates import (
     set_change_event_sink,
     set_user_update_sink,
 )
-from agent_runtime.lifecycle.obligations import derive_next_obligation
-from agent_runtime.lifecycle.progress_ledger import initial_progress_ledger, update_progress_ledger
 from agent_runtime.verification.capabilities import build_verification_capabilities
 from agent_runtime.verification.guard import (
     invalid_verification_resolution,
     validate_verification_command,
 )
-from agent_runtime.lifecycle.execution_queue import (
-    current_execution_item,
-    validate_execution_queue,
-)
-from ext.focus_files import execution_target_files
 from model.agent.graph import AgentState, AgentRunResult
 from model.agent.actions import Action
 from config import CompressionConfig, DebugAgentConfig, LLMConfig
@@ -122,16 +104,12 @@ class DebugAgent:
         observer: Observer | None = None,
         final_reporter: FinalReporter | None = None,
         completion_judge: CompletionJudge | None = None,
-        memory_query_planner: MemoryQueryPlanner | None = None,
-        memory_reranker: MemoryReranker | None = None,
         code_context_query_planner: CodeContextQueryPlanner | None = None,
         code_context_reranker: CodeContextReranker | None = None,
         skill_selector: SkillSelector | None = None,
         tools: ToolRegistry | None = None,
         registry: RegistryManager | None = None,
-        memory_manager: LayeredMemoryManager | None = None,
         context_manager: ContextCompressionManager | None = None,
-        memory_store: JsonlMemoryStore | None = None,
         recorder: TrajectoryRecorder | None = None,
         user_update_sink: UserUpdateSink | None = None,
         change_event_sink: ChangeEventSink | None = None,
@@ -173,8 +151,6 @@ class DebugAgent:
         self.observer = observer or self._default_observer()
         self.final_reporter = final_reporter or self._default_final_reporter()
         self.completion_judge = completion_judge or self._default_completion_judge()
-        self.memory_query_planner = memory_query_planner or self._default_memory_query_planner()
-        self.memory_reranker = memory_reranker or self._default_memory_reranker()
         self.code_context_query_planner = (
             code_context_query_planner or self._default_code_context_query_planner()
         )
@@ -185,9 +161,6 @@ class DebugAgent:
         )
         self.skill_selector = skill_selector or self._default_skill_selector()
         self._active_registry: RegistrySnapshot | None = None
-        self.memory_manager = memory_manager or LayeredMemoryManager.from_config(config)
-        if memory_store is not None:
-            self.memory_manager.mid_store = memory_store
         self.context_manager = context_manager or ContextCompressionManager.from_config(config)
         self.recorder = recorder or TrajectoryRecorder()
         logger.info(
@@ -198,10 +171,24 @@ class DebugAgent:
             config.manifest_dir,
         )
 
-    def run(self, title: str, description: str = "") -> AgentRunResult:
+    def run(
+        self,
+        title: str,
+        description: str = "",
+        *,
+        session_id: str = "",
+        session_memory: dict[str, Any] | None = None,
+    ) -> AgentRunResult:
         started_at = time.perf_counter()
         self._active_registry = self.registry_manager.snapshot()
-        state = self._initial_state(title=title, description=description)
+        if isinstance(self.policy, LLMActionPolicy):
+            self.policy.set_tool_specs(self._active_registry.tools)
+        state = self._initial_state(
+            title=title,
+            description=description,
+            session_id=session_id,
+            session_memory=session_memory or {},
+        )
         run_logger = logger.bind(task_id=state.get("task_id"), repo_path=self.config.repo_path)
         run_logger.info(
             "agent run started title={} description_present={}",
@@ -224,16 +211,6 @@ class DebugAgent:
             trace_path = self.recorder.save(state, self.config.trace_dir)
             run_logger.error(
                 "agent run aborted during skill selection error={} trace_path={}",
-                state.get("error"),
-                trace_path.as_posix(),
-            )
-            return AgentRunResult(state=state, trace_path=trace_path.as_posix())
-        state = self._retrieve_memories(state)
-        if state.get("status") == "failed":
-            state = self._finalize(state)
-            trace_path = self.recorder.save(state, self.config.trace_dir)
-            run_logger.error(
-                "agent run aborted during memory retrieval error={} trace_path={}",
                 state.get("error"),
                 trace_path.as_posix(),
             )
@@ -261,10 +238,12 @@ class DebugAgent:
             "plan_verification_commands": state.get("plan_verification_commands", []),
             "plan_mode_evaluation": state.get("plan_mode_evaluation", ""),
             "plan_mode_events": state.get("plan_mode_events", []),
-            "execution_queue": validate_execution_queue(state.get("execution_queue", [])),
             "pending_resolution": state.get("pending_resolution", {}),
             "phase": state.get("phase", ""),
             "runtime_decision": state.get("runtime_decision", {}),
+            "task_brief": state.get("task_brief", {}),
+            "work_plan": state.get("work_plan", {}),
+            "runtime_facts": state.get("runtime_facts", _initial_runtime_facts()),
             "attention_focus": state.get("attention_focus", {}),
             "user_updates": state.get("user_updates", []),
             "last_user_update": state.get("last_user_update"),
@@ -288,6 +267,11 @@ class DebugAgent:
             "archive_context": state.get("archive_context", ""),
             "context_sections": state.get("context_sections", {}),
             "memory_candidates": state.get("memory_candidates", []),
+            "draft_findings": state.get("draft_findings", []),
+            "file_cache_access_seq": int(state.get("file_cache_access_seq", 0)),
+            "file_cache_last_touch_loop": int(
+                state.get("file_cache_last_touch_loop", -1)
+            ),
             "compressed_context_item_ids": state.get("compressed_context_item_ids", []),
             "require_step_approval": self.config.require_step_approval,
             "pending_step_approval": state.get("pending_step_approval", {}),
@@ -400,9 +384,6 @@ class DebugAgent:
                 break
             if state.get("status") == "awaiting_user_input":
                 break
-            if action.name == "write_memory" and not state.get("error"):
-                state = self._finalize(state)
-                break
             if self._should_observe_latest_tool(state):
                 state = self._observe(state)
                 if state.get("status") == "failed":
@@ -432,31 +413,14 @@ class DebugAgent:
         return self._finish_run(state, started_at)
 
     def _sync_runtime_state(self, state: AgentState) -> AgentState:
-        goal_contract = state.get("goal_contract") if isinstance(state.get("goal_contract"), dict) else {}
-        progress_ledger = (
-            state.get("progress_ledger") if isinstance(state.get("progress_ledger"), dict) else {}
-        )
-        if goal_contract and (
-            int(goal_contract.get("version", 0) or 0) != 2
-            or not isinstance(progress_ledger.get("criteria"), dict)
-        ):
-            goal_contract = build_goal_contract(state)
-            progress_ledger = initial_progress_ledger(goal_contract)
-            state = {
-                **state,
-                "goal_contract": goal_contract, # 要完成什么，保持稳定
-                "progress_ledger": progress_ledger, # 已经完成到哪里，持续更新
-                "verification_required": bool(goal_contract.get("requires_verification", False)),
-            }
+        runtime_facts = _sync_runtime_facts(state)
+        state = {**state, "runtime_facts": runtime_facts}
         decision = evaluate_completion_transition(state)
         phase = str(decision.get("phase") or derive_phase(state))
-        next_obligation = derive_next_obligation(goal_contract, progress_ledger)
         return {
             **state,
-            "execution_queue": decision.get("execution_queue", state.get("execution_queue", [])),
             "phase": phase,
             "runtime_decision": decision,
-            "next_obligation": next_obligation,
         }
 
     def _update_attention_focus(self, state: AgentState) -> AgentState:
@@ -480,12 +444,26 @@ class DebugAgent:
         )
         return AgentRunResult(state=state, trace_path=trace_path.as_posix())
 
-    def _initial_state(self, title: str, description: str) -> AgentState:
+    def _initial_state(
+        self,
+        title: str,
+        description: str,
+        session_id: str = "",
+        session_memory: dict[str, Any] | None = None,
+    ) -> AgentState:
         registry = self._registry()
         project_profile = _build_project_profile(self.config.repo_path)
+        memory_pack = session_memory if isinstance(session_memory, dict) else {}
+        inherited_cache = memory_pack.get("_read_file_cache")
+        inherited_order = memory_pack.get("_read_file_order")
+        visible_memory_pack = {
+            key: value for key, value in memory_pack.items() if not str(key).startswith("_")
+        }
         return AgentState(
             task_id=str(uuid4()),
-            task_type="BUG_FIX",
+            session_id=session_id,
+            session_memory=visible_memory_pack,
+            task_type="DIAGNOSE",
             title=title,
             description=description,
             registry_snapshot={
@@ -502,15 +480,23 @@ class DebugAgent:
             verification_required=True,
             verification_reason="Task analysis has not run yet.",
             verification_capabilities={},
-            goal_contract={},
-            progress_ledger={},
-            next_obligation={},
+            task_brief={},
+            work_plan={},
+            runtime_facts=_initial_runtime_facts(),
             task_analysis={},
             plan=[],
             current_step="created",
             candidate_files=[],
-            read_file_cache={},
-            read_file_order=[],
+            read_file_cache=(
+                inherited_cache if isinstance(inherited_cache, dict) else {}
+            ),
+            read_file_order=(
+                [str(path) for path in inherited_order]
+                if isinstance(inherited_order, list)
+                else []
+            ),
+            file_cache_access_seq=0,
+            file_cache_last_touch_loop=-1,
             code_context={},
             selected_code_context={},
             code_context_query_plan={},
@@ -531,17 +517,14 @@ class DebugAgent:
             last_verified_edit_loop=-1,
             trajectory=[],
             completion_judgement={},
+            draft_findings=[],
             pending_user_questions=[],
             needs_user_input_reason="",
             user_inputs=[],
             selected_skills=[],
             skill_selection={},
             skill_context=[],
-            retrieved_memories={},
-            selected_memories={},
-            memory_query_plan={},
-            memory_rerank={},
-            memory_context="",
+            memory_context=str(visible_memory_pack.get("rendered") or ""),
             context_items=[],
             context_digest={},
             compressed_context="",
@@ -553,10 +536,6 @@ class DebugAgent:
             context_sections={},
             memory_candidates=[],
             attention_focus={},
-            short_term_memories=[],
-            promoted_memories=[],
-            consolidated_skills=[],
-            memory_written=False,
             rl_enabled=self.rl_enabled,
             rl_transitions=[],
             rl_last_reward={},
@@ -570,7 +549,6 @@ class DebugAgent:
             plan_verification_commands=[],
             plan_mode_evaluation="",
             plan_mode_events=[],
-            execution_queue=[],
             editing_enabled=self.config.editing_enabled,
             editing_config=_editing_config_dict(self.config),
             edit_results=[],
@@ -613,9 +591,18 @@ class DebugAgent:
                 thought="任务分析失败，未启用降级策略。",
                 observation={"error": str(exc), "fallback": False},
             )
-        task_type = str(analysis.get("task_type") or state.get("task_type") or "BUG_FIX").upper()
+        intent = str(analysis.get("intent") or "").strip().lower()
+        if intent not in {"diagnose", "implement", "explain", "review"}:
+            intent = (
+                "implement"
+                if str(analysis.get("task_type") or "").upper() in {"BUG_FIX", "FEATURE_IMPL"}
+                else "diagnose"
+            )
+        task_type = str(analysis.get("task_type") or state.get("task_type") or "DIAGNOSE").upper()
         if task_type not in {"BUG_FIX", "FEATURE_IMPL", "DIAGNOSE"}:
-            task_type = "BUG_FIX"
+            task_type = "DIAGNOSE"
+        if intent != "implement":
+            task_type = "DIAGNOSE"
         task_category = str(analysis.get("task_category") or state.get("task_category") or "")
         contract_seed = {
             **state,
@@ -623,22 +610,27 @@ class DebugAgent:
             "task_category": task_category,
             "task_analysis": analysis,
         }
-        goal_contract = build_goal_contract(contract_seed)
-        verification_required = bool(goal_contract.get("requires_verification", False))
+        verification_required = intent == "implement"
         verification_reason = (
-            "Goal contract requires verification evidence."
+            "The current user intent authorizes implementation; the latest edit must be verified."
             if verification_required
-            else "Goal contract does not require command-based verification."
+            else "The current task is read-only; commands may collect evidence but are not a finish gate."
         )
         verification_capabilities = build_verification_capabilities(contract_seed)
-        progress_ledger = initial_progress_ledger(goal_contract)
-        next_obligation = derive_next_obligation(goal_contract, progress_ledger)
         analysis = {
             **analysis,
+            "intent": intent,
             "task_type": task_type,
             "verification_required": verification_required,
             "verification_reason": verification_reason,
         }
+        session_candidates = _session_candidate_files(
+            state.get("session_memory"),
+            analysis,
+            self.config.repo_path,
+        )
+        if session_candidates:
+            analysis["historical_candidate_files"] = session_candidates
         observations = state.get("observations", []) + [
             {"type": "task_analysis", "content": analysis}
         ]
@@ -650,11 +642,13 @@ class DebugAgent:
             "verification_required": verification_required,
             "verification_reason": verification_reason,
             "verification_capabilities": verification_capabilities,
-            "goal_contract": goal_contract,
-            "progress_ledger": progress_ledger,
-            "next_obligation": next_obligation,
+            "task_brief": _task_brief_from_analysis(state, analysis),
             "task_category": task_category,
             "task_analysis": analysis,
+            "candidate_files": _merge_unique(
+                session_candidates,
+                state.get("candidate_files", []),
+            ),
             "observations": observations,
         }
         logger.bind(task_id=state.get("task_id")).info(
@@ -728,112 +722,16 @@ class DebugAgent:
             observation=selection_payload,
         )
 
-    def _retrieve_memories(self, state: AgentState) -> AgentState:
-        try:
-            query_plan = self.memory_query_planner.plan(state)
-            if query_plan.queries:
-                packs = [
-                    self.memory_manager.retrieve(
-                        query,
-                        state,
-                        self._registry(),
-                        limit=self.config.memory_query_limit,
-                        touch=False,
-                    )
-                    for query in query_plan.queries
-                ]
-                candidate_pack = merge_memory_packs(packs)
-                memory_pack, rerank_decision = self.memory_reranker.rerank(
-                    state,
-                    query_plan,
-                    candidate_pack,
-                )
-                self.memory_manager.touch_retrieved(memory_pack, state)
-            else:
-                candidate_pack = MemoryContextPack()
-                memory_pack = MemoryContextPack()
-                rerank_decision = MemoryRerankDecision(
-                    source="skipped",
-                    rationale="Memory query planner determined retrieval was unnecessary.",
-                )
-        except Exception as exc:
-            logger.bind(task_id=state.get("task_id")).exception(
-                "memory retrieval failed without fallback"
-            )
-            failed_state = {
-                **state,
-                "status": "failed",
-                "current_step": "retrieve_memory",
-                "error": f"Memory retrieval failed: {exc}",
-            }
-            return self.recorder.append(
-                failed_state,
-                node="retrieve_memory",
-                thought="记忆检索失败，未启用降级策略。",
-                observation={"error": str(exc), "fallback": False},
-            )
-
-        candidate_memories = candidate_pack.to_dict()
-        selected_memories = memory_pack.to_dict()
-        memory_context = memory_pack.render_for_prompt()
-        skill_context = _merge_skill_context(
-            state.get("skill_context", []),
-            [result.to_dict() for result in memory_pack.skill],
-        )
-        memory_selected_skills = [
-            result.card.skill_name
-            for result in memory_pack.skill
-            if result.card.skill_name
-        ]
-        selected_skills = _merge_unique(state.get("selected_skills", []), memory_selected_skills)
-        observations = state.get("observations", []) + [
-            {
-                "type": "retrieved_memories",
-                "content": {
-                    "query_plan": query_plan.to_dict(),
-                    "candidate_count": len(candidate_pack.all_results()),
-                    "selected_count": len(memory_pack.all_results()),
-                    "rerank": rerank_decision.to_dict(),
-                },
-            }
-        ]
-        state = {
-            **state,
-            "observations": observations,
-            "retrieved_memories": candidate_memories,
-            "selected_memories": selected_memories,
-            "memory_query_plan": query_plan.to_dict(),
-            "memory_rerank": rerank_decision.to_dict(),
-            "memory_context": memory_context,
-            "skill_context": skill_context,
-            "selected_skills": selected_skills,
-        }
-        logger.bind(task_id=state.get("task_id")).info(
-            "memory retrieved queries={} candidates={} selected={} short={} mid={} long={} skill={} selected_skills={}",
-            len(query_plan.queries),
-            len(candidate_pack.all_results()),
-            len(memory_pack.all_results()),
-            len(memory_pack.short_term),
-            len(memory_pack.mid_term),
-            len(memory_pack.long_term),
-            len(memory_pack.skill),
-            selected_skills,
-        )
-        return self.recorder.append(
-            state,
-            node="retrieve_memory",
-            thought=f"检索到 {len(candidate_pack.all_results())} 条候选记忆，选中 {len(memory_pack.all_results())} 条。",
-            observation={
-                "query_plan": query_plan.to_dict(),
-                "candidate_count": len(candidate_pack.all_results()),
-                "selected_count": len(memory_pack.all_results()),
-                "selected_memories": selected_memories,
-                "rerank": rerank_decision.to_dict(),
-                "memory_context": memory_context,
-            },
-        )
-
     def _prepare_context(self, state: AgentState) -> AgentState:
+        loop_count = int(state.get("loop_count", 0))
+        if int(state.get("file_cache_last_touch_loop", -1)) != loop_count:
+            touched = touch_cache_files(
+                state,
+                current_focus_files(state, limit=4),
+            )
+            if touched:
+                state = {**state, **touched}
+            state = {**state, "file_cache_last_touch_loop": loop_count}
         new_state = self.context_manager.prepare(state)
         if new_state.get("context_digest") != state.get("context_digest"):
             logger.bind(task_id=state.get("task_id")).info(
@@ -859,6 +757,7 @@ class DebugAgent:
         state = {
             **state,
             "plan": plan,
+            "work_plan": _work_plan_from_steps(plan),
             "current_step": "select_action",
         }
         logger.bind(task_id=state.get("task_id")).info("initial plan created steps={}", len(plan))
@@ -881,6 +780,14 @@ class DebugAgent:
                 limit_events = [event for event in raw_limit_events if isinstance(event, dict)]
         action_history = list(state.get("action_history", []) or [])
         action_history.append(self._action_history_entry(state, action))
+        work_plan = state.get("work_plan") if isinstance(state.get("work_plan"), dict) else {}
+        if isinstance(action.metadata, dict):
+            work_plan = _apply_work_plan_update(work_plan, action.metadata.get("plan_update"))
+        draft_findings = list(state.get("draft_findings", []) or [])
+        if isinstance(action.metadata, dict):
+            raw_findings = action.metadata.get("draft_findings")
+            if isinstance(raw_findings, list):
+                draft_findings = merge_finding_candidates(draft_findings, raw_findings)
         observations = list(state.get("observations", []) or [])
         llm_observations = list(state.get("llm_observations", []) or [])
         action_limit_events = list(state.get("action_limit_events", []) or [])
@@ -895,13 +802,14 @@ class DebugAgent:
             action_limit_events.extend(limit_events)
         state = {
             **state,
+            "work_plan": work_plan,
             "next_action": action.name,
             "next_action_input": action.args,
-            "pending_resolution": {},
             "action_history": action_history,
             "action_limit_events": action_limit_events,
             "observations": observations,
             "llm_observations": llm_observations,
+            "draft_findings": draft_findings,
             "current_step": action.name,
         }
         return self.recorder.append(
@@ -917,6 +825,7 @@ class DebugAgent:
         return {
             "action": action.name,
             "signature": _action_signature(action, state),
+            "edit_revision": int((state.get("runtime_facts") or {}).get("edit_revision", 0) or 0),
             "loop_count": int(state.get("loop_count", 0)),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -929,15 +838,7 @@ class DebugAgent:
         started_at = time.perf_counter()
         action_logger.info("action execution started")
         try:
-            if action.name == "run_tests" and not _verification_required(state):
-                output = {
-                    "command": action.args.get("command", ""),
-                    "skipped": True,
-                    "reason": "verification_required=false",
-                }
-            elif action.name == "write_memory":
-                output = self._write_memory(state)
-            elif action.name == "request_user_input":
+            if action.name == "request_user_input":
                 questions = _clean_string_list(
                     action.args.get("questions"), limit=3, max_chars=300
                 )
@@ -962,6 +863,11 @@ class DebugAgent:
                     }
             elif action.name == "search_code_context":
                 output = self._search_code_context(state, action)
+            elif action.name == "apply_code_patch" and _current_task_intent(state) != "implement":
+                output = {
+                    "error": "The current user message does not authorize repository edits.",
+                    "applied": False,
+                }
             elif self._is_blocked_by_plan_mode(state, action):
                 output = {
                     "error": "Code-changing actions require an approved plan. Call EnterPlanMode, then ExitPlanMode after the plan is evaluated.",
@@ -971,15 +877,20 @@ class DebugAgent:
                 }
             else:
                 action_args = dict(action.args)
+                runtime_context: dict[str, Any] | None = None
                 if action.name == "build_codebase_context":
                     action_args.setdefault("index_path", self.config.code_context_index_path)
                 if action.name == "apply_code_patch":
-                    action_args["_guard"] = self._edit_guard(state)
+                    runtime_context = {
+                        "guard": self._edit_guard(state),
+                        "decision": dict(
+                            action.metadata.get("decision_context") or {}
+                        ),
+                    }
                 if action.name in {"run_shell_command", "run_tests"}:
                     guard_output = self._guard_verification_command(state, action.name, action_args)
                     if guard_output is not None:
                         output = guard_output
-                        action_args = {}
                     else:
                         output = self._registry().run_tool(
                             action.name,
@@ -994,13 +905,13 @@ class DebugAgent:
                                 thought=action.thought,
                                 metadata=action.metadata,
                             )
-                        action_args = {}
-                if action_args:
+                else:
                     output = self._registry().run_tool(
                         action.name,
                         self.config.repo_path,
                         action_args,
                         allowed_permissions=self._allowed_tool_permissions(),
+                        runtime_context=runtime_context,
                     )
         except Exception as exc:
             action_logger.exception("action execution raised exception")
@@ -1040,6 +951,8 @@ class DebugAgent:
         return state
 
     def _requires_step_approval(self, state: AgentState, action: Action) -> bool:
+        if _is_smoke_shell_action(action):
+            return not _has_pending_step_approval(state)
         if not bool(self.config.require_step_approval):
             return False
         if not bool(state.get("require_step_approval", self.config.require_step_approval)):
@@ -1157,8 +1070,6 @@ class DebugAgent:
         state = self._execute_action(state, action)
         if state.get("status") in {"failed", "awaiting_user_input"}:
             return state, True
-        if action.name == "write_memory" and not state.get("error"):
-            return self._finalize(state), True
         if self._should_observe_latest_tool(state):
             state = self._observe(state)
             if state.get("status") == "failed":
@@ -1170,14 +1081,21 @@ class DebugAgent:
             获取 llm calls 操作过的所有文件后的回复
         """
         read_contents: dict[str, str] = {}
+        allowed_files: set[str] = set()
         cache = state.get("read_file_cache") or {}
         if isinstance(cache, dict):
             for file_path, snapshot in cache.items():
                 if not isinstance(snapshot, dict):
                     continue
-                content = snapshot.get("content")
-                if str(file_path).strip() and isinstance(content, str):
-                    read_contents[str(file_path).strip()] = content
+                spans = [
+                    item
+                    for item in snapshot.get("spans", []) or []
+                    if isinstance(item, dict) and isinstance(item.get("content"), str)
+                ]
+                path = str(file_path).strip()
+                if path and spans:
+                    allowed_files.add(path)
+                    read_contents[path] = str(spans[-1].get("content") or "")
         if not read_contents:
             for call in state.get("tool_calls", []):
                 if not isinstance(call, dict) or call.get("name") != "read_file":
@@ -1189,26 +1107,25 @@ class DebugAgent:
                 content = output.get("content")
                 if file_path and isinstance(content, str):
                     read_contents[file_path] = content
-        allowed_files = sorted(read_contents)
-        current_execution = current_execution_item(state)
-        execution_scope = (
-            execution_target_files(state)
-            if isinstance(current_execution, dict) and str(current_execution.get("kind") or "") == "patch"
-            else []
-        )
-        if execution_scope:
-            scoped_contents = {
-                path: read_contents[path]
-                for path in execution_scope
-                if path in read_contents
-            }
-            if scoped_contents:
-                read_contents = scoped_contents
-                allowed_files = sorted(scoped_contents)
+                    allowed_files.add(file_path)
+        read_spans: dict[str, list[dict[str, Any]]] = {}
+        file_revisions: dict[str, str] = {}
+        if isinstance(cache, dict):
+            for file_path, snapshot in cache.items():
+                if not isinstance(snapshot, dict):
+                    continue
+                spans = snapshot.get("spans")
+                if isinstance(spans, list):
+                    read_spans[str(file_path)] = [item for item in spans if isinstance(item, dict)]
+                revision = str(snapshot.get("file_revision") or "").strip()
+                if revision:
+                    file_revisions[str(file_path)] = revision
         return {
             "editing_enabled": self.config.editing_enabled,
-            "allowed_files": allowed_files,
+            "allowed_files": sorted(allowed_files),
             "read_contents": read_contents,
+            "read_spans": read_spans,
+            "file_revisions": file_revisions,
             "max_files": self.config.editing_max_files,
             "max_changed_lines": self.config.editing_max_changed_lines,
             "max_file_bytes": self.config.editing_max_file_bytes,
@@ -1306,15 +1223,8 @@ class DebugAgent:
         tool_spec = self._registry().get_tool(action.name)
         if tool_spec and tool_spec.reducer:
             updates.update(tool_spec.reducer(state, output))
-        elif action.name == "write_memory":
-            updates["memory_written"] = True
-            updates["promoted_memories"] = output.get("promoted", [])
-            updates["consolidated_skills"] = output.get("consolidated", [])
         if isinstance(output.get("pending_resolution"), dict):
             updates["pending_resolution"] = output["pending_resolution"]
-        transition_state = {**state, **updates}
-        updates["progress_ledger"] = update_progress_ledger(transition_state, action, output)
-
         tool_calls = state.get("tool_calls", []) + [
             {
                 "name": action.name,
@@ -1332,6 +1242,9 @@ class DebugAgent:
         ]
 
         if output.get("error"):
+            facts = dict(state.get("runtime_facts") or _initial_runtime_facts())
+            facts["last_tool_error"] = str(output.get("error") or "")
+            updates["runtime_facts"] = facts
             if output.get("needs_more_context"):
                 updates["status"] = "need_more_context"
             else:
@@ -1343,6 +1256,9 @@ class DebugAgent:
                 output["error"],
             )
         elif _tool_output_is_success(output):
+            facts = dict(updates.get("runtime_facts") or state.get("runtime_facts") or _initial_runtime_facts())
+            facts["last_tool_error"] = None
+            updates["runtime_facts"] = facts
             if state.get("error"):
                 updates["error"] = None
             if state.get("status") == "need_more_context" and "status" not in updates:
@@ -1358,13 +1274,6 @@ class DebugAgent:
             change_events = new_state.get("change_events")
             if isinstance(change_events, list) and change_events:
                 emit_change_event(change_events[-1])
-        if action.name != "write_memory":
-            new_state = self.memory_manager.add_short_term(
-                new_state,
-                trigger=f"tool:{action.name}",
-                content=self._short_term_tool_content(action.name, output),
-                tags=[action.name],
-            )
         return new_state
 
     def _guard_verification_command(
@@ -1443,6 +1352,10 @@ class DebugAgent:
             **state,
             "llm_observations": llm_observations,
             "observations": observations,
+            "draft_findings": merge_finding_candidates(
+                state.get("draft_findings", []),
+                observation.get("finding_candidates", []),
+            ),
         }
         logger.bind(task_id=state.get("task_id")).info(
             "observation synthesized latest_tool={} status={} confidence={}",
@@ -1456,16 +1369,6 @@ class DebugAgent:
             thought=f"整理 `{latest.get('name', 'unknown')}` 的结果。",
             observation=observation,
         )
-
-    def _write_memory(self, state: AgentState) -> dict:
-        result = self.memory_manager.record_task_memory(state, self._registry()).to_dict()
-        logger.bind(task_id=state.get("task_id")).info(
-            "memory written written={} promoted={} consolidated={}",
-            len(result.get("written", [])),
-            len(result.get("promoted", [])),
-            len(result.get("consolidated", [])),
-        )
-        return result
 
     def _record_rl_transition(
         self,
@@ -1514,51 +1417,6 @@ class DebugAgent:
             "rl_transitions": transitions,
             "rl_last_reward": reward.to_dict(),
         }
-
-    def _short_term_tool_content(self, tool_name: str, output: Dict[str, Any]) -> str:
-        if output.get("error"):
-            return f"{tool_name} failed: {output.get('error')}"
-        if tool_name == "search_code":
-            matches = output.get("matches", [])
-            return f"{tool_name} returned {len(matches)} matches."
-        if tool_name == "search_text":
-            matches = output.get("matches", [])
-            return f"{tool_name} pattern={output.get('pattern')} matches={len(matches)}."
-        if tool_name == "search_code_context":
-            return (
-                f"{tool_name} returned {len(output.get('files', []))} files, "
-                f"{len(output.get('functions', []))} functions, "
-                f"{len(output.get('api_routes', []))} routes."
-            )
-        if tool_name == "read_file":
-            return f"{tool_name} read {output.get('file_path', 'unknown file')}."
-        if tool_name == "run_tests":
-            if output.get("skipped"):
-                return f"{tool_name} skipped reason={output.get('reason')}"
-            return f"{tool_name} exit_code={output.get('exit_code')} command={output.get('command')}"
-        if tool_name == "run_shell_command":
-            return (
-                f"{tool_name} purpose={output.get('purpose')} "
-                f"exit_code={output.get('exit_code')} command={output.get('command')}"
-            )
-        if tool_name == "apply_code_patch":
-            return (
-                f"{tool_name} applied={output.get('applied')} "
-                f"files={output.get('changed_files', [])} "
-                f"changed_lines={output.get('changed_line_count', 0)}"
-            )
-        if tool_name == "request_user_input":
-            return f"{tool_name} questions={output.get('questions', [])}"
-        if tool_name == "EnterPlanMode":
-            return f"{tool_name} entered={output.get('entered')} plan_chars={len(str(output.get('technical_plan') or ''))}"
-        if tool_name == "ExitPlanMode":
-            return f"{tool_name} exited={output.get('exited')} approved={output.get('approved')}"
-        if tool_name == "git_diff":
-            if output.get("skipped"):
-                return f"{tool_name} skipped reason={output.get('reason')}"
-            diff = output.get("diff", "")
-            return f"{tool_name} returned {len(diff.splitlines())} diff lines."
-        return f"{tool_name} output keys: {', '.join(sorted(output.keys()))}"
 
     def _should_observe_latest_tool(self, state: AgentState) -> bool:
         mode = (self.config.observer_mode or "").strip().lower()
@@ -1649,21 +1507,9 @@ class DebugAgent:
                 "loop_count": int(state.get("loop_count", 0)) + 1,
             }
             return state, False, False, output
-        if bool(runtime_decision.get("is_complete")):
-            judgement = {
-                "decision": "complete",
-                "reason": "Runtime completion evaluator found no blockers and all required criteria passed.",
-                "questions": [],
-                "suggested_next_action": "",
-                "confidence": 1.0,
-                "source": "runtime_transition",
-            }
-            state = self._record_completion_judgement(state, judgement)
-            state = self._finalize(state)
-            return state, True, True, {"completion_judgement": judgement}
         judgement = self.completion_judge.judge(state)
         output = {"completion_judgement": judgement}
-        decision = str(judgement.get("decision") or "complete").strip().lower()
+        decision = str(judgement.get("decision") or "continue").strip().lower()
         if decision == "needs_user_input":
             state = self._record_completion_judgement(state, judgement)
             state = self._await_user_input(state, judgement)
@@ -1719,28 +1565,6 @@ class DebugAgent:
                     "completion judge requested continue repeatedly; runtime contract remains authoritative"
                 )
             return state, False, False, output
-        if state.get("goal_contract"):
-            runtime_decision = evaluate_completion_transition(state)
-            blocked_judgement = {
-                **judgement,
-                "decision": "continue",
-                "reason": (
-                    "Completion judge proposed completion, but required runtime criteria remain unmet: "
-                    f"{runtime_decision.get('blockers', [])}."
-                ),
-                "suggested_next_action": runtime_decision.get("required_next_action", ""),
-                "source": "runtime_contract_gate",
-            }
-            state = self._record_completion_judgement(state, blocked_judgement)
-            state = {
-                **state,
-                "current_step": "select_action",
-                "completion_judge_continue_count": int(
-                    state.get("completion_judge_continue_count", 0)
-                )
-                + 1,
-            }
-            return state, False, False, {"completion_judgement": blocked_judgement}
         state = self._record_completion_judgement(state, judgement)
         state = self._finalize(state)
         return state, True, True, output
@@ -1907,8 +1731,6 @@ class DebugAgent:
         """
         status = "finished" if not state.get("error") else "failed"
         state = {**state, "status": status, "current_step": "finished"}
-        if status == "finished":
-            state = self._write_memory_on_finalize(state)
         if self.rl_enabled:
             terminal = self.rl_reward.terminal_reward(state)
             state = {
@@ -1942,49 +1764,6 @@ class DebugAgent:
                 "llm_errors": state.get("llm_errors", [])[-5:],
             },
         )
-
-    def _write_memory_on_finalize(self, state: AgentState) -> AgentState:
-        if state.get("memory_written") or not _has_meaningful_task_result(state):
-            return state
-        try:
-            output = self._write_memory(state)
-        except Exception as exc:
-            logger.bind(task_id=state.get("task_id")).warning(
-                "finalize memory write failed error={}",
-                exc,
-            )
-            observations = state.get("observations", []) + [
-                {
-                    "type": "memory_write_failed",
-                    "tool": "write_memory",
-                    "content": {"error": str(exc)},
-                }
-            ]
-            return {**state, "observations": observations}
-
-        tool_calls = state.get("tool_calls", []) + [
-            {
-                "name": "write_memory",
-                "input": {"trigger": "finalize"},
-                "output": output,
-                "error": output.get("error") if isinstance(output, dict) else None,
-            }
-        ]
-        observations = state.get("observations", []) + [
-            {
-                "type": "tool_output",
-                "tool": "write_memory",
-                "content": output,
-            }
-        ]
-        return {
-            **state,
-            "memory_written": True,
-            "promoted_memories": output.get("promoted", []) if isinstance(output, dict) else [],
-            "consolidated_skills": output.get("consolidated", []) if isinstance(output, dict) else [],
-            "tool_calls": tool_calls,
-            "observations": observations,
-        }
 
     def _registry(self) -> RegistrySnapshot:
         if self._active_registry is None:
@@ -2077,30 +1856,6 @@ class DebugAgent:
             )
         return fallback
 
-    def _default_memory_query_planner(self) -> MemoryQueryPlanner:
-        mode = (self.config.memory_query_planner_mode or "").strip().lower()
-        if mode == "llm":
-            return LLMMemoryQueryPlanner(
-                llm_config=_resolve_llm_config(
-                    self.config.llm_config,
-                    self.config.memory_query_llm_config,
-                ),
-            )
-        return DisabledMemoryQueryPlanner()
-
-    def _default_memory_reranker(self) -> MemoryReranker:
-        mode = (self.config.memory_reranker_mode or "").strip().lower()
-        if mode == "llm":
-            return LLMMemoryReranker(
-                llm_config=_resolve_llm_config(
-                    self.config.llm_config,
-                    self.config.memory_rerank_llm_config,
-                ),
-                selected_limit=self.config.memory_selected_limit,
-                candidate_limit=self.config.memory_rerank_candidate_limit,
-            )
-        return DisabledMemoryReranker(selected_limit=self.config.memory_selected_limit)
-
     def _default_code_context_query_planner(self) -> CodeContextQueryPlanner:
         mode = (self.config.code_context_query_planner_mode or "").strip().lower()
         if mode == "llm":
@@ -2163,6 +1918,100 @@ def _resolve_llm_config(base: LLMConfig, override: LLMConfig) -> LLMConfig:
             else base.max_output_chars
         ),
     )
+def _task_brief_from_analysis(state: AgentState, analysis: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "intent": str(analysis.get("intent") or "diagnose").strip().lower(),
+        "objective": str(state.get("title") or state.get("description") or "").strip(),
+        "constraints": _clean_string_list(analysis.get("risk_notes"), 12, 500),
+        "acceptance": _clean_string_list(analysis.get("acceptance_criteria"), 12, 500),
+        "review_focus": _clean_string_list(analysis.get("review_focus"), 10, 120),
+        "historical_context": _clean_string_list(
+            analysis.get("historical_context"), 12, 500
+        ),
+    }
+
+
+def _current_task_intent(state: AgentState) -> str:
+    brief = state.get("task_brief")
+    if isinstance(brief, dict):
+        intent = str(brief.get("intent") or "").strip().lower()
+        if intent in {"diagnose", "implement", "explain", "review"}:
+            return intent
+    return "diagnose"
+
+
+def _work_plan_from_steps(steps: list[str]) -> dict[str, Any]:
+    normalized = [str(item).strip() for item in steps if str(item).strip()]
+    return {
+        "steps": [
+            {
+                "id": f"step_{index}",
+                "description": description,
+                "status": "in_progress" if index == 1 else "pending",
+            }
+            for index, description in enumerate(normalized, start=1)
+        ],
+        "current_focus": normalized[0] if normalized else "",
+        "open_questions": [],
+    }
+
+
+def _apply_work_plan_update(work_plan: dict[str, Any], update: Any) -> dict[str, Any]:
+    if not isinstance(update, dict):
+        return dict(work_plan)
+    result = dict(work_plan)
+    if isinstance(update.get("steps"), list):
+        steps: list[dict[str, Any]] = []
+        for index, item in enumerate(update["steps"], start=1):
+            if not isinstance(item, dict):
+                continue
+            description = str(item.get("description") or "").strip()
+            if not description:
+                continue
+            status = str(item.get("status") or "pending").strip().lower()
+            if status not in {"pending", "in_progress", "done", "blocked"}:
+                status = "pending"
+            steps.append(
+                {
+                    "id": str(item.get("id") or f"step_{index}").strip(),
+                    "description": description,
+                    "status": status,
+                }
+            )
+        if steps:
+            result["steps"] = steps[:12]
+    if "current_focus" in update:
+        result["current_focus"] = str(update.get("current_focus") or "").strip()[:500]
+    if "open_questions" in update:
+        result["open_questions"] = _clean_string_list(update.get("open_questions"), 8, 300)
+    return result
+
+
+def _initial_runtime_facts() -> dict[str, Any]:
+    return {
+        "last_tool_error": None,
+        "edited_files": [],
+        "edit_revision": 0,
+        "verified_revision": 0,
+        "last_verification": {},
+        "pending_user_input": False,
+        "plan_mode_active": False,
+    }
+
+
+def _sync_runtime_facts(state: AgentState) -> dict[str, Any]:
+    facts = _initial_runtime_facts()
+    if isinstance(state.get("runtime_facts"), dict):
+        facts.update(state["runtime_facts"])
+    facts["edited_files"] = list(state.get("edited_files", []) or [])
+    facts["pending_user_input"] = str(state.get("status") or "") == "awaiting_user_input"
+    facts["plan_mode_active"] = bool(state.get("plan_mode", False))
+    if state.get("error"):
+        facts["last_tool_error"] = str(state.get("error"))
+    commands = state.get("verification_commands", []) or []
+    if commands and isinstance(commands[-1], dict):
+        facts["last_verification"] = dict(commands[-1])
+    return facts
 
 
 def _llm_config_enabled(value: LLMConfig) -> bool:
@@ -2303,6 +2152,14 @@ def _attach_runtime_usage_to_report(
 def _has_pending_step_approval(state: AgentState) -> bool:
     pending = state.get("pending_step_approval")
     return isinstance(pending, dict) and bool(pending.get("action"))
+
+
+def _is_smoke_shell_action(action: Action) -> bool:
+    return (
+        action.name == "run_shell_command"
+        and str(action.args.get("purpose") or "").strip().lower() == "verification"
+        and str(action.args.get("verification_kind") or "").strip().lower() == "smoke"
+    )
 
 
 def _approval_answer_is_approved(answer: str) -> bool:
@@ -2472,6 +2329,57 @@ def _merge_unique(*groups: Any) -> list[str]:
     return values
 
 
+def _session_candidate_files(
+    memory: Any,
+    analysis: dict[str, Any],
+    repo_path: str,
+    *,
+    limit: int = 12,
+) -> list[str]:
+    """Convert historical file references into current-run hints, never read evidence."""
+    if not isinstance(memory, dict):
+        return []
+    raw_paths: list[str] = []
+    playbook = memory.get("playbook")
+    if isinstance(playbook, dict):
+        raw_paths.extend(_clean_string_list(playbook.get("files"), 30, 500))
+    for turn in memory.get("recent_turns", []) or []:
+        if not isinstance(turn, dict):
+            continue
+        result = turn.get("assistant_result")
+        if isinstance(result, dict):
+            raw_paths.extend(_clean_string_list(result.get("files"), 30, 500))
+    for item in memory.get("conversation_memory", []) or []:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if isinstance(content, dict):
+            raw_paths.extend(_clean_string_list(content.get("files"), 30, 500))
+
+    root = Path(repo_path).resolve()
+    existing: list[str] = []
+    for raw_path in raw_paths:
+        path = raw_path.replace("\\", "/")
+        if path.startswith("./"):
+            path = path[2:]
+        candidate = (root / path).resolve()
+        try:
+            relative = candidate.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if candidate.is_file() and relative not in existing:
+            existing.append(relative)
+
+    analysis_text = json.dumps(analysis, ensure_ascii=False).casefold()
+    relevant = [
+        path
+        for path in existing
+        if path.casefold() in analysis_text
+        or Path(path).name.casefold() in analysis_text
+    ]
+    return relevant[:limit]
+
+
 def _normalize_question_text(value: str) -> str:
     return " ".join(str(value or "").strip().lower().split())
 
@@ -2503,13 +2411,6 @@ def _is_duplicate_user_question_set(state: AgentState, questions: list[str]) -> 
 def _action_signature(action: Action, state: AgentState | None = None) -> str:
     if action.name == "read_file":
         file_path = str(action.args.get("file_path") or "").strip()
-        if not file_path and isinstance(state, dict):
-            current = current_execution_item(state)
-            if isinstance(current, dict):
-                for path in current.get("target_files", []) or []:
-                    file_path = str(path).strip()
-                    if file_path:
-                        break
         return f"read_file:{file_path or '<unknown>'}"
     if action.name == "apply_code_patch":
         changes = action.args.get("changes")
@@ -2527,14 +2428,6 @@ def _action_signature(action: Action, state: AgentState | None = None) -> str:
                 for path in action.args.get("target_files", []) or []
                 if str(path).strip()
             ]
-        if not targets and isinstance(state, dict):
-            current = current_execution_item(state)
-            if isinstance(current, dict):
-                targets = [
-                    str(path).strip()
-                    for path in current.get("target_files", []) or []
-                    if str(path).strip()
-                ]
         return f"apply_code_patch:{'|'.join(sorted(targets)) or '<unknown>'}"
     if action.name == "run_shell_command":
         command = str(action.args.get("command") or "").strip()
@@ -2542,6 +2435,12 @@ def _action_signature(action: Action, state: AgentState | None = None) -> str:
     if action.name == "search_code_context":
         query = str(action.args.get("query") or "").strip()
         return f"search_code_context:{query or '<empty>'}"
+    if action.name == "search_text":
+        pattern = " ".join(str(action.args.get("pattern") or "").split())
+        globs = ",".join(sorted(str(item) for item in action.args.get("globs", []) or []))
+        return f"search_text:{pattern}:{globs}:{bool(action.args.get('regex', True))}"
+    if action.name == "list_files":
+        return "list_files"
     if action.name == "request_user_input":
         questions = _clean_string_list(action.args.get("questions"), limit=3, max_chars=300)
         signature = _question_set_signature(questions)

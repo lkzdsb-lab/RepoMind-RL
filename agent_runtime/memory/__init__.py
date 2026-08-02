@@ -1,16 +1,7 @@
-"""Memory layer interfaces and local baseline store."""
+"""Online session memory boundary."""
 
-from agent_runtime.memory.cards import MemoryCard, MemoryContextPack, MemorySearchResult
-from agent_runtime.memory.manager import LayeredMemoryManager, MemoryPromotionPolicy
-from agent_runtime.memory.store import JsonlMemoryStore, LocalVectorMemoryStore, RedisMemoryStore
+from agent_runtime.memory.session import SessionMemoryService
 
 __all__ = [
-    "JsonlMemoryStore",
-    "LayeredMemoryManager",
-    "LocalVectorMemoryStore",
-    "MemoryCard",
-    "MemoryContextPack",
-    "MemoryPromotionPolicy",
-    "MemorySearchResult",
-    "RedisMemoryStore",
+    "SessionMemoryService",
 ]

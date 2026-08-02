@@ -60,6 +60,7 @@ class RegistrySnapshot:
         args: dict[str, Any] | None = None,
         *,
         allowed_permissions: list[str] | None = None,
+        runtime_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         spec = self.get_tool(name)
         if spec is None:
@@ -71,6 +72,7 @@ class RegistrySnapshot:
             repo_path,
             args or {},
             allowed_permissions=allowed_permissions,
+            runtime_context=runtime_context,
         )
 
     # 用 name 反射获取已经注册的元素集合

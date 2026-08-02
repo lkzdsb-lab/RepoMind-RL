@@ -10,6 +10,11 @@ def _tokens(text: str) -> list[str]:
     return re.findall(r"[A-Za-z_][A-Za-z0-9_]*|[\u4e00-\u9fff]+", text.lower())
 
 
+def _is_informative_query(value: Any) -> bool:
+    text = " ".join(str(value or "").split())
+    return bool(text and (_tokens(text) or re.search(r"\d", text)))
+
+
 def utc_now() -> str:
     """ 获取对应的时区的时间 """
     return datetime.now(timezone.utc).isoformat()

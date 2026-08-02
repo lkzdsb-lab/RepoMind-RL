@@ -48,7 +48,7 @@ class RuleBasedContextCompressor:
             if step.get("node") and step.get("thought")
         ]
         observations = _summarize_observations(state.get("observations", [])[-10:])
-        memory_refs = _summarize_memory_refs(state.get("retrieved_memories", {}))
+        memory_refs = _summarize_memory_refs(state.get("session_memory", {}))
         code_changes = []
         if state.get("patch_summary"):
             code_changes.append(str(state["patch_summary"]))
@@ -679,8 +679,6 @@ def _open_tasks(state: AgentState) -> list[str]:
         open_tasks.append("Run verification command.")
     if state.get("patch_summary") is None:
         open_tasks.append("Inspect current git diff.")
-    if not state.get("memory_written"):
-        open_tasks.append("Write reward-gated memory.")
     return open_tasks
 
 

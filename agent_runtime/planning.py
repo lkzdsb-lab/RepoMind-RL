@@ -9,6 +9,7 @@ from typing import Protocol
 from agent_runtime.llm.llm_nodes import LLMJsonNode
 from agent_runtime.verification.capabilities import recommended_verification_command
 from config import LLMConfig
+from ext.tool_summaries import validated_cache_summary
 from model.agent.graph import AgentState
 from model.llm import PlanResponse
 from prompts.templates import load_prompt, render_prompt
@@ -24,7 +25,7 @@ class HeuristicPlanner:
     def make_plan(self, state: AgentState) -> list[str]:
         verification_example = _verification_example(state)
         verification_step = (
-            "Skip command verification because the task contract does not require it."
+            "Skip command verification because the current read-only task does not require it."
             if not _verification_required(state)
             else f"Run an allowed verification command, for example: {verification_example}"
         )
@@ -34,7 +35,6 @@ class HeuristicPlanner:
             "Read candidate files to build exact context.",
             verification_step,
             "Inspect git diff and summarize the current patch state.",
-            "Write layered memory only when the reward gate allows it.",
         ]
 
 
@@ -75,6 +75,11 @@ def _planner_node_prompt(state: AgentState, context: dict) -> str:
         task_analysis=json.dumps(state.get("task_analysis", {}), ensure_ascii=False),
         current_step=state.get("current_step", ""),
         candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),
+        validated_file_cache=json.dumps(
+            validated_cache_summary(state),
+            ensure_ascii=False,
+            default=str,
+        ),
         memory_context=str(state.get("memory_context", ""))[:3000],
         compressed_context=str(state.get("compressed_context", ""))[:3000],
         verification_required=json.dumps(_verification_required(state)),

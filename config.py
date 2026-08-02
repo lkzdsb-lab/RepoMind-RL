@@ -75,15 +75,13 @@ class DebugAgentConfig:
     log_json: bool = False
     log_to_console: bool = True
 
-    # 记忆层持久化配置
-    memory_path: str = ".repomind/memory.jsonl"
-    mid_memory_path: str = ".repomind/memory_mid.jsonl"
-    long_memory_path: str = ".repomind/memory_long.jsonl"
-    skill_memory_dir: str = ".repomind/skills"
-    memory_redis_url: str | None = None
-    semantic_promotion_threshold: float = 0.7
-    procedural_promotion_threshold: float = 1.2
-    skill_consolidation_threshold: float = 1.5
+    # 在线记忆只维护当前会话；长期晋升由未来的离线 worker 负责。
+    session_memory_path: str = ".repomind/session_memory.db"
+    session_memory_max_turns: int = 6
+    session_memory_max_chars: int = 12000
+    session_file_cache_max_files: int = 50
+    session_file_cache_max_spans: int = 200
+    session_file_cache_max_bytes: int = 10 * 1024 * 1024
 
     # context 压缩
     context_compression_enabled: bool = True
@@ -100,8 +98,6 @@ class DebugAgentConfig:
     action_llm_config: LLMConfig = field(default_factory=LLMConfig)
     task_analysis_llm_config: LLMConfig = field(default_factory=LLMConfig)
     observer_llm_config: LLMConfig = field(default_factory=LLMConfig)
-    memory_query_llm_config: LLMConfig = field(default_factory=LLMConfig)
-    memory_rerank_llm_config: LLMConfig = field(default_factory=LLMConfig)
     code_context_query_llm_config: LLMConfig = field(default_factory=LLMConfig)
     code_context_rerank_llm_config: LLMConfig = field(default_factory=LLMConfig)
     skill_selector_llm_config: LLMConfig = field(default_factory=LLMConfig)
@@ -115,16 +111,11 @@ class DebugAgentConfig:
     observer_full_state_on_severe: bool = True
     observer_write_threshold: float = 0.35
     observer_store_limit: int = 12
-    memory_query_planner_mode: str = "disabled"
-    memory_reranker_mode: str = "disabled"
     code_context_query_planner_mode: str = "disabled"
     code_context_reranker_mode: str = "disabled"
     skill_selector_mode: str = "disabled"
     final_reporter_mode: str = "rule_based"
     completion_judge_mode: str = "auto"
-    memory_query_limit: int = 5
-    memory_selected_limit: int = 12
-    memory_rerank_candidate_limit: int = 24
 
     # 代码索引库
     code_context_index_path: str = ".repomind/codebase_context/index.json"
@@ -193,8 +184,6 @@ def default_config_payload() -> dict[str, Any]:
             "action": {},
             "task_analysis": {},
             "observer": {},
-            "memory_query": {},
-            "memory_rerank": {},
             "code_context_query": {},
             "code_context_rerank": {},
             "skill_selector": {},
@@ -207,8 +196,6 @@ def default_config_payload() -> dict[str, Any]:
             "action_policy": config.action_policy_mode,
             "task_analyzer": config.task_analyzer_mode,
             "observer": config.observer_mode,
-            "memory_query_planner": config.memory_query_planner_mode,
-            "memory_reranker": config.memory_reranker_mode,
             "code_context_query_planner": config.code_context_query_planner_mode,
             "code_context_reranker": config.code_context_reranker_mode,
             "skill_selector": config.skill_selector_mode,
@@ -216,17 +203,12 @@ def default_config_payload() -> dict[str, Any]:
             "completion_judge": config.completion_judge_mode,
         },
         "memory": {
-            "path": config.memory_path,
-            "mid_path": config.mid_memory_path,
-            "long_path": config.long_memory_path,
-            "skill_dir": config.skill_memory_dir,
-            "redis_url": config.memory_redis_url,
-            "semantic_threshold": config.semantic_promotion_threshold,
-            "procedural_threshold": config.procedural_promotion_threshold,
-            "skill_consolidation_threshold": config.skill_consolidation_threshold,
-            "query_limit": config.memory_query_limit,
-            "selected_limit": config.memory_selected_limit,
-            "rerank_candidate_limit": config.memory_rerank_candidate_limit,
+            "path": config.session_memory_path,
+            "max_turns": config.session_memory_max_turns,
+            "max_chars": config.session_memory_max_chars,
+            "file_cache_max_files": config.session_file_cache_max_files,
+            "file_cache_max_spans": config.session_file_cache_max_spans,
+            "file_cache_max_bytes": config.session_file_cache_max_bytes,
         },
         "context": {
             "enabled": config.context_compression_enabled,
@@ -383,17 +365,12 @@ def apply_debug_agent_config(config: DebugAgentConfig, data: dict[str, Any]) -> 
         config,
         data.get("memory"),
         {
-            "path": "memory_path",
-            "mid_path": "mid_memory_path",
-            "long_path": "long_memory_path",
-            "skill_dir": "skill_memory_dir",
-            "redis_url": "memory_redis_url",
-            "semantic_threshold": "semantic_promotion_threshold",
-            "procedural_threshold": "procedural_promotion_threshold",
-            "skill_consolidation_threshold": "skill_consolidation_threshold",
-            "query_limit": "memory_query_limit",
-            "selected_limit": "memory_selected_limit",
-            "rerank_candidate_limit": "memory_rerank_candidate_limit",
+            "path": "session_memory_path",
+            "max_turns": "session_memory_max_turns",
+            "max_chars": "session_memory_max_chars",
+            "file_cache_max_files": "session_file_cache_max_files",
+            "file_cache_max_spans": "session_file_cache_max_spans",
+            "file_cache_max_bytes": "session_file_cache_max_bytes",
         },
     )
     _apply_section(
@@ -418,8 +395,6 @@ def apply_debug_agent_config(config: DebugAgentConfig, data: dict[str, Any]) -> 
             "action_policy": "action_policy_mode",
             "task_analyzer": "task_analyzer_mode",
             "observer": "observer_mode",
-            "memory_query_planner": "memory_query_planner_mode",
-            "memory_reranker": "memory_reranker_mode",
             "code_context_query_planner": "code_context_query_planner_mode",
             "code_context_reranker": "code_context_reranker_mode",
             "skill_selector": "skill_selector_mode",
@@ -538,8 +513,6 @@ def _apply_llm_section(config: DebugAgentConfig, section: Any) -> None:
         "action_policy": "action_llm_config",
         "task_analysis": "task_analysis_llm_config",
         "observer": "observer_llm_config",
-        "memory_query": "memory_query_llm_config",
-        "memory_rerank": "memory_rerank_llm_config",
         "code_context_query": "code_context_query_llm_config",
         "code_context_rerank": "code_context_rerank_llm_config",
         "skill_selector": "skill_selector_llm_config",
@@ -565,8 +538,6 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
     for field_name in (
         "task_analyzer_mode",
         "observer_mode",
-        "memory_query_planner_mode",
-        "memory_reranker_mode",
         "code_context_query_planner_mode",
         "code_context_reranker_mode",
         "skill_selector_mode",
@@ -580,8 +551,6 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         "action_llm_config",
         "task_analysis_llm_config",
         "observer_llm_config",
-        "memory_query_llm_config",
-        "memory_rerank_llm_config",
         "code_context_query_llm_config",
         "code_context_rerank_llm_config",
         "skill_selector_llm_config",
@@ -596,9 +565,11 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         "context_recent_items",
         "context_min_new_tokens",
         "observer_store_limit",
-        "memory_query_limit",
-        "memory_selected_limit",
-        "memory_rerank_candidate_limit",
+        "session_memory_max_turns",
+        "session_memory_max_chars",
+        "session_file_cache_max_files",
+        "session_file_cache_max_spans",
+        "session_file_cache_max_bytes",
         "code_context_query_limit",
         "code_context_selected_limit",
         "code_context_rerank_candidate_limit",
@@ -642,16 +613,6 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         resolve_llm_config(config.llm_config, config.observer_llm_config),
     )
     _require_llm_config(
-        "modes.memory_query_planner",
-        config.memory_query_planner_mode == "llm",
-        resolve_llm_config(config.llm_config, config.memory_query_llm_config),
-    )
-    _require_llm_config(
-        "modes.memory_reranker",
-        config.memory_reranker_mode == "llm",
-        resolve_llm_config(config.llm_config, config.memory_rerank_llm_config),
-    )
-    _require_llm_config(
         "modes.code_context_query_planner",
         config.code_context_query_planner_mode == "llm",
         resolve_llm_config(config.llm_config, config.code_context_query_llm_config),
@@ -688,10 +649,7 @@ def normalize_project_runtime_paths(config: DebugAgentConfig) -> DebugAgentConfi
     for field_name in (
         "trace_dir",
         "log_file",
-        "memory_path",
-        "mid_memory_path",
-        "long_memory_path",
-        "skill_memory_dir",
+        "session_memory_path",
         "code_context_index_path",
         "rl_q_table_path",
         "rl_replay_path",

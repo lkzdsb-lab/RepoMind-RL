@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from loguru import logger
+
 from agent_runtime.executor import DebugAgent
+from agent_runtime.memory.session import SessionMemoryService
 from model.agent.graph import AgentRunResult, AgentState
 from model.session import ChatResponse
 from utils import  _clean_string_list
@@ -16,10 +19,17 @@ class AgentSession:
         一个对话
     """
 
-    def __init__(self, agent: DebugAgent) -> None:
+    def __init__(
+        self,
+        agent: DebugAgent,
+        session_memory: SessionMemoryService | None = None,
+    ) -> None:
         self.agent = agent
+        self.session_memory = session_memory or SessionMemoryService.from_config(agent.config)
+        self.session_id = self.session_memory.open_session(agent.config.repo_path)
         self.state: AgentState | None = None
         self.last_trace_path = ""
+        self._turn_message = ""
 
     def send(self, message: str) -> ChatResponse:
         text = str(message or "").strip()
@@ -27,23 +37,49 @@ class AgentSession:
             return ChatResponse(type="empty", message="Empty message ignored.")
 
         if self.state and self.state.get("status") == "awaiting_user_input":
+            self._turn_message = _append_follow_up(self._turn_message, text)
             result = self.agent.resume(self.state, user_answer=text)
         else:
-            result = self.agent.run(title=text, description="")
+            self._turn_message = text
+            session_context = self.session_memory.prepare_turn(self.session_id, text)
+            result = self.agent.run(
+                title=text,
+                description="",
+                session_id=self.session_id,
+                session_memory=session_context,
+            )
         return self._record_result(result)
 
     def load_state(self, state: AgentState, trace_path: str = "") -> ChatResponse:
         self.state = state
+        self.session_id = str(state.get("session_id") or self.session_id)
+        self._turn_message = str(state.get("title") or "")
         self.last_trace_path = trace_path
         return self._to_response(state, trace_path)
 
     def reset(self) -> None:
         self.state = None
         self.last_trace_path = ""
+        self._turn_message = ""
+        self.session_id = self.session_memory.new_session(self.agent.config.repo_path)
 
     def _record_result(self, result: AgentRunResult) -> ChatResponse:
         self.state = result.state
         self.last_trace_path = result.trace_path
+        if result.state.get("status") in {"finished", "failed"}:
+            try:
+                self.session_memory.commit_turn(
+                    self.session_id,
+                    self._turn_message or str(result.state.get("title") or ""),
+                    result.state,
+                )
+            except Exception:
+                # Memory persistence must not turn a completed agent task into a failure.
+                logger.bind(
+                    session_id=self.session_id,
+                    task_id=result.state.get("task_id"),
+                ).exception("failed to commit session memory")
+            self._turn_message = ""
         return self._to_response(result.state, result.trace_path)
 
     def _to_response(self, state: AgentState, trace_path: str) -> ChatResponse:
@@ -156,3 +192,9 @@ def _safe_int(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _append_follow_up(message: str, answer: str) -> str:
+    if not message:
+        return answer
+    return f"{message}\nUser follow-up: {answer}"

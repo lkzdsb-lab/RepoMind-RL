@@ -49,8 +49,6 @@ in `config.json`.
 | `modes.action_policy` | `heuristic`, `rl`, `llm` | Next-action selection. |
 | `modes.task_analyzer` | `disabled`, `llm` | Task understanding. |
 | `modes.observer` | `disabled`, `llm` | Tool result observation synthesis. |
-| `modes.memory_query_planner` | `disabled`, `llm` | Multi-query memory retrieval planning. |
-| `modes.memory_reranker` | `disabled`, `llm` | Memory candidate reranking. |
 | `modes.code_context_query_planner` | `disabled`, `llm` | Multi-query codebase-context search planning. |
 | `modes.code_context_reranker` | `disabled`, `llm` | Codebase-context candidate reranking. |
 | `modes.skill_selector` | `disabled`, `llm` | Registered skill selection. |
@@ -72,10 +70,6 @@ need to differ.
     "action": {
       "model": "strong-action-model"
     },
-    "memory_rerank": {
-      "model": "cheap-rerank-model",
-      "temperature": 0.0
-    },
     "code_context_rerank": {
       "model": "strong-code-model"
     }
@@ -90,13 +84,34 @@ Supported override blocks:
 - `llm.action` or `llm.action_policy`
 - `llm.task_analysis`
 - `llm.observer`
-- `llm.memory_query`
-- `llm.memory_rerank`
 - `llm.code_context_query`
 - `llm.code_context_rerank`
 - `llm.skill_selector`
 - `llm.final_reporter`
 - `llm.completion_judge`
+
+## Session Memory
+
+Online memory is session-scoped and stored in SQLite. It is prepared before task
+analysis and committed only after the final report is available.
+
+```json
+{
+  "memory": {
+    "path": ".repomind/session_memory.db",
+    "max_turns": 6,
+    "max_chars": 12000
+  }
+}
+```
+
+- `memory.path` is resolved relative to the target repository.
+- `memory.max_turns` limits active recent-turn and short-lived memory context.
+- `memory.max_chars` bounds the rendered session context passed downstream.
+- `memory.file_cache_max_files` limits persisted file containers per session.
+- `memory.file_cache_max_spans` limits cached source ranges across those files.
+- `memory.file_cache_max_bytes` limits total cached source bytes; range SLRU evicts normal spans before protected spans.
+- Long-term promotion and skill consolidation do not run in the online agent.
 
 ## Example: Enable Only Code Context LLM
 
@@ -123,8 +138,6 @@ stay disabled.
     "action_policy": "heuristic",
     "task_analyzer": "disabled",
     "observer": "disabled",
-    "memory_query_planner": "disabled",
-    "memory_reranker": "disabled",
     "code_context_query_planner": "llm",
     "code_context_reranker": "llm",
     "skill_selector": "disabled"
@@ -240,9 +253,7 @@ the agent writes separate state:
 /path/to/project-a/.repomind/
   logs/agent.log
   traces/*.json
-  memory_mid.jsonl
-  memory_long.jsonl
-  skills/
+  session_memory.db
   codebase_context/index.json
   rl/q_table.json
   rl/replay.jsonl

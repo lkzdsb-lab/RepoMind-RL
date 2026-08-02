@@ -1,5 +1,5 @@
 # Lee-Agent
-RepoMind-RL 是一个能在真实代码仓库中自动定位 Bug、生成补丁、运行测试并沉淀经验的 Coding Agent。它通过独创的“奖励门控因果记忆策略”管理长期经验，并用 Agentic RL 学习何时检索、写入、更新、遗忘记忆，从而让 Agent 在多轮任务中越修越聪明。
+RepoMind-RL 是一个能在真实代码仓库中自动定位 Bug、生成补丁并运行测试的 Coding Agent。当前版本使用会话级记忆维持多轮上下文，长期记忆晋升与 skill 沉淀将由后续离线流程负责。
 
 ## 第一版 Agent
 
@@ -9,7 +9,7 @@ RepoMind-RL 是一个能在真实代码仓库中自动定位 Bug、生成补丁�
 - `agent_runtime/policy.py`：第一版启发式 action policy，后续可替换为 LLM/RL policy。
 - `agent_runtime/tool_registry.py`：统一封装 `search_code_context`、`search_text`、`read_file`、`run_shell_command`、`apply_code_patch`、`git_diff` 等原语。
 - `agent_runtime/trajectory.py`：记录可回放 trajectory，并落盘到 `.repomind/traces/`。
-- `agent_runtime/memory/`：第一版 JSONL memory card 存储，后续可替换为 SQLite/向量库。
+- `agent_runtime/memory/`：SQLite 会话记忆、topic、turn 和 playbook 存储。
 
 运行示例：
 
@@ -43,7 +43,7 @@ lee-agent --resume-trace /path/to/.repomind/traces/<task_id>.json
 
 LLM 模块的结构化输出支持 `user_update` 字段。该字段只用于展示简短进度，不承载内部推理链；CLI 会显示尚未展示过的 update，trace 中会保留完整 `user_updates` 历史。
 
-根 `llm` 只作为默认模型配置，不代表所有 LLM 模块都会启用。是否调用 LLM 由 `modes` 单独控制；比如 `modes.memory_reranker = "disabled"` 时，即使根 `llm` 已配置 key 和 model，memory reranker 也不会调用 LLM。
+根 `llm` 只作为默认模型配置，不代表所有 LLM 模块都会启用。是否调用 LLM 由 `modes` 单独控制。
 
 运行产物按目标项目隔离。传入 `--repo /path/to/project-a` 时，trace、memory、log、code index、RL 数据都会写入 `/path/to/project-a/.repomind/`；调试另一个项目会写入另一个项目自己的 `.repomind/`。
 
@@ -90,7 +90,9 @@ lee-agent \
 
 `--require-step-approval` 对应 `approval.require_step_approval=true`。开启后每个 action 执行前都会暂停，用户回复 `approve` / `yes` / `同意` 才会继续；其他回复会作为补充信息写回上下文并重新规划。
 
-改完代码后，运行时会把 `verification_stale` 置为 `true`，此时不能直接结束、写 memory 或跳到 diff 汇总。Agent 必须通过 `run_shell_command` 运行一个 `purpose="verification"` 的命令，验证通过后才会清掉 stale 标记。`run_shell_command` 是受限终端原语，会拒绝明显破坏性的命令；代码搜索类需求优先使用 `search_text` 这个 grep/rg 原语，而不是为每个场景写单独工具。
+用户功能路径的冒烟验证是例外：当 `run_shell_command` 使用 `purpose="verification"` 和 `verification_kind="smoke"` 时，即使没有开启全局 step approval，也必须先得到用户批准。普通单测、编译和 lint 应使用 `verification_kind="standard"`，不会因此单独触发审批。
+
+改完代码后，运行时会把 `verification_stale` 置为 `true`，此时不能直接结束或跳到 diff 汇总。Agent 必须通过 `run_shell_command` 运行一个 `purpose="verification"` 的命令，验证通过后才会清掉 stale 标记。`run_shell_command` 是受限终端原语，会拒绝明显破坏性的命令；代码搜索类需求优先使用 `search_text` 这个 grep/rg 原语，而不是为每个场景写单独工具。
 
 ## 运行时 Registry
 
@@ -168,36 +170,9 @@ resources = ["../../skills/go_bug_localization.md"]
 
 这些 skill 不替代工具和存储层；它们描述如何组合 tools、memory、registry 和测试反馈完成一类任务。检索命中后会进入 `skill_context` 和 `selected_skills`，再参与 memory/context/LLM prompt。
 
-## 分层 Memory
+## 会话 Memory
 
-当前 memory 层实现了四种记忆类型：
-
-- `episodic`：某次任务的经历、候选文件、验证结果和补丁摘要。
-- `semantic`：从高 reward 任务中提炼出的稳定事实。
-- `procedural`：可复用的调试流程或操作步骤。
-- `anti_pattern`：失败路径、错误假设或不应重复的操作。
-
-存储层分三层：
-
-- 短期记忆存在 `AgentState.short_term_memories`，只服务当前任务上下文。
-- 中期记忆默认写入 `.repomind/memory_mid.jsonl`；传入 `--memory-redis-url` 后使用 Redis adapter。
-- 长期记忆默认写入 `.repomind/memory_long.jsonl`，通过 `LocalVectorMemoryStore` 模拟向量库边界，后续可替换为真实向量数据库。
-
-执行流程：
-
-1. `retrieve_memory` 会从短期、中期、长期和 skill 四层检索相关记忆。
-2. 检索结果会拼成 `AgentState.memory_context`，可直接传给 LLM prompt。
-3. `write_memory` 写入 episodic 或 anti-pattern memory。
-4. reward 达到阈值后自动 promotion 到 semantic/procedural long-term memory。
-5. reward 更高的长期记忆会 consolidation 到 `.repomind/skills/{skill}.md`。
-
-默认阈值在 `DebugAgentConfig` 中：
-
-```python
-semantic_promotion_threshold = 0.7
-procedural_promotion_threshold = 1.2
-skill_consolidation_threshold = 1.5
-```
+在线记忆使用 `.repomind/session_memory.db`，分为 conversation、tool、temporary 和 preference 四类。每轮任务开始前读取当前 topic、最近 turns 和最新 playbook，直接提供给 Task Analyzer；最终报告生成后再原子提交本轮结果。temporary 记忆按轮次淘汰，原始 turns 保留。在线流程不会执行长期记忆晋升或 skill 沉淀，相关能力后续由独立离线 worker 通过 outbox 接入。
 
 ## Context Compression 与 LLM 接入
 
@@ -312,7 +287,7 @@ lee-agent \
 - 搜索到候选文件、route、DB model：正向 reward。
 - 读到文件内容：正向 reward。
 - 测试通过：大正向 reward。
-- 生成 diff 摘要、写入 memory、promotion 到 skill：正向 reward。
+- 生成 diff 摘要并完成有效验证：正向 reward。
 - 工具报错、过早 finish、测试失败：负向 reward。
 
 这是最小可运行 RL 闭环：

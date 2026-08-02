@@ -4,6 +4,7 @@ title={{ title }}
 description={{ description }}
 status={{ status }}
 error={{ error }}
+completion_judgement={{ completion_judgement }}
 
 # Verification Evidence
 
@@ -11,6 +12,7 @@ verification_required={{ verification_required }}
 verification_reason={{ verification_reason }}
 verification_stale={{ verification_stale }}
 verification_commands={{ verification_commands }}
+step_approval_history={{ step_approval_history }}
 command_results={{ command_results }}
 test_results={{ test_results }}
 
@@ -38,11 +40,18 @@ user_inputs={{ user_inputs }}
 # Reporting Rules
 
 Report only outcomes supported by the supplied evidence.
+Prioritize current test/command/tool output, current repository reads and diffs, and grounded current-run observations in that order.
+Treat plans, candidate files, fallback text, historical claims, and unsupported observation hypotheses as context rather than proof.
+Every reported bug, fix, test result, and finding count must be traceable to current-run evidence.
+If current evidence supports fewer findings than an earlier plan or hypothesis, report only the supported findings and current count.
+When completion_judgement contains reviewed_findings, report every item with verdict=confirmed and no item with verdict=rejected or needs_more_evidence. Preserve corrected claims from the review rather than the Policy draft wording.
 Explain what was done, which relevant files were identified, verification results, whether a patch exists, and any necessary next steps.
+If a smoke verification was declined or could not be executed, identify the user-described functional path as unverified without presenting the refusal as an error.
 Do not claim success when status, error, stale verification, or command evidence indicates otherwise.
 Keep the report concise and user-facing.
 
 # Output Schema
 
-Return JSON with keys: summary, work_done, candidate_files, test_results, has_patch, patch_status, next_steps, user_update.
+Return JSON with keys: summary, findings, work_done, candidate_files, test_results, has_patch, patch_status, next_steps, user_update.
+findings must contain the corrected claim for every confirmed reviewed finding and nothing else. Runtime will enforce this field from completion_judgement.
 user_update should be a short user-facing progress message when useful, or an empty string. Do not reveal chain-of-thought.

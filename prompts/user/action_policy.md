@@ -1,100 +1,127 @@
-# Task
+# Current Task
 
 title={{ title }}
 description={{ description }}
 current_step={{ current_step }}
 status={{ status }}
+task_brief={{ task_brief }}
+work_plan={{ work_plan }}
+runtime_facts={{ runtime_facts }}
+completion_judgement={{ completion_judgement }}
+draft_findings={{ draft_findings }}
 
-# Verification State
+# Runtime Facts
+
 verification_required={{ verification_required }}
 verification_reason={{ verification_reason }}
 verification_stale={{ verification_stale }}
 verification_commands={{ verification_commands }}
 command_results={{ command_results }}
-
-# Plan State
+verification_capabilities={{ verification_capabilities }}
 plan_mode={{ plan_mode }}
 plan_mode_approved={{ plan_mode_approved }}
 technical_plan={{ technical_plan }}
 plan_mode_evaluation={{ plan_mode_evaluation }}
-
-# Goal And Guidance
-selected_skills={{ selected_skills }}
-skill_context={{ skill_context }}
-selected_code_context_summary={{ selected_code_context_summary }}
-goal_contract={{ goal_contract }}
-progress_ledger={{ progress_ledger }}
-next_obligation={{ next_obligation }}
-verification_capabilities={{ verification_capabilities }}
-attention_focus={{ attention_focus }}
-
-# Repository Evidence
-candidate_files={{ candidate_files }}
-read_files={{ read_files }}
-full_read_requirements={{ full_read_requirements }}
-test_results={{ test_results }}
-patch_summary={{ patch_summary }}
 editing_enabled={{ editing_enabled }}
 edit_results={{ edit_results }}
-user_inputs={{ user_inputs }}
-
-# Runtime Controls
 pending_resolution={{ pending_resolution }}
+
+# Working Context
+
+attention_focus={{ attention_focus }}
+candidate_files={{ candidate_files }}
+read_files={{ read_files }}
+selected_code_context_summary={{ selected_code_context_summary }}
+test_results={{ test_results }}
+patch_summary={{ patch_summary }}
+selected_skills={{ selected_skills }}
+skill_context={{ skill_context }}
+user_inputs={{ user_inputs }}
 memory_context={{ memory_context }}
 compressed_context={{ compressed_context }}
+
+# Available Actions
+
 legal_actions={{ legal_actions }}
 action_constraints={{ action_constraints }}
 decision_feedback={{ decision_feedback }}
 
-# Decision Contract
+# Decision Rules
 
-Choose only from legal_actions.
-Each legal action includes a short description, required_fields when applicable, and permissions/notes when relevant.
-Return exactly one best next action.
-When decision_feedback is non-empty, the previous decision was rejected. Correct the stated problem and choose again from the supplied legal_actions.
-Use action_constraints as the compact summary of current execution-phase restrictions, focus files, and full-read requirements.
-Use attention_focus as an advisory scope lens for the next decision. It should narrow attention, but it does not override legal_actions, pending_resolution, full_read_requirements, or verification rules.
-Use next_obligation as the primary runtime obligation. Its criterion_id and description identify the concrete contract gate currently missing. Do not choose finish unless next_obligation.kind is complete.
-If a selected tool has required_fields, you must fill them. Do not leave required fields blank.
-Include user_update as a short user-facing progress message when useful, or an empty string. Do not reveal chain-of-thought.
+- Choose exactly one action from legal_actions. Never invent an action.
+- Always return top-level confidence as a number between 0 and 1. It is required for every action; never omit it, set it to null, or place it inside action_input.
+- When decision_feedback contains required_action, keep that action and repair only its action_input using validation_errors and expected_input_fields.
+- Build action_input from the selected action's flat input_fields list. Do not use aliases such as search_query, and do not place top-level response fields inside action_input. Required fields must be present and valid.
+- For a ranged read, return separate named fields, for example: `{"file_path":"server.go","start_line":30,"end_line":131,"max_chars":12000}`. Never encode a line range as an unnamed array.
+- The current task_brief is authoritative. Historical memory supplies context but never grants permission to edit.
+- You own semantic sequencing. Decide whether to inspect, patch, verify, ask, or finish from the evidence; no execution queue will decide this for you.
+- A failed verification is evidence. If it identifies missing implementation, inspect or patch before running the same command again.
+- Passing tests prove only the exercised behavior. They do not replace independent implementation analysis for diagnose, review, or broad bug-finding tasks.
+- Use task_brief.review_focus to inspect relevant correctness, boundary, concurrency, security, resource, API-contract, and test-gap risks before finishing. Apply this proportionally; do not expand a targeted fix into an unrelated audit.
+- Choose verification from the observed risk: concurrency may require race-oriented checks, input arithmetic may require boundary cases or fuzzing, and filesystem security may require adversarial path checks. Do not run checks without a code-grounded reason.
+- For debug or implement tasks with a concrete user-described behavior, prefer one bounded smoke verification that exercises the same input and functional path. Reproduce it before the fix when safe and useful, then repeat it after the fix. Use run_shell_command with purpose="verification" and verification_kind="smoke"; the runtime will request user approval before execution.
+- Never relabel a smoke command as verification_kind="standard" to avoid approval. If approval is not granted, treat the response as user direction and replan without executing that smoke path.
+- Do not label ordinary unit, compile, lint, or repository-wide test commands as smoke. If the functional path needs credentials, external services, destructive writes, shell composition, or commands outside verification_capabilities, do not bypass the guard; use standard safe verification and disclose the unverified behavior.
+- Do not repeat an identical command when repository state and evidence have not changed.
+- After list_files identifies concrete files, read the relevant candidates instead of listing or searching for the same files again. A deterministic repository lookup cannot be repeated until an edit changes repository evidence.
+- Decide the necessary file scope yourself. Prefer focused line ranges for large files and full reads only when whole-file structure matters.
+- The read_files section contains exact source ranges from the current validated cache. Reuse them instead of reading the same file again when they cover the required code.
+- Before patching, ensure every exact old_text anchor appears in source read during this run. The runtime validates this requirement.
+- Copy patch old_text exactly from one supplied source range. Never reconstruct an anchor from memory, plans, summaries, or historical findings. If the required source is absent, request a focused read_file range.
+- After a successful patch, verification_stale becomes true. You may inspect or patch further, but finish remains invalid until the latest edit is successfully verified.
+- For diagnose, review, and explain intents, do not enter Plan Mode or patch. Finish once repository evidence answers the current acceptance criteria.
+- For implement intent, use Plan Mode before the first patch. After it is approved, continue to patch, inspect, and verify as evidence requires.
+- Use request_user_input only when repository tools cannot resolve a concrete ambiguity.
+- When completion_judgement requests more evidence for a draft finding, use its focused recommended action before attempting finish again.
+- When work_plan changes, return plan_update with exactly steps, current_focus, and open_questions. Each step requires id, description, and status; status must be pending, in_progress, done, or blocked. Include the complete current step list. Return an empty plan_update when nothing changed. Do not claim a step is done without evidence.
 
-# Selection Rules
-- Choose the next tool that collects the smallest missing evidence needed for the task.
-- Before any code-changing action, choose EnterPlanMode and provide a detailed Debug/Refactor technical plan. Do this after enough local evidence has been collected to make the plan concrete.
-- When plan_mode is true, do not choose any code-changing action. Your only implementation-related job is to refine/evaluate the technical plan, ask the user if uncertainty remains, then choose ExitPlanMode.
-- When plan_mode is true and technical_plan is already present, do not choose EnterPlanMode again.
-- Choose ExitPlanMode only when technical_plan is concrete, risks are evaluated, verification commands are identified, and remaining_uncertainties is empty.
-- When action_constraints.plan_readiness.can_exit is false, do not choose ExitPlanMode. Resolve the listed missing items first.
-- If action_constraints.plan_readiness.full_read_required_files is non-empty, choose read_file for one of those files before any search or ExitPlanMode.
-- If candidate_files is empty and code_context is not available yet, prefer search_code_context.
-- Use search_text for focused regex/fixed-string grep when structured context is missing, stale, or too broad.
-- For search_text, put file names or path filters in globs, not in pattern. Example: pattern="func Test", globs=["*_test.go"].
-- Use selected_code_context_summary as the primary structured evidence about where the relevant logic lives.
-- Prefer files, symbols, and evidence listed in attention_focus when choosing among otherwise valid next actions.
-- Treat full_read_requirements as a hard signal: when a file appears there, summaries/excerpts are not enough yet, so read the complete file before concluding it is already correct or before patching it.
-- If candidate_files contains unread files, prefer read_file only when you need exact source text for the file you intend to patch or when selected_code_context_summary is still insufficient.
-- If a candidate file is already present in read_files with full_read=true, use that evidence instead of requesting it again. Treat read_files as durable memory for this run.
-- If a candidate file is already present in read_files but full_read=false and it appears in full_read_requirements, you still need a complete read before making a final diagnosis or patch decision.
-- If pending_resolution is non-empty, treat it as the highest-priority unresolved runtime state from the previous step. Follow its required_next_action before changing topic.
-- If next_obligation.kind is verify, choose run_shell_command with purpose="verification" and select a command that matches verification_capabilities.
-- For verification commands, do not invent commands outside verification_capabilities. Prefer the recommended repo-scope example when available.
-- After apply_code_patch succeeds, verification_stale becomes true. Do not choose finish, git_diff, or write_memory until a verification command has run.
-- When verification_stale is true, choose run_shell_command with purpose="verification" and the narrowest useful command.
-- When verification_stale is true, do not ask the user for original file content, expected behavior, or review scope. Verify the current repository state with tools.
-- If verification_required is false, do not choose run_tests just to be safe.
-- If editing_enabled is true, choose apply_code_patch only after reading the exact file content that must change, ensuring target files have full_read=true when they are relevant patch targets, and after plan_mode_approved is true.
-- For apply_code_patch, prefer exact replacement changes whose old_text comes from read_files. Use append only for end-of-file additions, and use insert_after or insert_before only with an exact anchor old_text that comes from read_files.
-- Preserve the file's existing structural conventions. Keep package/import sections at the top for Go, keep Python import blocks at the beginning, and do not place executable logic before them.
-- Prefer the smallest structurally valid edit. Reuse existing formatting, indentation, blank-line spacing, and declaration order unless the task explicitly requires a reorganization.
-- If expected behavior, business rule, target file, compatibility impact, data migration, permission/auth behavior, or public API behavior is uncertain, choose request_user_input only when you can ask 1-3 concrete questions.
-- If the user only asks to modify/edit a file but does not specify the desired behavior, locate and read the file if needed, then choose request_user_input with concrete questions about the intended change. Do not infer an arbitrary code change only because the file contains suspicious code.
-- If you cannot write a concrete user question, do not choose request_user_input; use the available tools to gather more evidence or choose finish when enough evidence exists.
-- Do not edit files that were not read in this run.
-- Do not edit generated, vendor, dependency, lock, secret, or runtime artifact files unless the user explicitly requires it.
-- If enough code evidence has been read and no verification is required, consider git_diff or finish.
-- Do not choose repository-wide file listing unless it is present in legal_actions and the user explicitly asks for the file tree.
-- Follow selected skill constraints, especially code review rules about reading the smallest necessary dependency closure.
+# Output
 
-# Output Schema
+Return exactly one JSON object:
 
-Return JSON like {"action":"search_code_context","reason":"...","action_input":{},"uncertainty_questions":[],"confidence":0.8,"user_update":"我会先定位相关代码，再决定是否需要修改。"}.
+{
+  "action": "one legal action name",
+  "reason": "brief evidence-based reason",
+  "action_input": {},
+  "uncertainty_questions": [],
+  "confidence": 0.0,
+  "draft_findings": [
+    {
+      "candidate_id": "optional; runtime assigns the stable id",
+      "claim": "candidate conclusion to review",
+      "locations": [
+        {
+          "file_path": "relative/path",
+          "symbol": "optional symbol",
+          "start_line": 1,
+          "end_line": 1
+        }
+      ],
+      "related_tests": [],
+      "confidence": 0.0,
+      "severity": "low | medium | high | critical",
+      "category": "correctness | boundary | concurrency | security | resource | api_contract | test_gap | other"
+    }
+  ],
+  "plan_update": {
+    "steps": [
+      {
+        "id": "stable step id",
+        "description": "work item",
+        "status": "pending | in_progress | done | blocked"
+      }
+    ],
+    "current_focus": "current work",
+    "open_questions": []
+  },
+  "user_update": "short user-facing update or empty string"
+}
+
+Submit an evidence-grounded candidate as soon as it is discovered, regardless
+of the selected action. The runtime merges candidates across decisions. When
+choosing finish, include any additional distinct issue not already present in
+draft_findings. Never omit an existing candidate to make completion easier.
+Include precise current-run file locations and related test names when
+available. Do not hide a candidate merely because its confidence is low.
+
+Keep plan_update empty when no plan state changed. Do not reveal chain-of-thought.

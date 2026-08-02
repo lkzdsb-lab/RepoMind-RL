@@ -54,7 +54,6 @@ class StateEncoder:
                 for result in state.get("edit_results", [])
                 if isinstance(result, dict)
             ),
-            "memory_written": bool(state.get("memory_written")),
             "has_error": bool(state.get("error")),
             "has_memory_context": bool(state.get("memory_context")),
             "has_compressed_context": bool(state.get("compressed_context")),

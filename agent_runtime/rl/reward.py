@@ -124,19 +124,6 @@ class RewardFunction:
                 reward += 0.25
                 reasons.append("patch_present=+0.25")
 
-        elif action.name == "write_memory":
-            if next_state.get("memory_written"):
-                reward += 0.3
-                reasons.append("memory_written=+0.3")
-            promoted = len(next_state.get("promoted_memories", []))
-            consolidated = len(next_state.get("consolidated_skills", []))
-            if promoted:
-                reward += 0.2 * promoted
-                reasons.append(f"promoted_memories=+{0.2 * promoted:.2f}")
-            if consolidated:
-                reward += 0.3 * consolidated
-                reasons.append(f"consolidated_skills=+{0.3 * consolidated:.2f}")
-
         elif action.name == "finish":
             if self._tests_passed(next_state):
                 reward += 1.0
@@ -144,9 +131,6 @@ class RewardFunction:
             if next_state.get("verification_stale"):
                 reward -= 1.0
                 reasons.append("finish_with_stale_verification=-1.0")
-            if next_state.get("memory_written"):
-                reward += 0.2
-                reasons.append("finish_after_memory=+0.2")
             if not self._is_task_complete(next_state):
                 reward -= 0.5
                 reasons.append("finish_incomplete=-0.5")
@@ -168,9 +152,6 @@ class RewardFunction:
         if state.get("verification_stale"):
             reward -= 1.0
             reasons.append("terminal_stale_verification=-1.0")
-        if state.get("memory_written"):
-            reward += 0.2
-            reasons.append("terminal_memory_written=+0.2")
         if state.get("error"):
             reward -= 0.5
             reasons.append("terminal_error=-0.5")
@@ -180,10 +161,12 @@ class RewardFunction:
         tests = state.get("test_results") or []
         return bool(tests and tests[-1].get("exit_code") == 0)
 
-    # 三个标志此次流程结束
     def _is_task_complete(self, state: AgentState) -> bool:
-        return (
-            bool(state.get("error"))
-            or bool(state.get("memory_written"))
-            or self._tests_passed(state)
+        if state.get("error") or state.get("verification_stale"):
+            return False
+        if not state.get("verification_required", True):
+            return bool(state.get("tool_calls") or state.get("task_analysis"))
+        return self._tests_passed(state) or any(
+            isinstance(item, dict) and item.get("exit_code") == 0
+            for item in state.get("verification_commands", [])
         )

@@ -54,8 +54,6 @@
         "action_policy": { "$ref": "#/$defs/llmConfig" },
         "task_analysis": { "$ref": "#/$defs/llmConfig" },
         "observer": { "$ref": "#/$defs/llmConfig" },
-        "memory_query": { "$ref": "#/$defs/llmConfig" },
-        "memory_rerank": { "$ref": "#/$defs/llmConfig" },
         "code_context_query": { "$ref": "#/$defs/llmConfig" },
         "code_context_rerank": { "$ref": "#/$defs/llmConfig" },
         "skill_selector": { "$ref": "#/$defs/llmConfig" },
@@ -72,8 +70,6 @@
         "action_policy": { "enum": ["heuristic", "rl", "llm"] },
         "task_analyzer": { "enum": ["disabled", "llm"] },
         "observer": { "enum": ["disabled", "llm"] },
-        "memory_query_planner": { "enum": ["disabled", "llm"] },
-        "memory_reranker": { "enum": ["disabled", "llm"] },
         "code_context_query_planner": { "enum": ["disabled", "llm"] },
         "code_context_reranker": { "enum": ["disabled", "llm"] },
         "skill_selector": { "enum": ["disabled", "llm"] },
@@ -86,16 +82,11 @@
       "additionalProperties": false,
       "properties": {
         "path": { "type": "string" },
-        "mid_path": { "type": "string" },
-        "long_path": { "type": "string" },
-        "skill_dir": { "type": "string" },
-        "redis_url": { "type": ["string", "null"] },
-        "semantic_threshold": { "type": "number" },
-        "procedural_threshold": { "type": "number" },
-        "skill_consolidation_threshold": { "type": "number" },
-        "query_limit": { "type": "integer", "minimum": 1 },
-        "selected_limit": { "type": "integer", "minimum": 1 },
-        "rerank_candidate_limit": { "type": "integer", "minimum": 1 }
+        "max_turns": { "type": "integer", "minimum": 1 },
+        "max_chars": { "type": "integer", "minimum": 1000 },
+        "file_cache_max_files": { "type": "integer", "minimum": 1 },
+        "file_cache_max_spans": { "type": "integer", "minimum": 1 },
+        "file_cache_max_bytes": { "type": "integer", "minimum": 1 }
       }
     },
     "context": {
