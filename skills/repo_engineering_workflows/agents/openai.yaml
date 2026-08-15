@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repo Engineering Workflows"
+  short_description: "Route code review, editing, codebase search, test triage, and Go backend debugging through one entry skill"
+

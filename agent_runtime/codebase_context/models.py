@@ -154,3 +154,23 @@ class CodebaseContextIndex:
             embeddings=[EmbeddingDoc(**item) for item in data.get("embeddings", [])],
             metadata=dict(data.get("metadata", {})),
         )
+
+@dataclass
+class CodeContextRerankDecision:
+    selected_ids: list[str] = field(default_factory=list)
+    source: str = "disabled"
+    rationale: str = ""
+    selections: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+@dataclass
+class CodeContextQueryPlan:
+    queries: list[str]
+    source: str = "disabled"
+    rationale: str = ""
+    default_query: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)

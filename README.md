@@ -7,27 +7,99 @@ RepoMind-RL 是一个能在真实代码仓库中自动定位 Bug、生成补丁�
 
 - `agent_runtime/executor.py`：负责编排任务生命周期。
 - `agent_runtime/policy.py`：第一版启发式 action policy，后续可替换为 LLM/RL policy。
-- `agent_runtime/tool_registry.py`：统一封装 `list_files`、`search_code`、`read_file`、`run_tests`、`git_diff`。
+- `agent_runtime/tool_registry.py`：统一封装 `search_code_context`、`search_text`、`read_file`、`run_shell_command`、`apply_code_patch`、`git_diff` 等原语。
 - `agent_runtime/trajectory.py`：记录可回放 trajectory，并落盘到 `.repomind/traces/`。
 - `agent_runtime/memory/`：第一版 JSONL memory card 存储，后续可替换为 SQLite/向量库。
 
 运行示例：
 
 ```bash
-python3 main.py "订单状态不会从 pending 更新到 paid" \
-  --description "请定位并修复支付回调后订单状态偶发不更新的问题" \
-  --repo /path/to/target/repo \
-  --verify "pytest"
+python main.py
+# or after installing the console script
+python3.14 -m pip install -e .
+lee-agent
 ```
+
+启动时会自动读取仓库根目录下的 `config.json`；如果文件不存在，会先生成一份默认模板再加载。常用运行参数、LLM API、mode、memory、code context、RL 和日志配置都可以放在这个文件里；`config.schema.json` 提供可选值校验，完整说明见 `docs/config.md`。命令行参数仍然保留，且只在显式传入时覆盖配置文件。
+
+是否运行验证命令不是配置开关。启用 `modes.task_analyzer = "llm"` 后，LLM 会根据任务意图输出 `verification_required`；只有该值为 `true` 时，后续 policy 才会选择 `run_tests`。
+
+`modes.completion_judge` 默认是 `auto`：有可用 LLM 配置时，Agent 在 `finish` 前会判断当前证据是否足够结束；如果缺少只能由用户补充的信息，会在会话里直接提问，并把问题写入 trace。也可以用原 trace 恢复：
+
+```bash
+lee-agent --resume-trace /path/to/.repomind/traces/<task_id>.json
+```
+
+常用会话命令：
+
+```text
+/help
+/status
+/trace
+/diff
+/new
+/exit
+```
+
+LLM 模块的结构化输出支持 `user_update` 字段。该字段只用于展示简短进度，不承载内部推理链；CLI 会显示尚未展示过的 update，trace 中会保留完整 `user_updates` 历史。
+
+根 `llm` 只作为默认模型配置，不代表所有 LLM 模块都会启用。是否调用 LLM 由 `modes` 单独控制；比如 `modes.memory_reranker = "disabled"` 时，即使根 `llm` 已配置 key 和 model，memory reranker 也不会调用 LLM。
+
+运行产物按目标项目隔离。传入 `--repo /path/to/project-a` 时，trace、memory、log、code index、RL 数据都会写入 `/path/to/project-a/.repomind/`；调试另一个项目会写入另一个项目自己的 `.repomind/`。
+
+LLM key 不写入 `config.json`。默认会从同目录 `.env` 读取：
+
+```bash
+cp .env.example .env
+# edit .env: LLM_API_KEY=...
+```
+
+`config.json` 里只保留 key 的环境变量名：
+
+```json
+{
+  "env_file": ".env",
+  "llm": {
+    "provider": "openai_compatible",
+    "model": "<model-name>",
+    "api_base": "https://<host>/v1",
+    "api_key_env": "LLM_API_KEY"
+  }
+}
+```
+
+也可以指定其他配置文件或禁用配置文件：
+
+```bash
+lee-agent --config config.local.json
+lee-agent --no-config --repo /path/to/repo
+```
+
+默认不会写入目标仓库。需要让 LLM action policy 通过受限 tool 修改代码时，显式启用 guarded editing：
+
+```bash
+lee-agent \
+  --repo /path/to/repo \
+  --verify "go test ./..." \
+  --action-policy-mode llm \
+  --enable-editing \
+  --require-step-approval
+```
+
+编辑能力由 `apply_code_patch` 提供，只允许对本轮已读文件做 exact replacement。动手前必须先调用 `EnterPlanMode` 写出 Debug/重构技术方案，并在 `ExitPlanMode` 评估通过后才能修改代码；如果目标行为或修改边界不确定，Agent 会进入 `awaiting_user_input` 并等待用户补充。
+
+`--require-step-approval` 对应 `approval.require_step_approval=true`。开启后每个 action 执行前都会暂停，用户回复 `approve` / `yes` / `同意` 才会继续；其他回复会作为补充信息写回上下文并重新规划。
+
+改完代码后，运行时会把 `verification_stale` 置为 `true`，此时不能直接结束、写 memory 或跳到 diff 汇总。Agent 必须通过 `run_shell_command` 运行一个 `purpose="verification"` 的命令，验证通过后才会清掉 stale 标记。`run_shell_command` 是受限终端原语，会拒绝明显破坏性的命令；代码搜索类需求优先使用 `search_text` 这个 grep/rg 原语，而不是为每个场景写单独工具。
 
 ## 运行时 Registry
 
 运行时资源由 `RegistryManager` 管理，包含 `tools`、`nodes`、`prompts`、`skills` 四类 registry。每次 agent run 开始时会创建一份不可变 `RegistrySnapshot`，本轮执行只使用这份 snapshot；后续 manifest reload 或服务端发布不会影响已经开始的任务。
 
-可以通过 `--manifest-dir` 加载 JSON/TOML manifest：
+可以通过 `config.json` 的 `manifest_dir` 加载 JSON/TOML manifest，也可以临时使用 `--manifest-dir` 覆盖：
 
 ```bash
-python3 main.py "定位订单状态问题" \
+lee-agent \
   --repo /path/to/repo \
   --manifest-dir .agent/registry
 ```
@@ -84,6 +156,18 @@ triggers = ["go", "bug", "test"]
 resources = ["../../skills/go_bug_localization.md"]
 ```
 
+默认内置的 workflow skills 会随 `SkillRegistry` 自动注册，不需要额外 manifest：
+
+- `go_backend_debug`
+- `codebase_context_workflow`
+- `code_review_workflow`
+- `code_edit_workflow`
+- `memory_consolidation`
+- `registry_extension`
+- `test_failure_triage`
+
+这些 skill 不替代工具和存储层；它们描述如何组合 tools、memory、registry 和测试反馈完成一类任务。检索命中后会进入 `skill_context` 和 `selected_skills`，再参与 memory/context/LLM prompt。
+
 ## 分层 Memory
 
 当前 memory 层实现了四种记忆类型：
@@ -123,16 +207,25 @@ Agent 每轮 action 前会调用 `ContextCompressionManager`。当估算 token �
 - `AgentState.compressed_context`
 - `AgentState.context_items`
 
-默认使用 rule-based compressor，不需要外部 API。要启用 LLM 压缩，提供 OpenAI-compatible chat completions 配置：
+默认使用 rule-based compressor，不需要外部 API。要启用 LLM 压缩，在 `config.json` 中提供 OpenAI-compatible 配置；`ContextCompressionManager` 会复用根 `llm` 配置：
 
-```bash
-export LLM_API_KEY="..."
-
-python3 main.py "定位订单状态问题" \
-  --repo /path/to/repo \
-  --context-llm-provider openai_compatible \
-  --context-llm-model "<model-name>" \
-  --context-llm-api-base "https://<host>/v1"
+```json
+{
+  "llm": {
+    "provider": "openai_compatible",
+    "model": "<model-name>",
+    "api_base": "https://<host>/v1",
+    "api_key_env": "LLM_API_KEY"
+  },
+  "modes": {
+    "context_compressor": "llm"
+  },
+  "context": {
+    "enabled": true,
+    "max_tokens": 32000,
+    "compression_threshold": 0.75
+  }
+}
 ```
 
 如果 LLM 未配置、请求失败或返回无法解析的 JSON，会自动降级到 rule-based compression，并把 fallback 原因写入 digest constraints。
@@ -176,7 +269,7 @@ route -> middleware -> controller
 CLI 可指定索引位置：
 
 ```bash
-python3 main.py "订单支付状态不更新" \
+lee-agent \
   --repo /path/to/repo \
   --code-context-index-path .repomind/codebase_context/index.json
 ```
@@ -200,7 +293,7 @@ agent_runtime/rl/
 运行示例：
 
 ```bash
-python3 main.py "订单支付状态不更新" \
+lee-agent \
   --repo /path/to/repo \
   --verify "go test ./..." \
   --rl-enabled \

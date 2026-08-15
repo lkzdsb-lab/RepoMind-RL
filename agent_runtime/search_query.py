@@ -38,6 +38,21 @@ class SearchQueryPlanner:
             f"{state.get('title', '')} {state.get('description', '')}",
             weight=3.0,
         )
+        analysis = state.get("task_analysis") or {}
+        if isinstance(analysis, dict):
+            self._add_text(
+                weighted,
+                buckets,
+                "domain_terms",
+                " ".join(
+                    [
+                        str(analysis.get("task_category", "")),
+                        " ".join(str(item) for item in _list_values(analysis.get("entities"))[:12]),
+                        " ".join(str(item) for item in _list_values(analysis.get("search_hints"))[:12]),
+                    ]
+                ),
+                weight=2.5,
+            )
         self._add_text(
             weighted,
             buckets,
@@ -117,7 +132,7 @@ class SearchQueryPlanner:
                 if item.get("path") and key == "api_routes":
                     self._add_text(weighted, buckets, "code_terms", str(item["path"]), weight=2.5)
 
-# 通过便利 text 将 term 打分并分类
+    # 通过便利 text 将 term 打分并分类
     def _add_text(
         self,
         weighted: dict[str, float],
@@ -199,3 +214,11 @@ def _term_quality(term: str) -> float:
 def _ordered_subset(values: list[str], selected: list[str]) -> list[str]:
     selected_set = set(selected)
     return [value for value in values if value in selected_set]
+
+
+def _list_values(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if value in (None, ""):
+        return []
+    return [value]

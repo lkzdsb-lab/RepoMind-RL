@@ -1,4 +1,9 @@
 .repomind/
 __pycache__/
 *.py[cod]
-
+/config.json
+!/config.example.json
+/.env
+/.env.local
+.tmp_pycache
+.gitignore

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from agent_runtime.rl.action_space import ActionSpace
 from agent_runtime.rl.state_encoder import StateEncoder
+from agent_runtime.verification import infer_lightweight_verification_command
 from model.agent.actions import Action
 from model.agent.graph import AgentState
 from loguru import logger
@@ -29,12 +30,17 @@ class QLearningDebugPolicy:
         self.action_space = self.action_space or ActionSpace()
 
     def make_initial_plan(self, state: AgentState) -> list[str]:
-        verify_command = state.get("verify_command") or "pytest"
+        verify_command = _verification_command(state)
+        verification_step = (
+            "跳过验证命令（LLM 判定本任务不需要命令验证）"
+            if not _verification_required(state)
+            else f"验证命令：{verify_command}"
+        )
         return [
             "使用 RL policy 基于 state features 选择下一步 action",
             "优先利用结构化 codebase context 定位候选文件",
-            "阅读候选文件、运行验证命令并检查 diff",
-            f"验证命令：{verify_command}",
+            "阅读候选文件并检查 diff",
+            verification_step,
             "根据 reward 写入 replay buffer 并在线更新 Q-table",
         ]
 
@@ -93,3 +99,16 @@ class QLearningDebugPolicy:
                 f"state={encoded.key}"
             ),
         )
+
+
+def _verification_required(state: AgentState) -> bool:
+    return bool(state.get("verification_required", True))
+
+
+def _verification_command(state: AgentState) -> str:
+    return infer_lightweight_verification_command(
+        str(state.get("repo_path") or "."),
+        configured=str(state.get("verify_command") or ""),
+        changed_files=list(state.get("edited_files", []) or []),
+        candidate_files=list(state.get("candidate_files", []) or []),
+    )

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
+from utils import utc_now
 from typing import Literal
 from uuid import uuid4
 
@@ -11,9 +11,6 @@ from uuid import uuid4
 MemoryType = Literal["episodic", "semantic", "procedural", "anti_pattern"]
 MemoryStatus = Literal["draft", "verified", "deprecated"]
 MemoryTier = Literal["short_term", "mid_term", "long_term", "skill"]
-
-
-
 
 
 @dataclass
