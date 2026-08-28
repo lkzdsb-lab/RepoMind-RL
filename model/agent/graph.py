@@ -113,6 +113,11 @@ class AgentState(TypedDict, total=False):
     memory_candidates: List[Dict[str, Any]]
     attention_focus: Dict[str, Any]
 
+    # 不可变任务归档，为长期记忆离线重建保留完整证据。
+    task_archive_status: str
+    task_archive_path: str
+    task_archive_error: str
+
     # rl 模块相关
     rl_enabled: bool
     rl_transitions: List[Dict[str, Any]]

@@ -8,8 +8,11 @@ from typing import Optional
 
 import typer
 from rich.console import Console
+from rich.table import Table
 
 from agent_runtime.executor import DebugAgent
+from agent_runtime.memory.documents import MarkdownMemoryDocumentStore
+from agent_runtime.memory.consolidation.factory import build_consolidation_pipeline
 from agent_runtime.session import AgentSession
 from agent_runtime.user_updates import set_change_event_sink
 from config import (
@@ -32,6 +35,11 @@ app = typer.Typer(
     no_args_is_help=False,
 )
 console = Console()
+memory_app = typer.Typer(
+    add_completion=False,
+    help="Inspect and maintain canonical Markdown long-term memory.",
+)
+app.add_typer(memory_app, name="memory")
 
 
 @app.callback(invoke_without_command=True)
@@ -151,6 +159,116 @@ def main() -> None:
     app()
 
 
+@memory_app.command("list")
+def memory_list(
+    repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
+    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
+) -> None:
+    """List canonical Markdown memory documents."""
+    store = _memory_store(repo, config_path, no_config)
+    table = Table("ID", "Type", "Status", "Scope", "Title")
+    for document in store.list():
+        table.add_row(
+            document.memory_id,
+            document.memory_type.value,
+            document.status.value,
+            document.scope.level.value,
+            document.title,
+        )
+    console.print(table)
+
+
+@memory_app.command("show")
+def memory_show(
+    memory_id: str = typer.Argument(..., help="Memory document ID."),
+    repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
+    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
+) -> None:
+    """Print one canonical Markdown memory document."""
+    store = _memory_store(repo, config_path, no_config)
+    document = store.get(memory_id)
+    if document is None:
+        console.print(f"[red]Unknown memory:[/red] {memory_id}")
+        raise typer.Exit(code=1)
+    console.print(store.codec.encode(document).decode("utf-8"), markup=False)
+
+
+@memory_app.command("validate")
+def memory_validate(
+    repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
+    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
+) -> None:
+    """Validate layout, schema, IDs, and canonical formatting."""
+    issues = _memory_store(repo, config_path, no_config).validate()
+    if not issues:
+        console.print("[green]Markdown memory store is valid.[/green]")
+        return
+    for issue in issues:
+        console.print(f"[red]{issue.path}[/red]: {issue.message}")
+    raise typer.Exit(code=1)
+
+
+@memory_app.command("deprecate")
+def memory_deprecate(
+    memory_id: str = typer.Argument(..., help="Memory document ID."),
+    reason: str = typer.Option(..., "--reason", help="Why this memory is deprecated."),
+    repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
+    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
+) -> None:
+    """Mark one memory deprecated without moving or deleting its document."""
+    store = _memory_store(repo, config_path, no_config)
+    try:
+        store.deprecate(memory_id, reason)
+    except KeyError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    console.print(f"[green]Deprecated memory:[/green] {memory_id}")
+
+
+@memory_app.command("consolidate")
+def memory_consolidate(
+    task_id: str = typer.Argument(..., help="Completed Task Archive ID."),
+    extractor_mode: Optional[str] = typer.Option(
+        None, "--extractor-mode", help="Extraction mode: rule_based or llm."
+    ),
+    pipeline_version: Optional[str] = typer.Option(
+        None, "--pipeline-version", help="Immutable consolidation pipeline version."
+    ),
+    repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
+    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
+) -> None:
+    """Consolidate one verified Task Archive into Markdown memory documents."""
+    config = _load_base_config(repo, config_path, no_config)
+    if extractor_mode is not None:
+        config.memory_extractor_mode = extractor_mode
+    if pipeline_version is not None:
+        config.consolidation_pipeline_version = pipeline_version
+    env_file = _resolve_config_path(config_path, config.env_file)
+    load_env_file(env_file, override=config.env_override)
+    normalize_project_runtime_paths(config)
+    try:
+        outcome = build_consolidation_pipeline(config).consolidate(task_id)
+    except Exception as exc:
+        console.print(f"[red]Consolidation failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    table = Table("Field", "Value")
+    table.add_row("task_id", outcome.task_id)
+    table.add_row("status", outcome.status)
+    table.add_row("pipeline", outcome.pipeline_version)
+    table.add_row("extractor", outcome.extractor_source)
+    table.add_row("memories", ", ".join(outcome.memory_ids) or "(none)")
+    table.add_row("rejected", str(outcome.rejected_candidates))
+    table.add_row("run_path", outcome.run_path)
+    if outcome.warnings:
+        table.add_row("warnings", "\n".join(outcome.warnings))
+    console.print(table)
+
+
 def _build_config(
     *,
     repo: str | None,
@@ -167,12 +285,7 @@ def _build_config(
     log_level: str | None,
     console_log: bool,
 ) -> DebugAgentConfig:
-    if not no_config:
-        ensure_default_config_file(config_path)
-    payload = {} if no_config else load_config_payload(config_path)
-    config = debug_agent_config_from_dict(payload)
-    if repo:
-        config.repo_path = repo
+    config = _load_base_config(repo, config_path, no_config)
     if max_loops is not None:
         config.max_loops = max_loops
     if manifest_dir is not None:
@@ -193,14 +306,37 @@ def _build_config(
         config.log_level = log_level
     if not console_log:
         config.log_to_console = False
-    if not config.repo_path:
-        config.repo_path = "."
-
     env_file = _resolve_config_path(config_path, config.env_file)
     load_env_file(env_file, override=config.env_override)
     normalize_project_runtime_paths(config)
     validate_debug_agent_config(config)
     return config
+
+
+def _load_base_config(
+    repo: str | None,
+    config_path: str,
+    no_config: bool,
+) -> DebugAgentConfig:
+    if not no_config:
+        ensure_default_config_file(config_path)
+    payload = {} if no_config else load_config_payload(config_path)
+    config = debug_agent_config_from_dict(payload)
+    if repo:
+        config.repo_path = repo
+    if not config.repo_path:
+        config.repo_path = "."
+    return config
+
+
+def _memory_store(
+    repo: str | None,
+    config_path: str,
+    no_config: bool,
+) -> MarkdownMemoryDocumentStore:
+    config = _load_base_config(repo, config_path, no_config)
+    normalize_project_runtime_paths(config)
+    return MarkdownMemoryDocumentStore.from_config(config)
 
 
 def _load_initial_response(

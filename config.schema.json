@@ -54,6 +54,7 @@
         "action_policy": { "$ref": "#/$defs/llmConfig" },
         "task_analysis": { "$ref": "#/$defs/llmConfig" },
         "observer": { "$ref": "#/$defs/llmConfig" },
+        "memory_extractor": { "$ref": "#/$defs/llmConfig" },
         "code_context_query": { "$ref": "#/$defs/llmConfig" },
         "code_context_rerank": { "$ref": "#/$defs/llmConfig" },
         "skill_selector": { "$ref": "#/$defs/llmConfig" },
@@ -87,6 +88,28 @@
         "file_cache_max_files": { "type": "integer", "minimum": 1 },
         "file_cache_max_spans": { "type": "integer", "minimum": 1 },
         "file_cache_max_bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "path": { "type": "string" },
+        "max_text_chars": { "type": "integer", "minimum": 1000 },
+        "max_source_file_bytes": { "type": "integer", "minimum": 1 },
+        "max_source_total_bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "long_term_memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "document_path": { "type": "string", "minLength": 1 },
+        "consolidation_path": { "type": "string", "minLength": 1 },
+        "pipeline_version": { "type": "string", "minLength": 1 },
+        "extractor_mode": { "enum": ["rule_based", "llm"] },
+        "max_candidates": { "type": "integer", "minimum": 1, "maximum": 100 }
       }
     },
     "context": {

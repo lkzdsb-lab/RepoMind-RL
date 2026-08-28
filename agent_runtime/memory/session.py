@@ -16,6 +16,7 @@ from uuid import uuid4
 from loguru import logger
 
 from model.agent.graph import AgentState
+from agent_runtime.memory.domain.models import SessionMemorySnapshot
 from agent_runtime.memory.file_cache import normalize_snapshot, prune_cache
 from utils import _clean_string_list
 
@@ -93,20 +94,17 @@ class SessionMemoryService:
             if not session:
                 raise ValueError(f"Unknown memory session: {session_id}")
 
-            topic = self._active_topic(connection, session)
-            topic_id = str(topic["topic_id"]) if topic else ""
-            playbook = self._latest_playbook(connection, topic_id)
-            turns = self._recent_turns(connection, session_id, topic_id)
-            memories = self._active_memories(connection, session_id, topic_id)
+            snapshot = self._build_snapshot(connection, session)
             file_cache, file_order = self._validated_file_cache(connection, session)
 
+        snapshot_data = snapshot.to_dict()
         pack: dict[str, Any] = {
-            "session_id": session_id,
+            "session_id": snapshot_data["session_id"],
             "current_message": str(user_message or "").strip(),
-            "topic": _topic_dict(topic),
-            "playbook": _json_object(playbook["content"]) if playbook else {},
-            "recent_turns": turns,
-            **memories,
+            "topic": snapshot_data["topic"],
+            "playbook": snapshot_data["playbook"],
+            "recent_turns": snapshot_data["recent_turns"],
+            **snapshot_data["memory_layers"],
         }
         pack["_read_file_cache"] = file_cache
         pack["_read_file_order"] = file_order
@@ -115,6 +113,40 @@ class SessionMemoryService:
             self.max_chars,
         )
         return pack
+
+    def export_archive_snapshot(self, session_id: str) -> SessionMemorySnapshot:
+        """Freeze the bounded short-term context that preceded the current task."""
+        with self._connect() as connection:
+            session = connection.execute(
+                "SELECT * FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if not session:
+                raise ValueError(f"Unknown memory session: {session_id}")
+            return self._build_snapshot(connection, session)
+
+    def _build_snapshot(
+        self,
+        connection: sqlite3.Connection,
+        session: sqlite3.Row,
+    ) -> SessionMemorySnapshot:
+        session_id = str(session["session_id"])
+        topic = self._active_topic(connection, session)
+        topic_id = str(topic["topic_id"]) if topic else ""
+        playbook = self._latest_playbook(connection, topic_id)
+        return SessionMemorySnapshot(
+            session_id=session_id,
+            exported_at=_utc_now(),
+            topic=_topic_dict(topic),
+            playbook=_json_object(playbook["content"]) if playbook else {},
+            recent_turns=tuple(self._recent_turns(connection, session_id, topic_id)),
+            memory_layers={
+                key: tuple(values)
+                for key, values in self._active_memories(
+                    connection, session_id, topic_id
+                ).items()
+            },
+        )
 
     def commit_turn(
         self,
@@ -589,6 +621,7 @@ class SessionMemoryService:
 
 
 def _turn_result(state: AgentState) -> dict[str, Any]:
+    """ 从 state 提取每轮的信息"""
     report = state.get("final_report") if isinstance(state.get("final_report"), dict) else {}
     return {
         "summary": str(report.get("summary") or state.get("error") or "").strip()[:2000],

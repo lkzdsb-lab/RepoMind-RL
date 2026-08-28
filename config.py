@@ -83,6 +83,20 @@ class DebugAgentConfig:
     session_file_cache_max_spans: int = 200
     session_file_cache_max_bytes: int = 10 * 1024 * 1024
 
+    # 不可变任务归档是长期记忆离线重建的事实来源。
+    task_archive_enabled: bool = True
+    task_archive_path: str = ".repomind/archive/tasks"
+    task_archive_max_text_chars: int = 200_000
+    task_archive_max_source_file_bytes: int = 200_000
+    task_archive_max_source_total_bytes: int = 2_000_000
+
+    # Markdown 是长期记忆的权威表达；Catalog 和向量索引是可重建投影。
+    long_term_memory_path: str = ".repomind/memory"
+    consolidation_run_path: str = ".repomind/consolidation/runs"
+    consolidation_pipeline_version: str = "consolidation-v1"
+    memory_extractor_mode: str = "rule_based"
+    memory_consolidation_max_candidates: int = 24
+
     # context 压缩
     context_compression_enabled: bool = True
     context_compressor_mode: str = "rule_based"
@@ -98,6 +112,7 @@ class DebugAgentConfig:
     action_llm_config: LLMConfig = field(default_factory=LLMConfig)
     task_analysis_llm_config: LLMConfig = field(default_factory=LLMConfig)
     observer_llm_config: LLMConfig = field(default_factory=LLMConfig)
+    memory_extractor_llm_config: LLMConfig = field(default_factory=LLMConfig)
     code_context_query_llm_config: LLMConfig = field(default_factory=LLMConfig)
     code_context_rerank_llm_config: LLMConfig = field(default_factory=LLMConfig)
     skill_selector_llm_config: LLMConfig = field(default_factory=LLMConfig)
@@ -184,6 +199,7 @@ def default_config_payload() -> dict[str, Any]:
             "action": {},
             "task_analysis": {},
             "observer": {},
+            "memory_extractor": {},
             "code_context_query": {},
             "code_context_rerank": {},
             "skill_selector": {},
@@ -209,6 +225,20 @@ def default_config_payload() -> dict[str, Any]:
             "file_cache_max_files": config.session_file_cache_max_files,
             "file_cache_max_spans": config.session_file_cache_max_spans,
             "file_cache_max_bytes": config.session_file_cache_max_bytes,
+        },
+        "archive": {
+            "enabled": config.task_archive_enabled,
+            "path": config.task_archive_path,
+            "max_text_chars": config.task_archive_max_text_chars,
+            "max_source_file_bytes": config.task_archive_max_source_file_bytes,
+            "max_source_total_bytes": config.task_archive_max_source_total_bytes,
+        },
+        "long_term_memory": {
+            "document_path": config.long_term_memory_path,
+            "consolidation_path": config.consolidation_run_path,
+            "pipeline_version": config.consolidation_pipeline_version,
+            "extractor_mode": config.memory_extractor_mode,
+            "max_candidates": config.memory_consolidation_max_candidates,
         },
         "context": {
             "enabled": config.context_compression_enabled,
@@ -375,6 +405,28 @@ def apply_debug_agent_config(config: DebugAgentConfig, data: dict[str, Any]) -> 
     )
     _apply_section(
         config,
+        data.get("archive"),
+        {
+            "enabled": "task_archive_enabled",
+            "path": "task_archive_path",
+            "max_text_chars": "task_archive_max_text_chars",
+            "max_source_file_bytes": "task_archive_max_source_file_bytes",
+            "max_source_total_bytes": "task_archive_max_source_total_bytes",
+        },
+    )
+    _apply_section(
+        config,
+        data.get("long_term_memory"),
+        {
+            "document_path": "long_term_memory_path",
+            "consolidation_path": "consolidation_run_path",
+            "pipeline_version": "consolidation_pipeline_version",
+            "extractor_mode": "memory_extractor_mode",
+            "max_candidates": "memory_consolidation_max_candidates",
+        },
+    )
+    _apply_section(
+        config,
         data.get("context"),
         {
             "enabled": "context_compression_enabled",
@@ -513,6 +565,7 @@ def _apply_llm_section(config: DebugAgentConfig, section: Any) -> None:
         "action_policy": "action_llm_config",
         "task_analysis": "task_analysis_llm_config",
         "observer": "observer_llm_config",
+        "memory_extractor": "memory_extractor_llm_config",
         "code_context_query": "code_context_query_llm_config",
         "code_context_rerank": "code_context_rerank_llm_config",
         "skill_selector": "skill_selector_llm_config",
@@ -527,6 +580,9 @@ def _apply_llm_section(config: DebugAgentConfig, section: Any) -> None:
 
 def validate_debug_agent_config(config: DebugAgentConfig) -> None:
     _validate_choice("planner_mode", config.planner_mode, {"heuristic", "llm"})
+    _validate_choice(
+        "memory_extractor_mode", config.memory_extractor_mode, {"rule_based", "llm"}
+    )
     _validate_choice(
         "context_compressor_mode",
         config.context_compressor_mode,
@@ -551,6 +607,7 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         "action_llm_config",
         "task_analysis_llm_config",
         "observer_llm_config",
+        "memory_extractor_llm_config",
         "code_context_query_llm_config",
         "code_context_rerank_llm_config",
         "skill_selector_llm_config",
@@ -570,6 +627,10 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         "session_file_cache_max_files",
         "session_file_cache_max_spans",
         "session_file_cache_max_bytes",
+        "memory_consolidation_max_candidates",
+        "task_archive_max_text_chars",
+        "task_archive_max_source_file_bytes",
+        "task_archive_max_source_total_bytes",
         "code_context_query_limit",
         "code_context_selected_limit",
         "code_context_rerank_candidate_limit",
@@ -586,6 +647,8 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         raise ValueError("editing_confidence_threshold must be between 0 and 1")
     if not 0.0 <= float(config.observer_write_threshold) <= 1.0:
         raise ValueError("observer_write_threshold must be between 0 and 1")
+    if int(config.memory_consolidation_max_candidates) > 100:
+        raise ValueError("memory_consolidation_max_candidates must not exceed 100")
 
     _require_llm_config(
         "modes.planner",
@@ -611,6 +674,11 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         "modes.observer",
         config.observer_mode == "llm",
         resolve_llm_config(config.llm_config, config.observer_llm_config),
+    )
+    _require_llm_config(
+        "long_term_memory.extractor_mode",
+        config.memory_extractor_mode == "llm",
+        resolve_llm_config(config.llm_config, config.memory_extractor_llm_config),
     )
     _require_llm_config(
         "modes.code_context_query_planner",
@@ -650,6 +718,9 @@ def normalize_project_runtime_paths(config: DebugAgentConfig) -> DebugAgentConfi
         "trace_dir",
         "log_file",
         "session_memory_path",
+        "task_archive_path",
+        "long_term_memory_path",
+        "consolidation_run_path",
         "code_context_index_path",
         "rl_q_table_path",
         "rl_replay_path",

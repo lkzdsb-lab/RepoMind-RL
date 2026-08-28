@@ -12,6 +12,7 @@ def edited_files_needing_reread(state: AgentState) -> list[str]:
 
 
 def current_focus_files(state: AgentState, *, limit: int = 4) -> list[str]:
+    """ 提取目前核心关注的文件"""
     files: list[str] = []
     focus = state.get("attention_focus")
     if isinstance(focus, dict):

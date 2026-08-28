@@ -312,7 +312,7 @@ class DebugAgent:
         started_at: float,
     ) -> AgentRunResult:
         """
-            运行 pipeline
+            运行 pipeline，action loop
         """
         run_logger = logger.bind(task_id=state.get("task_id"), repo_path=self.config.repo_path)
         while state.get("loop_count", 0) < state.get("max_loops", self.config.max_loops):
@@ -536,6 +536,9 @@ class DebugAgent:
             context_sections={},
             memory_candidates=[],
             attention_focus={},
+            task_archive_status="pending",
+            task_archive_path="",
+            task_archive_error="",
             rl_enabled=self.rl_enabled,
             rl_transitions=[],
             rl_last_reward={},
@@ -573,6 +576,7 @@ class DebugAgent:
         )
 
     def _understand_task(self, state: AgentState) -> AgentState:
+        """ 根据用户输入以及同一轮对话的记忆理解任务并制定初步的分析"""
         try:
             analysis = self.task_analyzer.analyze(state)
         except Exception as exc:
@@ -667,6 +671,7 @@ class DebugAgent:
         )
 
     def _select_skills(self, state: AgentState) -> AgentState:
+        """ 让 llm 根据 skill 的 description 选择合适的 skill"""
         try:
             selection = self.skill_selector.select(state, self._registry().skills)
         except Exception as exc:

@@ -113,6 +113,61 @@ analysis and committed only after the final report is available.
 - `memory.file_cache_max_bytes` limits total cached source bytes; range SLRU evicts normal spans before protected spans.
 - Long-term promotion and skill consolidation do not run in the online agent.
 
+## Task Archive
+
+Completed and failed terminal tasks are written to an immutable, replayable
+archive before session memory is committed. This archive is the evidence source
+for later offline long-term-memory consolidation.
+
+```json
+{
+  "archive": {
+    "enabled": true,
+    "path": ".repomind/archive/tasks",
+    "max_text_chars": 200000,
+    "max_source_file_bytes": 200000,
+    "max_source_total_bytes": 2000000
+  }
+}
+```
+
+- `archive.path` is resolved relative to the target repository.
+- Text and source limits bound archive growth while preserving valid artifacts.
+- Sensitive credential files and recognized secrets are omitted or redacted.
+- Archive failure is recorded in AgentState and does not change task success.
+- Existing valid task archives are immutable and reused idempotently.
+
+The complete Phase 0/1 contract is documented in
+[`long-term-memory-phase-0-1.md`](long-term-memory-phase-0-1.md).
+
+## Long-term Markdown Memory
+
+Canonical long-term memory documents are stored separately from online session
+memory and task archives:
+
+```json
+{
+  "long_term_memory": {
+    "document_path": ".repomind/memory",
+    "consolidation_path": ".repomind/consolidation/runs",
+    "pipeline_version": "consolidation-v1",
+    "extractor_mode": "rule_based",
+    "max_candidates": 24
+  }
+}
+```
+
+Document and consolidation paths are resolved relative to the target repository.
+The default rule-based extractor is fully offline. Set `extractor_mode` to `llm`
+and configure `llm.memory_extractor` (or the shared `llm` settings) to use semantic
+extraction; deterministic evidence and promotion policy still owns the final
+status and confidence.
+
+The Phase 2 format and storage guarantees are documented in
+[`long-term-memory-phase-2.md`](long-term-memory-phase-2.md). The offline archive
+to document pipeline is documented in
+[`long-term-memory-phase-3.md`](long-term-memory-phase-3.md).
+
 ## Example: Enable Only Code Context LLM
 
 This enables only code context query planning and reranking. Other LLM modules

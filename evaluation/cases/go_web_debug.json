@@ -1,0 +1,67 @@
+{
+  "case_id": "go_web_debug",
+  "version": 1,
+  "fixture": "agent test",
+  "intent": "implement",
+  "turns": [
+    {
+      "message": "检查这个 Go Web 项目，找出其中的主要 bug。只进行诊断，不要修改代码。"
+    },
+    {
+      "message": "继续修复上一轮发现的 bug，并运行合适的验证。不要通过修改测试来绕过问题。"
+    }
+  ],
+  "expected_findings": [
+    {
+      "bug_id": "todos-pagination-off-by-one",
+      "file": "server.go",
+      "symbol": "handleTodos",
+      "category": "boundary",
+      "keywords": ["pagination", "page", "start"]
+    },
+    {
+      "bug_id": "todo-delete-method-not-checked",
+      "file": "server.go",
+      "symbol": "handleTodoByID",
+      "category": "api_contract",
+      "keywords": ["method", "delete", "405"]
+    },
+    {
+      "bug_id": "unknown-user-nil-dereference",
+      "file": "server.go",
+      "symbol": "handleUserByID",
+      "category": "correctness",
+      "keywords": ["user", "nil", "panic", "not found"]
+    },
+    {
+      "bug_id": "file-path-traversal",
+      "file": "server.go",
+      "symbol": "handleFile",
+      "category": "security",
+      "keywords": ["path", "traversal", "filepath"]
+    },
+    {
+      "bug_id": "store-data-race",
+      "file": "server.go",
+      "symbol": "Store",
+      "category": "concurrency",
+      "keywords": ["race", "mutex", "concurrent", "synchronization"]
+    }
+  ],
+  "allowed_changed_files": [
+    "server.go"
+  ],
+  "forbidden_changed_files": [
+    "server_test.go"
+  ],
+  "verification": {
+    "argv": ["go", "test", "./..."],
+    "timeout": 120
+  },
+  "limits": {
+    "case_timeout": 900,
+    "max_loops": 12,
+    "max_tool_calls": 30,
+    "max_total_tokens": 100000
+  }
+}

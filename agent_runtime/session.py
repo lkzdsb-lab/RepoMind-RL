@@ -7,10 +7,12 @@ from typing import Any
 from loguru import logger
 
 from agent_runtime.executor import DebugAgent
+from agent_runtime.memory.archive import TaskArchiveStoreImpl
+from agent_runtime.memory.domain.interfaces import TaskArchiveStore
 from agent_runtime.memory.session import SessionMemoryService
 from model.agent.graph import AgentRunResult, AgentState
 from model.session import ChatResponse
-from utils import  _clean_string_list
+from utils import _clean_string_list, utc_now
 
 
 class AgentSession:
@@ -23,9 +25,11 @@ class AgentSession:
         self,
         agent: DebugAgent,
         session_memory: SessionMemoryService | None = None,
+        task_archive: TaskArchiveStore | None = None,
     ) -> None:
         self.agent = agent
         self.session_memory = session_memory or SessionMemoryService.from_config(agent.config)
+        self.task_archive = task_archive or TaskArchiveStoreImpl.from_config(agent.config)
         self.session_id = self.session_memory.open_session(agent.config.repo_path)
         self.state: AgentState | None = None
         self.last_trace_path = ""
@@ -67,6 +71,33 @@ class AgentSession:
         self.state = result.state
         self.last_trace_path = result.trace_path
         if result.state.get("status") in {"finished", "failed"}:
+            if bool(getattr(self.agent.config, "task_archive_enabled", True)):
+                session_snapshot, snapshot_complete = self._archive_session_snapshot()
+                try:
+                    manifest = self.task_archive.archive(
+                        result.state,
+                        result.trace_path,
+                        session_snapshot=session_snapshot,
+                    )
+                    result.state["task_archive_status"] = (
+                        "archived" if snapshot_complete else "archived_with_warnings"
+                    )
+                    result.state["task_archive_path"] = self.task_archive.task_path(
+                        manifest.task_id
+                    ).as_posix()
+                    result.state["task_archive_error"] = ""
+                except Exception as exc:
+                    result.state["task_archive_status"] = "failed"
+                    result.state["task_archive_path"] = ""
+                    result.state["task_archive_error"] = str(exc)[:1000]
+                    logger.bind(
+                        session_id=self.session_id,
+                        task_id=result.state.get("task_id"),
+                    ).exception("failed to archive completed task")
+            else:
+                result.state["task_archive_status"] = "disabled"
+                result.state["task_archive_path"] = ""
+                result.state["task_archive_error"] = ""
             try:
                 self.session_memory.commit_turn(
                     self.session_id,
@@ -81,6 +112,21 @@ class AgentSession:
                 ).exception("failed to commit session memory")
             self._turn_message = ""
         return self._to_response(result.state, result.trace_path)
+
+    def _archive_session_snapshot(self) -> tuple[dict[str, Any], bool]:
+        """ 导出本论对话一开始记录的短期记忆"""
+        try:
+            return self.session_memory.export_archive_snapshot(self.session_id).to_dict(), True
+        except Exception as exc:
+            logger.bind(session_id=self.session_id).exception(
+                "failed to export session snapshot for task archive"
+            )
+            return {
+                "session_id": self.session_id,
+                "exported_at": utc_now(),
+                "snapshot_status": "failed",
+                "error": str(exc)[:1000],
+            }, False
 
     def _to_response(self, state: AgentState, trace_path: str) -> ChatResponse:
         status = state.get("status")

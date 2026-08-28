@@ -124,6 +124,7 @@ def cache_read_result(
 
 
 def touch_cache_files(state: dict[str, Any], file_paths: Iterable[str]) -> dict[str, Any]:
+    """ 文件从 normal 晋升为 protected"""
     cache = dict(state.get("read_file_cache") or {})
     paths = [str(path).strip() for path in file_paths if str(path).strip() in cache]
     if not paths:
@@ -351,6 +352,7 @@ def snapshot_size_bytes(snapshot: dict[str, Any]) -> int:
 
 
 def merge_ranges(value: Any) -> list[list[int]]:
+    """ 合并 span 的区间"""
     ranges: list[list[int]] = []
     for item in value or []:
         if isinstance(item, dict):

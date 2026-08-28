@@ -156,6 +156,7 @@ class LLMActionPolicy:
                     validation.ignored_fields,
                 )
             if not validation.valid:
+                # 如果没有通过参数校验则记录失败原因，返回给 llm 重试
                 required_action = selected_spec.name
                 last_error = (
                     f"Selected action `{selected_spec.name}` contains invalid arguments: "

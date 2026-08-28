@@ -151,6 +151,9 @@ class ChatShell:
         ):
             table.add_row(key, str(state.get(key, "")))
         table.add_row("trace_path", self.agent_session.last_trace_path)
+        table.add_row("task_archive", str(state.get("task_archive_status", "")))
+        if state.get("task_archive_path"):
+            table.add_row("archive_path", str(state.get("task_archive_path")))
         self.console.print(table)
 
     def _render_diff(self) -> None:

@@ -38,6 +38,30 @@ class TaskAnalysisResponse(BaseModel):
     user_update: str = ""
 
 
+class MemoryExtractionItemResponse(BaseModel):
+    candidate_id: str
+    should_store: bool = True
+    memory_type: Literal[
+        "episodic", "semantic", "procedural", "anti_pattern", "preference"
+    ]
+    title: str
+    knowledge: str
+    applicability: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    triggers: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    scope_level: Literal["global", "user", "repo", "module", "file", "symbol"] = "repo"
+    module: str = ""
+    files: list[str] = Field(default_factory=list)
+    symbols: list[str] = Field(default_factory=list)
+    invalidation: str = ""
+
+
+class MemoryExtractionResponse(BaseModel):
+    memories: list[MemoryExtractionItemResponse] = Field(default_factory=list, max_length=100)
+    rationale: str = ""
+
+
 class FindingLocationResponse(BaseModel):
     file_path: str
     symbol: str = ""
