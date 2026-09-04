@@ -12,6 +12,10 @@ from agent_runtime.memory.consolidation.models import (
     MemoryCandidate,
     TaskEvidenceBundle,
 )
+from agent_runtime.memory.consolidation.constraints import (
+    has_repository_marker,
+    has_temporary_marker,
+)
 from agent_runtime.memory.documents import MarkdownMemoryDocumentStore
 from agent_runtime.memory.domain.models import (
     MemoryDocument,
@@ -32,6 +36,21 @@ _STATUS_RANK = {
     MemoryStatus.DRAFT: 0,
     MemoryStatus.NEEDS_REVIEW: 1,
     MemoryStatus.VERIFIED: 2,
+}
+
+_ORIGIN_MEMORY_TYPES = {
+    "task_outcome": {MemoryType.EPISODIC},
+    "user_statement": {MemoryType.PREFERENCE},
+    "code_observation": {MemoryType.SEMANTIC},
+    "successful_workflow": {MemoryType.PROCEDURAL},
+    "verification_failure": {MemoryType.ANTI_PATTERN},
+    "error_pattern": {MemoryType.ANTI_PATTERN},
+    "observer_observation": {
+        MemoryType.EPISODIC,
+        MemoryType.SEMANTIC,
+        MemoryType.PROCEDURAL,
+        MemoryType.ANTI_PATTERN,
+    },
 }
 
 
@@ -84,12 +103,20 @@ class MemoryDocumentBuilder:
         evidence_map: dict[str, EvidenceItem],
         pipeline_version: str,
     ) -> MemoryDocument:
+        """ 将归档文件提取的证据、历史记忆、 llm 提取的关键信息沉淀为 md"""
         memory_type = _MEMORY_TYPES.get(item.memory_type)
         if memory_type is None:
             raise ValueError(f"unsupported memory_type {item.memory_type!r}")
-        if item.memory_type != candidate.suggested_type:
+        if candidate.unresolved_references:
             raise ValueError(
-                "extracted memory_type does not match the typed candidate"
+                "candidate has unresolved evidence references: "
+                + ", ".join(candidate.unresolved_references)
+            )
+        allowed_types = _ORIGIN_MEMORY_TYPES.get(candidate.origin_kind, set())
+        if memory_type not in allowed_types:
+            raise ValueError(
+                f"memory_type {memory_type.value!r} is not allowed for "
+                f"origin_kind {candidate.origin_kind!r}"
             )
         allowed_evidence = set(candidate.evidence_ids)
         evidence = [
@@ -101,11 +128,18 @@ class MemoryDocumentBuilder:
             raise ValueError("no valid evidence IDs")
         if not item.title or not item.knowledge or not item.applicability:
             raise ValueError("title, knowledge, and applicability are required")
+        if memory_type == MemoryType.PREFERENCE:
+            _validate_preference_decision(candidate, item, evidence)
         scope = _validated_scope(bundle, candidate, item, memory_type)
+        knowledge = (
+            candidate.content
+            if memory_type == MemoryType.PREFERENCE
+            else item.knowledge
+        )
         evidence_strength = round(sum(value.strength for value in evidence) / len(evidence), 4)
         status = _promotion_status(bundle, candidate, memory_type, evidence)
         confidence = _confidence(status, evidence_strength, len(evidence))
-        memory_id = _memory_id(bundle.repo_id, memory_type, scope, item.knowledge)
+        memory_id = _memory_id(bundle.repo_id, memory_type, scope, knowledge)
         now = utc_now()
         return MemoryDocument(
             memory_id=memory_id,
@@ -120,11 +154,17 @@ class MemoryDocumentBuilder:
                 repo_revision=bundle.repo_revision,
                 pipeline_version=pipeline_version,
             ),
-            knowledge=item.knowledge,
+            knowledge=knowledge,
             applicability=item.applicability,
             triggers=item.triggers,
             tags=tuple(sorted(set(item.tags + (memory_type.value,)))),
-            evidence=tuple(_memory_evidence(value) for value in evidence),
+            evidence=tuple(
+                _memory_evidence(
+                    value,
+                    _evidence_relation(candidate, value.evidence_id),
+                )
+                for value in evidence
+            ),
             invalidation=item.invalidation,
             confidence=confidence,
             evidence_strength=evidence_strength,
@@ -132,7 +172,7 @@ class MemoryDocumentBuilder:
             updated_at=now,
             extensions={
                 "candidate_id": candidate.candidate_id,
-                "candidate_source": candidate.source,
+                "candidate_origin": candidate.origin_kind,
                 "source_tasks": [bundle.task_id],
             },
         )
@@ -187,9 +227,13 @@ def _validated_scope(
     if level is None:
         raise ValueError(f"unsupported scope level {item.scope_level!r}")
     if memory_type == MemoryType.PREFERENCE:
-        level = ScopeLevel.USER
+        level = (
+            ScopeLevel.USER
+            if item.constraint_scope == "user"
+            else ScopeLevel.REPO
+        )
     elif level in {ScopeLevel.GLOBAL, ScopeLevel.USER}:
-        raise ValueError("non-preference memories cannot escape repository scope in consolidation-v1")
+        raise ValueError("non-preference memories cannot escape repository scope")
     allowed_files = set(candidate.files)
     requested_files = tuple(path for path in item.files if path in allowed_files)
     if level == ScopeLevel.FILE and not requested_files:
@@ -231,11 +275,11 @@ def _promotion_status(
         return MemoryStatus.VERIFIED
     if memory_type == MemoryType.ANTI_PATTERN and verification_failed:
         return MemoryStatus.VERIFIED
-    if memory_type == MemoryType.PREFERENCE and any(
-        item.kind == "runtime_candidate"
-        and item.metadata.get("candidate_type") == "user_constraint"
-        for item in evidence
+    if memory_type == MemoryType.PROCEDURAL and verification_passed and any(
+        item.kind == "trajectory" for item in evidence
     ):
+        return MemoryStatus.VERIFIED
+    if memory_type == MemoryType.PREFERENCE:
         return MemoryStatus.VERIFIED
     return MemoryStatus.DRAFT
 
@@ -246,14 +290,45 @@ def _confidence(status: MemoryStatus, evidence_strength: float, count: int) -> f
     return round(min(1.0, evidence_strength * 0.75 + status_bonus + count_bonus), 4)
 
 
-def _memory_evidence(item: EvidenceItem) -> MemoryEvidence:
+def _memory_evidence(item: EvidenceItem, relation: str) -> MemoryEvidence:
     return MemoryEvidence(
         evidence_id=item.evidence_id,
         kind=item.kind,
         reference=item.reference,
         strength=item.strength,
-        metadata={"summary": item.summary, **item.metadata},
+        metadata={"summary": item.summary, "relation": relation, **item.metadata},
     )
+
+
+def _validate_preference_decision(
+    candidate: MemoryCandidate,
+    item: ExtractedMemory,
+    evidence: list[EvidenceItem],
+) -> None:
+    if has_temporary_marker(candidate.content):
+        raise ValueError("temporary user constraint cannot become a preference")
+    if (
+        has_repository_marker(candidate.content)
+        and item.constraint_scope != "repository"
+    ):
+        raise ValueError("repository preference cannot be widened to user scope")
+    if item.constraint_durability != "durable":
+        raise ValueError("preference must be explicitly durable")
+    if item.constraint_scope not in {"repository", "user"}:
+        raise ValueError("preference scope must be repository or user")
+    if not item.constraint_explicit:
+        raise ValueError("preference must be explicit")
+    if float(item.semantic_confidence) < 0.75:
+        raise ValueError("preference semantic confidence is below 0.75")
+    if not any(value.kind == "user_statement" for value in evidence):
+        raise ValueError("preference requires original user_statement evidence")
+
+
+def _evidence_relation(candidate: MemoryCandidate, evidence_id: str) -> str:
+    for link in candidate.evidence_links:
+        if link.evidence_id == evidence_id:
+            return link.relation
+    return "resolved"
 
 
 def _memory_id(

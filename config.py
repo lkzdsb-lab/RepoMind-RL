@@ -92,8 +92,28 @@ class DebugAgentConfig:
 
     # Markdown 是长期记忆的权威表达；Catalog 和向量索引是可重建投影。
     long_term_memory_path: str = ".repomind/memory"
+    memory_catalog_path: str = ".repomind/memory/catalog.sqlite3"
+    memory_catalog_busy_timeout_ms: int = 5000
+    memory_keyword_candidate_multiplier: int = 8
+    long_term_memory_retrieval_enabled: bool = True
+    long_term_memory_retrieval_mode: str = "keyword"
+    long_term_memory_retrieval_limit: int = 8
+    long_term_memory_retrieval_max_chars: int = 12000
+    long_term_memory_retrieval_min_score: float = 0.1
+    long_term_memory_retrieval_include_draft: bool = True
+    long_term_memory_retrieval_max_refreshes: int = 3
+    long_term_memory_retrieval_max_queries: int = 4
+    long_term_memory_retrieval_type_limits: dict[str, int] = field(
+        default_factory=lambda: {
+            "preference": 2,
+            "semantic": 4,
+            "procedural": 2,
+            "anti_pattern": 2,
+            "episodic": 2,
+        }
+    )
     consolidation_run_path: str = ".repomind/consolidation/runs"
-    consolidation_pipeline_version: str = "consolidation-v1"
+    consolidation_pipeline_version: str = "consolidation-v2"
     memory_extractor_mode: str = "rule_based"
     memory_consolidation_max_candidates: int = 24
 
@@ -235,6 +255,18 @@ def default_config_payload() -> dict[str, Any]:
         },
         "long_term_memory": {
             "document_path": config.long_term_memory_path,
+            "catalog_path": config.memory_catalog_path,
+            "catalog_busy_timeout_ms": config.memory_catalog_busy_timeout_ms,
+            "keyword_candidate_multiplier": config.memory_keyword_candidate_multiplier,
+            "retrieval_enabled": config.long_term_memory_retrieval_enabled,
+            "retrieval_mode": config.long_term_memory_retrieval_mode,
+            "retrieval_limit": config.long_term_memory_retrieval_limit,
+            "retrieval_max_chars": config.long_term_memory_retrieval_max_chars,
+            "retrieval_min_score": config.long_term_memory_retrieval_min_score,
+            "retrieval_include_draft": config.long_term_memory_retrieval_include_draft,
+            "retrieval_max_refreshes": config.long_term_memory_retrieval_max_refreshes,
+            "retrieval_max_queries": config.long_term_memory_retrieval_max_queries,
+            "retrieval_type_limits": dict(config.long_term_memory_retrieval_type_limits),
             "consolidation_path": config.consolidation_run_path,
             "pipeline_version": config.consolidation_pipeline_version,
             "extractor_mode": config.memory_extractor_mode,
@@ -419,6 +451,18 @@ def apply_debug_agent_config(config: DebugAgentConfig, data: dict[str, Any]) -> 
         data.get("long_term_memory"),
         {
             "document_path": "long_term_memory_path",
+            "catalog_path": "memory_catalog_path",
+            "catalog_busy_timeout_ms": "memory_catalog_busy_timeout_ms",
+            "keyword_candidate_multiplier": "memory_keyword_candidate_multiplier",
+            "retrieval_enabled": "long_term_memory_retrieval_enabled",
+            "retrieval_mode": "long_term_memory_retrieval_mode",
+            "retrieval_limit": "long_term_memory_retrieval_limit",
+            "retrieval_max_chars": "long_term_memory_retrieval_max_chars",
+            "retrieval_min_score": "long_term_memory_retrieval_min_score",
+            "retrieval_include_draft": "long_term_memory_retrieval_include_draft",
+            "retrieval_max_refreshes": "long_term_memory_retrieval_max_refreshes",
+            "retrieval_max_queries": "long_term_memory_retrieval_max_queries",
+            "retrieval_type_limits": "long_term_memory_retrieval_type_limits",
             "consolidation_path": "consolidation_run_path",
             "pipeline_version": "consolidation_pipeline_version",
             "extractor_mode": "memory_extractor_mode",
@@ -584,6 +628,11 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         "memory_extractor_mode", config.memory_extractor_mode, {"rule_based", "llm"}
     )
     _validate_choice(
+        "long_term_memory_retrieval_mode",
+        config.long_term_memory_retrieval_mode,
+        {"keyword"},
+    )
+    _validate_choice(
         "context_compressor_mode",
         config.context_compressor_mode,
         {"disabled", "rule_based", "llm"},
@@ -628,6 +677,12 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         "session_file_cache_max_spans",
         "session_file_cache_max_bytes",
         "memory_consolidation_max_candidates",
+        "memory_catalog_busy_timeout_ms",
+        "memory_keyword_candidate_multiplier",
+        "long_term_memory_retrieval_limit",
+        "long_term_memory_retrieval_max_chars",
+        "long_term_memory_retrieval_max_refreshes",
+        "long_term_memory_retrieval_max_queries",
         "task_archive_max_text_chars",
         "task_archive_max_source_file_bytes",
         "task_archive_max_source_total_bytes",
@@ -649,6 +704,26 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         raise ValueError("observer_write_threshold must be between 0 and 1")
     if int(config.memory_consolidation_max_candidates) > 100:
         raise ValueError("memory_consolidation_max_candidates must not exceed 100")
+    if int(config.memory_keyword_candidate_multiplier) > 100:
+        raise ValueError("memory_keyword_candidate_multiplier must not exceed 100")
+    if int(config.long_term_memory_retrieval_limit) > 100:
+        raise ValueError("long_term_memory_retrieval_limit must not exceed 100")
+    if int(config.long_term_memory_retrieval_max_refreshes) > 10:
+        raise ValueError("long_term_memory_retrieval_max_refreshes must not exceed 10")
+    if int(config.long_term_memory_retrieval_max_queries) > 8:
+        raise ValueError("long_term_memory_retrieval_max_queries must not exceed 8")
+    if not 0.0 <= float(config.long_term_memory_retrieval_min_score) <= 1.0:
+        raise ValueError("long_term_memory_retrieval_min_score must be between 0 and 1")
+    allowed_memory_types = {
+        "preference", "semantic", "procedural", "anti_pattern", "episodic"
+    }
+    if not isinstance(config.long_term_memory_retrieval_type_limits, dict):
+        raise ValueError("long_term_memory_retrieval_type_limits must be an object")
+    for memory_type, limit in config.long_term_memory_retrieval_type_limits.items():
+        if memory_type not in allowed_memory_types:
+            raise ValueError(f"unsupported retrieval memory type limit: {memory_type}")
+        if int(limit) < 0:
+            raise ValueError(f"retrieval type limit for {memory_type} must not be negative")
 
     _require_llm_config(
         "modes.planner",
@@ -720,6 +795,7 @@ def normalize_project_runtime_paths(config: DebugAgentConfig) -> DebugAgentConfi
         "session_memory_path",
         "task_archive_path",
         "long_term_memory_path",
+        "memory_catalog_path",
         "consolidation_run_path",
         "code_context_index_path",
         "rl_q_table_path",

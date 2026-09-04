@@ -50,6 +50,7 @@ Each terminal task is stored at:
   final_report.json
   verification.json
   memory_candidates.json
+  long_term_memory_usage.json
   session_snapshot.json
   source_snapshots.json
   diff.patch                 # only when a diff exists
@@ -63,6 +64,10 @@ overwritten.
 `manifest.json` records the archive schema, repository identity and revision,
 workspace fingerprint, pipeline version, and the byte size and SHA-256 of every
 artifact. `TaskArchiveStore.verify()` detects missing or changed artifacts.
+
+New archives identify `archive-v2`. Their `memory_candidates.json` contains a
+top-level `schema_version: 2`; candidates carry explicit origin, event, file,
+symbol, command, and evidence-reference provenance for offline consolidation.
 
 The archive is written before session memory is committed. An archive failure
 does not change the completed task result, but the state exposes

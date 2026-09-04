@@ -31,6 +31,8 @@ from agent_runtime.lifecycle.completion import derive_phase, evaluate_completion
 from agent_runtime.context import ContextCompressionManager
 from agent_runtime.context.attention import build_attention_focus
 from agent_runtime.memory.file_cache import touch_cache_files
+from agent_runtime.memory.domain.interfaces import LongTermMemoryReader
+from agent_runtime.memory.retrieval import LongTermMemoryService
 from ext.focus_files import current_focus_files
 from agent_runtime.context.events import latest_tool_event, should_llm_observe_event
 from agent_runtime.logging_config import configure_from_agent_config
@@ -110,6 +112,7 @@ class DebugAgent:
         tools: ToolRegistry | None = None,
         registry: RegistryManager | None = None,
         context_manager: ContextCompressionManager | None = None,
+        long_term_memory: LongTermMemoryReader | None = None,
         recorder: TrajectoryRecorder | None = None,
         user_update_sink: UserUpdateSink | None = None,
         change_event_sink: ChangeEventSink | None = None,
@@ -162,6 +165,7 @@ class DebugAgent:
         self.skill_selector = skill_selector or self._default_skill_selector()
         self._active_registry: RegistrySnapshot | None = None
         self.context_manager = context_manager or ContextCompressionManager.from_config(config)
+        self.long_term_memory = long_term_memory or LongTermMemoryService.from_config(config)
         self.recorder = recorder or TrajectoryRecorder()
         logger.info(
             "debug agent initialized repo_path={} max_loops={} rl_enabled={} manifest_dir={}",
@@ -189,12 +193,15 @@ class DebugAgent:
             session_id=session_id,
             session_memory=session_memory or {},
         )
+        state = self._refresh_long_term_memory(state, phase="bootstrap", force=True)
         run_logger = logger.bind(task_id=state.get("task_id"), repo_path=self.config.repo_path)
         run_logger.info(
             "agent run started title={} description_present={}",
             title,
             bool(description),
         )
+        if isinstance(self.task_analyzer, LLMTaskAnalyzer):
+            state = self._record_long_term_memory_use(state, "analyzer")
         state = self._understand_task(state)
         if state.get("status") == "failed":
             state = self._finalize(state)
@@ -205,6 +212,9 @@ class DebugAgent:
                 trace_path.as_posix(),
             )
             return AgentRunResult(state=state, trace_path=trace_path.as_posix())
+        state = self._refresh_long_term_memory(state, phase="refined")
+        if isinstance(self.skill_selector, LLMSkillSelector):
+            state = self._record_long_term_memory_use(state, "skill")
         state = self._select_skills(state)
         if state.get("status") == "failed":
             state = self._finalize(state)
@@ -293,6 +303,7 @@ class DebugAgent:
             return self._run_action_loop(state, started_at)
         if user_answer:
             state = self._inject_user_input(state, user_answer)
+            state = self._refresh_long_term_memory(state, phase="resume")
         else:
             state = {
                 **state,
@@ -318,6 +329,7 @@ class DebugAgent:
         while state.get("loop_count", 0) < state.get("max_loops", self.config.max_loops):
             state = self._sync_runtime_state(state)
             state = self._update_attention_focus(state)
+            state = self._refresh_long_term_memory(state, phase="scope_refresh")
             state = self._prepare_context(state)
             state = self._sync_runtime_state(state)
             state = self._update_attention_focus(state)
@@ -338,6 +350,8 @@ class DebugAgent:
                 )
             else:
                 try:
+                    if isinstance(self.policy, LLMActionPolicy):
+                        state = self._record_long_term_memory_use(state, "action")
                     action = self.policy.next_action(state)
                 except Exception as exc:
                     run_logger.exception("action decision failed")
@@ -525,6 +539,18 @@ class DebugAgent:
             skill_selection={},
             skill_context=[],
             memory_context=str(visible_memory_pack.get("rendered") or ""),
+            long_term_memory_queries=[],
+            long_term_memory_hits=[],
+            long_term_memory_documents=[],
+            long_term_memory_context="",
+            long_term_memory_sections={},
+            long_term_memory_section_ids={},
+            long_term_memory_warnings=[],
+            long_term_memory_events=[],
+            long_term_memory_used_audiences=[],
+            long_term_memory_usage_keys=[],
+            long_term_memory_revision="",
+            long_term_memory_refresh_count=0,
             context_items=[],
             context_digest={},
             compressed_context="",
@@ -573,6 +599,142 @@ class DebugAgent:
             max_loops=self.config.max_loops,
             status="created",
             error=None,
+        )
+
+    def _refresh_long_term_memory(
+        self,
+        state: AgentState,
+        *,
+        phase: str,
+        force: bool = False,
+    ) -> AgentState:
+        batch = self.long_term_memory.retrieve_if_needed(
+            state,
+            phase=phase,
+            force=force,
+        )
+        if batch is None:
+            return state
+        payload = batch.to_dict()
+        selected_ids = [item.memory_id for item in batch.memories]
+        event = {
+            "type": "long_term_memory_retrieval",
+            "phase": batch.phase,
+            "revision": batch.revision,
+            "queries": [item.to_dict() for item in batch.queries],
+            "hit_count": len(batch.hits),
+            "hits": [
+                {
+                    "memory_id": item.get("memory_id"),
+                    "score": item.get("score"),
+                    "selected": item.get("selected"),
+                    "skip_reason": item.get("skip_reason"),
+                }
+                for item in batch.hits
+            ],
+            "selected_memory_ids": selected_ids,
+            "audience_memory_ids": payload["section_memory_ids"],
+            "warnings": list(batch.warnings),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        warnings = list(state.get("long_term_memory_warnings", []) or [])
+        warnings.extend(batch.warnings)
+        observations = list(state.get("observations", []) or [])
+        observations.append(event)
+        updated = {
+            **state,
+            "long_term_memory_queries": payload["queries"],
+            "long_term_memory_hits": payload["hits"],
+            "long_term_memory_documents": payload["memories"],
+            "long_term_memory_context": batch.context,
+            "long_term_memory_sections": dict(batch.sections),
+            "long_term_memory_section_ids": payload["section_memory_ids"],
+            "long_term_memory_warnings": list(dict.fromkeys(warnings)),
+            "long_term_memory_events": list(
+                state.get("long_term_memory_events", []) or []
+            )
+            + [event],
+            "long_term_memory_revision": batch.revision,
+            "long_term_memory_refresh_count": int(
+                state.get("long_term_memory_refresh_count", 0)
+            )
+            + 1,
+            "observations": observations,
+        }
+        logger.bind(task_id=state.get("task_id")).info(
+            "long-term memory retrieved phase={} queries={} hits={} selected={} warnings={}",
+            batch.phase,
+            len(batch.queries),
+            len(batch.hits),
+            len(batch.memories),
+            len(batch.warnings),
+        )
+        return self.recorder.append(
+            updated,
+            node="retrieve_long_term_memory",
+            thought="Retrieve bounded historical memory as non-authoritative task guidance.",
+            observation={
+                "phase": batch.phase,
+                "revision": batch.revision,
+                "query_count": len(batch.queries),
+                "hit_count": len(batch.hits),
+                "selected_memory_ids": selected_ids,
+                "audience_memory_ids": payload["section_memory_ids"],
+                "warnings": list(batch.warnings),
+            },
+        )
+
+    def _record_long_term_memory_use(
+        self,
+        state: AgentState,
+        audience: str,
+    ) -> AgentState:
+        section_ids = state.get("long_term_memory_section_ids")
+        if not isinstance(section_ids, dict):
+            return state
+        memory_ids = [
+            str(item)
+            for item in section_ids.get(audience, []) or []
+            if str(item).strip()
+        ]
+        if not memory_ids:
+            return state
+        revision = str(state.get("long_term_memory_revision") or "")
+        usage_key = f"{audience}:{revision}"
+        usage_keys = list(state.get("long_term_memory_usage_keys", []) or [])
+        if usage_key in usage_keys:
+            return state
+        event = {
+            "type": "long_term_memory_context_used",
+            "audience": audience,
+            "revision": revision,
+            "memory_ids": memory_ids,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        used_audiences = list(
+            state.get("long_term_memory_used_audiences", []) or []
+        )
+        if audience not in used_audiences:
+            used_audiences.append(audience)
+        updated = {
+            **state,
+            "long_term_memory_usage_keys": usage_keys + [usage_key],
+            "long_term_memory_used_audiences": used_audiences,
+            "long_term_memory_events": list(
+                state.get("long_term_memory_events", []) or []
+            )
+            + [event],
+            "observations": list(state.get("observations", []) or []) + [event],
+        }
+        return self.recorder.append(
+            updated,
+            node="use_long_term_memory",
+            thought="Expose bounded historical memory to one read-only agent consumer.",
+            observation={
+                "audience": audience,
+                "revision": revision,
+                "memory_ids": memory_ids,
+            },
         )
 
     def _understand_task(self, state: AgentState) -> AgentState:
@@ -758,6 +920,8 @@ class DebugAgent:
         return new_state
 
     def _make_plan(self, state: AgentState) -> AgentState:
+        if isinstance(self.planner, LLMPlanner):
+            state = self._record_long_term_memory_use(state, "planner")
         plan = self.planner.make_plan(state)
         state = {
             **state,
@@ -867,6 +1031,7 @@ class DebugAgent:
                         ),
                     }
             elif action.name == "search_code_context":
+                state = self._record_long_term_memory_use(state, "code_search")
                 output = self._search_code_context(state, action)
             elif action.name == "apply_code_patch" and _current_task_intent(state) != "implement":
                 output = {

@@ -194,7 +194,7 @@ class TaskArchiveStoreImpl:
             repo_revision=repository_revision(self.repo_path),
             workspace_fingerprint=workspace_fingerprint(snapshots),
             status=str(state.get("status") or "unknown"),
-            pipeline_version="archive-v1",
+            pipeline_version="archive-v2",
             created_at=utc_now(),
             files=records,
             metadata={
@@ -226,7 +226,33 @@ def _artifact_payloads(
         "verification": ("verification.json", canonical_json_bytes(verification), "application/json"),
         "memory_candidates": (
             "memory_candidates.json",
-            canonical_json_bytes({"candidates": state.get("memory_candidates", [])}),
+            canonical_json_bytes(
+                {
+                    "schema_version": 2,
+                    "candidates": state.get("memory_candidates", []),
+                }
+            ),
+            "application/json",
+        ),
+        "long_term_memory_usage": (
+            "long_term_memory_usage.json",
+            canonical_json_bytes(
+                {
+                    "queries": state.get("long_term_memory_queries", []),
+                    "hits": state.get("long_term_memory_hits", []),
+                    "documents": state.get("long_term_memory_documents", []),
+                    "audience_memory_ids": state.get(
+                        "long_term_memory_section_ids", {}
+                    ),
+                    "events": state.get("long_term_memory_events", []),
+                    "used_audiences": state.get(
+                        "long_term_memory_used_audiences", []
+                    ),
+                    "warnings": state.get("long_term_memory_warnings", []),
+                    "revision": state.get("long_term_memory_revision", ""),
+                    "refresh_count": state.get("long_term_memory_refresh_count", 0),
+                }
+            ),
             "application/json",
         ),
         "source_snapshots": (

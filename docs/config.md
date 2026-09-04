@@ -149,15 +149,46 @@ memory and task archives:
 {
   "long_term_memory": {
     "document_path": ".repomind/memory",
+    "catalog_path": ".repomind/memory/catalog.sqlite3",
+    "catalog_busy_timeout_ms": 5000,
+    "keyword_candidate_multiplier": 8,
+    "retrieval_enabled": true,
+    "retrieval_mode": "keyword",
+    "retrieval_limit": 8,
+    "retrieval_max_chars": 12000,
+    "retrieval_min_score": 0.1,
+    "retrieval_include_draft": true,
+    "retrieval_max_refreshes": 3,
+    "retrieval_max_queries": 4,
+    "retrieval_type_limits": {
+      "preference": 2,
+      "semantic": 4,
+      "procedural": 2,
+      "anti_pattern": 2,
+      "episodic": 2
+    },
     "consolidation_path": ".repomind/consolidation/runs",
-    "pipeline_version": "consolidation-v1",
+    "pipeline_version": "consolidation-v2",
     "extractor_mode": "rule_based",
     "max_candidates": 24
   }
 }
 ```
 
-Document and consolidation paths are resolved relative to the target repository.
+Document, Catalog, and consolidation paths are resolved relative to the target
+repository. The SQLite Catalog is a rebuildable structured and FTS5 projection;
+Markdown remains authoritative. `catalog_busy_timeout_ms` controls writer lock
+waiting and `keyword_candidate_multiplier` bounds the FTS candidate pool before
+deterministic application ranking.
+
+Online retrieval is read-only. `retrieval_limit` bounds the number of selected
+documents, while `retrieval_max_chars` bounds the rendered prompt context.
+`retrieval_min_score`, status and scope checks, and per-type limits prevent a
+single memory class from dominating the context. The agent performs at most
+`retrieval_max_refreshes` distinct retrievals per task and reuses the result
+while the query fingerprint is unchanged. Set `retrieval_enabled` to `false` to
+disable injection without disabling consolidation or Catalog maintenance.
+
 The default rule-based extractor is fully offline. Set `extractor_mode` to `llm`
 and configure `llm.memory_extractor` (or the shared `llm` settings) to use semantic
 extraction; deterministic evidence and promotion policy still owns the final
@@ -166,7 +197,11 @@ status and confidence.
 The Phase 2 format and storage guarantees are documented in
 [`long-term-memory-phase-2.md`](long-term-memory-phase-2.md). The offline archive
 to document pipeline is documented in
-[`long-term-memory-phase-3.md`](long-term-memory-phase-3.md).
+[`long-term-memory-phase-3.md`](long-term-memory-phase-3.md). Catalog consistency,
+rebuild, and keyword retrieval are documented in
+[`long-term-memory-phase-4.md`](long-term-memory-phase-4.md). Agent integration,
+prompt audiences, refresh rules, and usage tracing are documented in
+[`long-term-memory-phase-5.md`](long-term-memory-phase-5.md).
 
 ## Example: Enable Only Code Context LLM
 

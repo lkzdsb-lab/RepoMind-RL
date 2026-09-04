@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping, Protocol
 
 from agent_runtime.llm.llm_nodes import LLMJsonNode
+from agent_runtime.memory.retrieval import context_for_audience
 from config import LLMConfig
 from model.agent.graph import AgentState
 from model.llm import SkillSelectorResponse
@@ -156,6 +157,9 @@ def _skill_selector_prompt(state: AgentState, context: dict[str, Any]) -> str:
         task_analysis=json.dumps(state.get("task_analysis", {}), ensure_ascii=False),
         current_step=state.get("current_step", ""),
         memory_context=_truncate_text(str(state.get("memory_context", "")), 3000),
+        long_term_memory_context=context_for_audience(
+            state, "skill", max_chars=3000
+        ),
         code_context=_truncate_text(json.dumps(state.get("code_context", {}), ensure_ascii=False), 3000),
         available_skills=json.dumps(_skills_payload(skills), ensure_ascii=False),
     )

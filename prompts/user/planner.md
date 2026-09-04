@@ -7,6 +7,7 @@ current_step={{ current_step }}
 candidate_files={{ candidate_files }}
 validated_file_cache={{ validated_file_cache }}
 memory_context={{ memory_context }}
+long_term_memory_context={{ long_term_memory_context }}
 compressed_context={{ compressed_context }}
 
 # Verification Context
@@ -30,6 +31,9 @@ Preserve useful steps from default_plan, but remove generic or irrelevant work.
 Do not plan another read for a file when validated_file_cache already covers the
 source ranges needed by the current task. Plan a focused read only when the
 cache is missing, stale, or does not cover the required range.
+Use long_term_memory_context only to guide search and avoid known historical
+anti-patterns. Do not skip current source inspection or verification because a
+memory claims an outcome.
 
 # Output Schema
 

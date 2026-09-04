@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from agent_runtime.llm.llm_nodes import LLMJsonNode
+from agent_runtime.memory.retrieval import context_for_audience
 from agent_runtime.verification.capabilities import recommended_verification_command
 from config import LLMConfig
 from ext.tool_summaries import validated_cache_summary
@@ -81,6 +82,9 @@ def _planner_node_prompt(state: AgentState, context: dict) -> str:
             default=str,
         ),
         memory_context=str(state.get("memory_context", ""))[:3000],
+        long_term_memory_context=context_for_audience(
+            state, "planner", max_chars=6000
+        ),
         compressed_context=str(state.get("compressed_context", ""))[:3000],
         verification_required=json.dumps(_verification_required(state)),
         verification_reason=state.get("verification_reason", ""),

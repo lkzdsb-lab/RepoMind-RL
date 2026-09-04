@@ -20,6 +20,7 @@ from utils import utc_now
 
 
 class ConsolidationRunStore:
+    """ 沉淀 pipeline 记录"""
     def __init__(self, root: str | Path, *, repo_path: str | Path = ".") -> None:
         repo = Path(repo_path or ".").resolve()
         root_value = str(root or "").strip()
@@ -48,6 +49,7 @@ class ConsolidationRunStore:
         outcome: ConsolidationResult,
         artifacts: dict[str, Any],
     ) -> Path:
+        """  save 一次离线处理的流水记录"""
         destination = self.run_path(outcome.task_id, outcome.pipeline_version)
         if destination.exists():
             raise FileExistsError(f"consolidation run already exists: {destination}")

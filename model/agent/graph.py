@@ -99,6 +99,18 @@ class AgentState(TypedDict, total=False):
     # 会话级记忆在任务分析前准备，不参与在线晋升。
     session_memory: Dict[str, Any]
     memory_context: str
+    long_term_memory_queries: List[Dict[str, Any]]
+    long_term_memory_hits: List[Dict[str, Any]]
+    long_term_memory_documents: List[Dict[str, Any]]
+    long_term_memory_context: str
+    long_term_memory_sections: Dict[str, str]
+    long_term_memory_section_ids: Dict[str, List[str]]
+    long_term_memory_warnings: List[str]
+    long_term_memory_events: List[Dict[str, Any]]
+    long_term_memory_used_audiences: List[str]
+    long_term_memory_usage_keys: List[str]
+    long_term_memory_revision: str
+    long_term_memory_refresh_count: int
 
     # 上下文压缩
     context_items: List[Dict[str, Any]]

@@ -24,6 +24,14 @@ Use them to resolve references such as "the previous issue" or "continue", but
 do not treat them as authorization to edit. Only the current message determines
 whether implementation is allowed.
 
+# Historical Long-Term Memory
+
+{{ long_term_memory_context }}
+
+Treat long-term memory as historical search guidance. It may be stale or scoped
+to an older repository state. Never turn it into current acceptance criteria or
+current facts without repository evidence.
+
 # Intent Rules
 
 - `diagnose`: inspect, debug, identify, or explain what is wrong without changing code.

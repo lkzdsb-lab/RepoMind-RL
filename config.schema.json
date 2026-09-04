@@ -106,6 +106,28 @@
       "additionalProperties": false,
       "properties": {
         "document_path": { "type": "string", "minLength": 1 },
+        "catalog_path": { "type": "string", "minLength": 1 },
+        "catalog_busy_timeout_ms": { "type": "integer", "minimum": 1 },
+        "keyword_candidate_multiplier": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "retrieval_enabled": { "type": "boolean" },
+        "retrieval_mode": { "enum": ["keyword"] },
+        "retrieval_limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "retrieval_max_chars": { "type": "integer", "minimum": 1000 },
+        "retrieval_min_score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "retrieval_include_draft": { "type": "boolean" },
+        "retrieval_max_refreshes": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "retrieval_max_queries": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "retrieval_type_limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "preference": { "type": "integer", "minimum": 0 },
+            "semantic": { "type": "integer", "minimum": 0 },
+            "procedural": { "type": "integer", "minimum": 0 },
+            "anti_pattern": { "type": "integer", "minimum": 0 },
+            "episodic": { "type": "integer", "minimum": 0 }
+          }
+        },
         "consolidation_path": { "type": "string", "minLength": 1 },
         "pipeline_version": { "type": "string", "minLength": 1 },
         "extractor_mode": { "enum": ["rule_based", "llm"] },

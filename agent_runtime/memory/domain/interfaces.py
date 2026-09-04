@@ -46,7 +46,9 @@ class MemoryDocumentStore(Protocol):
 class MemoryCatalog(Protocol):
     def synchronize(self, document: MemoryDocument, document_path: Path) -> None: ...
     def keyword_search(self, query: MemoryQuery) -> list[MemoryHit]: ...
-    def rebuild(self, documents: Iterable[tuple[MemoryDocument, Path]]) -> None: ...
+    def rebuild(
+        self, documents: Iterable[tuple[MemoryDocument, Path]]
+    ) -> Any | None: ...
 
 
 class MemorySemanticIndex(Protocol):
@@ -57,6 +59,18 @@ class MemorySemanticIndex(Protocol):
 
 class MemoryRetriever(Protocol):
     def retrieve(self, query: MemoryQuery) -> list[MemoryHit]: ...
+
+
+class LongTermMemoryReader(Protocol):
+    """Agent capability boundary: retrieval only, with no persistence methods."""
+
+    def retrieve_if_needed(
+        self,
+        state: AgentState,
+        *,
+        phase: str,
+        force: bool = False,
+    ) -> Any | None: ...
 
 
 class MemoryConsolidator(Protocol):

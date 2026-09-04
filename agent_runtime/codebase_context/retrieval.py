@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from agent_runtime.llm.llm_nodes import LLMJsonNode
+from agent_runtime.memory.retrieval import context_for_audience
 from agent_runtime.search_query import SearchQueryPlanner
 from config import LLMConfig
 from model.agent.graph import AgentState
@@ -381,6 +382,9 @@ def _code_context_query_prompt(state: AgentState, context: dict[str, Any]) -> st
         selected_skills=json.dumps(state.get("selected_skills", []), ensure_ascii=False),
         skill_context=_truncate_text(json.dumps(state.get("skill_context", []), ensure_ascii=False), 1400),
         memory_context=_truncate_text(str(state.get("memory_context", "")), 3000),
+        long_term_memory_context=context_for_audience(
+            state, "code_search", max_chars=4000
+        ),
         current_step=state.get("current_step", ""),
         candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),
     )

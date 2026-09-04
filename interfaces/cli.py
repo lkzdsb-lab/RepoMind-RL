@@ -11,8 +11,15 @@ from rich.console import Console
 from rich.table import Table
 
 from agent_runtime.executor import DebugAgent
+from agent_runtime.memory.archive.repository import repository_id
+from agent_runtime.memory.catalog import SQLiteMemoryCatalog
 from agent_runtime.memory.documents import MarkdownMemoryDocumentStore
 from agent_runtime.memory.consolidation.factory import build_consolidation_pipeline
+from agent_runtime.memory.domain.models import (
+    MemoryQuery,
+    MemoryStatus,
+    MemoryType,
+)
 from agent_runtime.session import AgentSession
 from agent_runtime.user_updates import set_change_event_sink
 from config import (
@@ -39,7 +46,12 @@ memory_app = typer.Typer(
     add_completion=False,
     help="Inspect and maintain canonical Markdown long-term memory.",
 )
+catalog_app = typer.Typer(
+    add_completion=False,
+    help="Maintain the rebuildable SQLite memory catalog.",
+)
 app.add_typer(memory_app, name="memory")
+memory_app.add_typer(catalog_app, name="catalog")
 
 
 @app.callback(invoke_without_command=True)
@@ -220,13 +232,23 @@ def memory_deprecate(
     no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
 ) -> None:
     """Mark one memory deprecated without moving or deleting its document."""
-    store = _memory_store(repo, config_path, no_config)
+    _, store, catalog = _memory_runtime(repo, config_path, no_config)
     try:
         store.deprecate(memory_id, reason)
     except KeyError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
     console.print(f"[green]Deprecated memory:[/green] {memory_id}")
+    document = store.get(memory_id)
+    try:
+        if document is not None:
+            catalog.synchronize(document, store.document_path(document))
+    except Exception as exc:
+        console.print(
+            "[yellow]Markdown was updated, but Catalog synchronization failed:[/yellow] "
+            f"{exc}"
+        )
+        raise typer.Exit(code=2) from exc
 
 
 @memory_app.command("consolidate")
@@ -267,6 +289,132 @@ def memory_consolidate(
     if outcome.warnings:
         table.add_row("warnings", "\n".join(outcome.warnings))
     console.print(table)
+
+
+@memory_app.command("search")
+def memory_search(
+    text: str = typer.Argument(..., help="Keyword query."),
+    memory_type: Optional[str] = typer.Option(
+        None, "--type", help="Comma-separated memory types."
+    ),
+    status: Optional[str] = typer.Option(
+        None, "--status", help="Comma-separated statuses; defaults to active states."
+    ),
+    tag: Optional[str] = typer.Option(None, "--tag", help="Comma-separated required tags."),
+    scope: Optional[str] = typer.Option(
+        None, "--scope", help="Comma-separated exact module/file/symbol hints."
+    ),
+    limit: int = typer.Option(8, "--limit", min=1, max=100),
+    all_repos: bool = typer.Option(
+        False, "--all-repos", help="Do not apply current repository scope filtering."
+    ),
+    repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
+    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
+) -> None:
+    """Search the SQLite keyword projection and explain each result."""
+    config, store, catalog = _memory_runtime(repo, config_path, no_config)
+    try:
+        query = MemoryQuery(
+            text=text,
+            repo_id="" if all_repos else repository_id(config.repo_path),
+            memory_types=tuple(
+                MemoryType(value) for value in _comma_values(memory_type)
+            ),
+            statuses=tuple(MemoryStatus(value) for value in _comma_values(status)),
+            tags=tuple(_comma_values(tag)),
+            scope_hints=tuple(_comma_values(scope)),
+            limit=limit,
+        )
+        hits = catalog.keyword_search(query)
+    except Exception as exc:
+        console.print(f"[red]Memory search failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    table = Table("Score", "ID", "Type", "Status", "Title", "Reasons")
+    for hit in hits:
+        document = store.get(hit.memory_id)
+        table.add_row(
+            f"{hit.score:.4f}",
+            hit.memory_id,
+            document.memory_type.value if document else "?",
+            document.status.value if document else "?",
+            document.title if document else "(Markdown missing)",
+            "; ".join(hit.reasons),
+        )
+    console.print(table)
+
+
+@catalog_app.command("rebuild")
+def memory_catalog_rebuild(
+    repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
+    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
+) -> None:
+    """Build a temporary catalog and atomically replace the current projection."""
+    _, store, catalog = _memory_runtime(repo, config_path, no_config)
+    issues = store.validate()
+    if issues:
+        for issue in issues:
+            console.print(f"[red]{issue.path}[/red]: {issue.message}")
+        raise typer.Exit(code=1)
+    try:
+        result = catalog.rebuild(store.records())
+    except Exception as exc:
+        console.print(f"[red]Catalog rebuild failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(
+        "[green]Catalog rebuilt.[/green] "
+        f"indexed={result.indexed} unchanged={result.unchanged} removed={result.removed}"
+    )
+
+
+@catalog_app.command("sync")
+def memory_catalog_sync(
+    repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
+    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
+) -> None:
+    """Incrementally synchronize Markdown and remove orphaned projections."""
+    _, store, catalog = _memory_runtime(repo, config_path, no_config)
+    issues = store.validate()
+    if issues:
+        for issue in issues:
+            console.print(f"[red]{issue.path}[/red]: {issue.message}")
+        raise typer.Exit(code=1)
+    try:
+        result = catalog.sync(store.records())
+    except Exception as exc:
+        console.print(f"[red]Catalog synchronization failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(
+        "[green]Catalog synchronized.[/green] "
+        f"indexed={result.indexed} unchanged={result.unchanged} removed={result.removed}"
+    )
+
+
+@catalog_app.command("status")
+def memory_catalog_status(
+    repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
+    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
+) -> None:
+    """Check schema, hashes, paths, FTS rows, and orphan projections."""
+    try:
+        _, store, catalog = _memory_runtime(repo, config_path, no_config)
+        report = catalog.status(store.records())
+    except Exception as exc:
+        console.print(f"[red]Catalog status failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(
+        f"Markdown documents={report.document_count}, Catalog rows={report.catalog_count}"
+    )
+    if report.healthy:
+        console.print("[green]Catalog is consistent with Markdown memory.[/green]")
+        return
+    for issue in report.issues:
+        identity = f" [{issue.memory_id}]" if issue.memory_id else ""
+        console.print(f"[red]{issue.code}{identity}[/red]: {issue.message}")
+    raise typer.Exit(code=1)
 
 
 def _build_config(
@@ -334,9 +482,32 @@ def _memory_store(
     config_path: str,
     no_config: bool,
 ) -> MarkdownMemoryDocumentStore:
+    _, store, _ = _memory_runtime(repo, config_path, no_config)
+    return store
+
+
+def _memory_runtime(
+    repo: str | None,
+    config_path: str,
+    no_config: bool,
+) -> tuple[DebugAgentConfig, MarkdownMemoryDocumentStore, SQLiteMemoryCatalog]:
     config = _load_base_config(repo, config_path, no_config)
     normalize_project_runtime_paths(config)
-    return MarkdownMemoryDocumentStore.from_config(config)
+    return (
+        config,
+        MarkdownMemoryDocumentStore.from_config(config),
+        SQLiteMemoryCatalog.from_config(config),
+    )
+
+
+def _comma_values(value: str | None) -> list[str]:
+    return list(
+        dict.fromkeys(
+            item.strip()
+            for item in str(value or "").split(",")
+            if item.strip()
+        )
+    )
 
 
 def _load_initial_response(

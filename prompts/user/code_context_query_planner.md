@@ -7,6 +7,7 @@ task_analysis={{ task_analysis }}
 selected_skills={{ selected_skills }}
 skill_context={{ skill_context }}
 memory_context={{ memory_context }}
+long_term_memory_context={{ long_term_memory_context }}
 current_step={{ current_step }}
 candidate_files={{ candidate_files }}
 default_query={{ default_query }}
@@ -19,6 +20,8 @@ Every query must contain searchable words, identifiers, filenames, or numbers. N
 Do not infer a programming language from generic words such as "main", "app", "server", or "index".
 For an unspecified main function or file, begin with language-neutral queries and filenames supported by repository evidence.
 Use project_profile as the primary language evidence. Generate language-specific queries only when the user, project_profile, task_analysis, skill_context, or repository candidates provide concrete support.
+Use long_term_memory_context to propose focused search terms only. Do not treat
+historical paths or symbols as existing until repository search confirms them.
 
 # Output Schema
 

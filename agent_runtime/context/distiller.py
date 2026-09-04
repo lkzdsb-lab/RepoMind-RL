@@ -22,12 +22,16 @@ def distill_context_events(
     memory_candidates: list[dict[str, Any]] = []
     for item in distilled:
         for candidate in item.memory_candidates:
-            key = (candidate.get("type"), candidate.get("content"), candidate.get("source_event_id"))
+            key = (
+                candidate.get("origin_kind"),
+                candidate.get("content"),
+                tuple(candidate.get("source_event_ids") or []),
+            )
             if key not in {
                 (
-                    existing.get("type"),
+                    existing.get("origin_kind"),
                     existing.get("content"),
-                    existing.get("source_event_id"),
+                    tuple(existing.get("source_event_ids") or []),
                 )
                 for existing in memory_candidates
             }:
@@ -47,8 +51,6 @@ def _distill_event(event: ContextEvent, state: AgentState) -> DistilledEvent:
         facts.extend(_task_facts(event))
     elif event.event_type == "user_event":
         facts.append(event.summary)
-        if event.importance in {"high", "critical"}:
-            memory_candidates.append(_memory_candidate(event, "user_constraint", event.summary))
     elif event.event_type == "plan_event":
         facts.extend(_plan_facts(event))
         if event.payload.get("approved") is False and event.payload.get("evaluation"):
@@ -69,12 +71,27 @@ def _distill_event(event: ContextEvent, state: AgentState) -> DistilledEvent:
         if event.payload.get("exit_code") not in (None, 0):
             risks.append("Latest verification failed.")
             next_actions.append("Inspect verification stderr/stdout and update the hypothesis.")
-            memory_candidates.append(_memory_candidate(event, "verification_failure", event.summary))
+            memory_candidates.append(
+                _memory_candidate(
+                    event,
+                    "verification_failure",
+                    event.summary,
+                    commands=(str(event.payload.get("command") or ""),),
+                )
+            )
     elif event.event_type == "error_event":
         facts.append(event.summary)
         risks.append(event.summary)
         next_actions.append("Recover from the error before continuing the same path.")
-        memory_candidates.append(_memory_candidate(event, "error_pattern", event.summary))
+        memory_candidates.append(
+            _memory_candidate(
+                event,
+                "error_pattern",
+                event.summary,
+                files=(str(event.payload.get("file_path") or ""),),
+                commands=(str(event.payload.get("command") or ""),),
+            )
+        )
     elif event.event_type == "llm_event":
         facts.append(event.summary)
         if str(event.payload.get("category") or "") in {"billing_or_quota", "auth_or_access"}:
@@ -188,13 +205,33 @@ def _code_fact_candidates(event: ContextEvent, facts: list[str]) -> list[dict[st
     content = " ".join(facts)[:900]
     if not content:
         return []
-    return [_memory_candidate(event, "code_fact", f"{path}: {content}")]
+    return [
+        _memory_candidate(
+            event,
+            "code_observation",
+            f"{path}: {content}",
+            files=(path,),
+        )
+    ]
 
 
-def _memory_candidate(event: ContextEvent, kind: str, content: str) -> dict[str, Any]:
+def _memory_candidate(
+    event: ContextEvent,
+    origin_kind: str,
+    content: str,
+    *,
+    files: tuple[str, ...] = (),
+    symbols: tuple[str, ...] = (),
+    commands: tuple[str, ...] = (),
+) -> dict[str, Any]:
     return {
-        "type": kind,
-        "source_event_id": event.event_id,
+        "schema_version": 2,
+        "origin_kind": origin_kind,
+        "source_event_ids": [event.event_id],
+        "evidence_refs": [],
+        "files": [value for value in files if value],
+        "symbols": [value for value in symbols if value],
+        "commands": [value for value in commands if value],
         "importance": event.importance,
         "content": str(content or "").strip()[:1000],
         "raw_ref": event.raw_ref,
@@ -214,8 +251,13 @@ def _observation_memory_candidates(event: ContextEvent) -> list[dict[str, Any]]:
             continue
         candidates.append(
             {
-                "type": str(item.get("type") or "observation")[:80],
-                "source_event_id": event.event_id,
+                "schema_version": 2,
+                "origin_kind": "observer_observation",
+                "source_event_ids": [event.event_id],
+                "evidence_refs": [],
+                "files": [],
+                "symbols": [],
+                "commands": [],
                 "importance": event.importance,
                 "content": content[:1000],
                 "raw_ref": event.raw_ref,

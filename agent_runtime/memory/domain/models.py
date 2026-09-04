@@ -278,12 +278,40 @@ class MemoryQuery:
     text: str
     repo_id: str = ""
     memory_types: tuple[MemoryType, ...] = ()
+    statuses: tuple[MemoryStatus, ...] = ()
     scope_hints: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
     limit: int = 8
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "text", _required_text(self.text, "query.text", limit=10000))
+        object.__setattr__(self, "repo_id", str(self.repo_id or "").strip()[:500])
+        object.__setattr__(
+            self,
+            "memory_types",
+            tuple(
+                _enum_value(MemoryType, item, "query.memory_types")
+                for item in self.memory_types
+            ),
+        )
+        object.__setattr__(
+            self,
+            "statuses",
+            tuple(
+                _enum_value(MemoryStatus, item, "query.statuses")
+                for item in self.statuses
+            ),
+        )
+        object.__setattr__(
+            self,
+            "scope_hints",
+            tuple(_strings(self.scope_hints, limit=50, item_limit=500)),
+        )
+        object.__setattr__(
+            self,
+            "tags",
+            tuple(_strings(self.tags, limit=50, item_limit=100)),
+        )
         if not 1 <= int(self.limit) <= 100:
             raise ValueError("query.limit must be between 1 and 100")
 
@@ -294,6 +322,8 @@ class MemoryHit:
     score: float
     source: str
     reasons: tuple[str, ...] = ()
+    content_hash: str = ""
+    document_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -421,7 +451,7 @@ class TaskArchiveManifest:
     session_id: str = ""
     repo_revision: str = ""
     workspace_fingerprint: str = ""
-    pipeline_version: str = "archive-v1"
+    pipeline_version: str = "archive-v2"
     schema_version: int = ARCHIVE_SCHEMA_VERSION
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -461,7 +491,7 @@ class TaskArchiveManifest:
             repo_revision=str(data.get("repo_revision") or ""),
             workspace_fingerprint=str(data.get("workspace_fingerprint") or ""),
             status=str(data.get("status") or ""),
-            pipeline_version=str(data.get("pipeline_version") or "archive-v1"),
+            pipeline_version=str(data.get("pipeline_version") or "archive-v2"),
             created_at=str(data.get("created_at") or ""),
             files={
                 str(key): ArchiveFileRecord.from_dict(value)

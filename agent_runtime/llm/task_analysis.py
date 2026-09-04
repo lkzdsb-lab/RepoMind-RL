@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from agent_runtime.llm.llm_nodes import LLMJsonNode
+from agent_runtime.memory.retrieval import context_for_audience
 from config import LLMConfig
 from model.agent.graph import AgentState
 from model.llm import TaskAnalysisResponse
@@ -71,4 +72,7 @@ def _task_analysis_prompt(state: AgentState, context: dict[str, Any]) -> str:
         project_profile=json.dumps(state.get("project_profile", {}), ensure_ascii=False),
         registry_snapshot=json.dumps(state.get("registry_snapshot", {}), ensure_ascii=False),
         session_memory=json.dumps(session_memory, ensure_ascii=False),
+        long_term_memory_context=context_for_audience(
+            state, "analyzer", max_chars=5000
+        ),
     )

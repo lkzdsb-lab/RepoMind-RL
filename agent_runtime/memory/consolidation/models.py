@@ -14,6 +14,10 @@ class EvidenceItem:
     reference: str
     strength: float
     metadata: dict[str, Any] = field(default_factory=dict)
+    source_event_ids: tuple[str, ...] = ()
+    files: tuple[str, ...] = ()
+    symbols: tuple[str, ...] = ()
+    command: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -41,12 +45,51 @@ class TaskEvidenceBundle:
 
 
 @dataclass(frozen=True)
+class CandidateSeed:
+    candidate_id: str
+    origin_kind: str
+    content: str
+    evidence_refs: tuple[str, ...] = ()
+    source_event_ids: tuple[str, ...] = ()
+    files: tuple[str, ...] = ()
+    symbols: tuple[str, ...] = ()
+    commands: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class EvidenceLink:
+    evidence_id: str
+    relation: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class EvidenceResolution:
+    candidate_id: str
+    links: tuple[EvidenceLink, ...]
+    unresolved_references: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "candidate_id": self.candidate_id,
+            "links": [item.to_dict() for item in self.links],
+            "unresolved_references": list(self.unresolved_references),
+        }
+
+
+@dataclass(frozen=True)
 class MemoryCandidate:
     candidate_id: str
-    suggested_type: str
+    origin_kind: str
     content: str
     evidence_ids: tuple[str, ...]
-    source: str
+    evidence_links: tuple[EvidenceLink, ...] = ()
+    unresolved_references: tuple[str, ...] = ()
     files: tuple[str, ...] = ()
     symbols: tuple[str, ...] = ()
 
@@ -70,6 +113,12 @@ class ExtractedMemory:
     files: tuple[str, ...] = ()
     symbols: tuple[str, ...] = ()
     invalidation: str = ""
+    constraint_scope: str = ""
+    constraint_durability: str = ""
+    constraint_explicit: bool = False
+    semantic_confidence: float = 0.0
+    decision_reason: str = ""
+    rejection_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -89,4 +138,3 @@ class ExtractionBatch:
             "raw_response": dict(self.raw_response),
             "metadata": dict(self.metadata),
         }
-

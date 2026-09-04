@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from agent_runtime.memory.archive import TaskArchiveStoreImpl
-from agent_runtime.memory.consolidation.candidates import RuleBasedCandidateBuilder
+from agent_runtime.memory.catalog import SQLiteMemoryCatalog
+from agent_runtime.memory.consolidation.candidates import CandidateSeedBuilder
 from agent_runtime.memory.consolidation.evidence import ArchiveEvidenceCollector
 from agent_runtime.memory.consolidation.extractors import (
     LLMMemoryExtractor,
@@ -13,6 +14,7 @@ from agent_runtime.memory.consolidation.extractors import (
 )
 from agent_runtime.memory.consolidation.pipeline import ConsolidationPipeline
 from agent_runtime.memory.consolidation.policy import MemoryDocumentBuilder
+from agent_runtime.memory.consolidation.resolution import CandidateEvidenceResolver
 from agent_runtime.memory.consolidation.runs import ConsolidationRunStore
 from agent_runtime.memory.documents import MarkdownMemoryDocumentStore
 from config import resolve_llm_config
@@ -48,17 +50,19 @@ def build_consolidation_pipeline(
         raise ValueError(f"unsupported memory extractor mode: {mode}")
     return ConsolidationPipeline(
         collector=ArchiveEvidenceCollector(archive),
-        candidate_builder=RuleBasedCandidateBuilder(
+        candidate_builder=CandidateSeedBuilder(
             getattr(config, "memory_consolidation_max_candidates", 24)
         ),
+        evidence_resolver=CandidateEvidenceResolver(),
         extractor=extractor,
         document_builder=MemoryDocumentBuilder(),
         document_store=document_store,
+        catalog=SQLiteMemoryCatalog.from_config(config),
         run_store=ConsolidationRunStore(
             getattr(config, "consolidation_run_path", ".repomind/consolidation/runs"),
             repo_path=getattr(config, "repo_path", "."),
         ),
         pipeline_version=getattr(
-            config, "consolidation_pipeline_version", "consolidation-v1"
+            config, "consolidation_pipeline_version", "consolidation-v2"
         ),
     )

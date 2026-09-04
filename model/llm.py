@@ -55,6 +55,31 @@ class MemoryExtractionItemResponse(BaseModel):
     files: list[str] = Field(default_factory=list)
     symbols: list[str] = Field(default_factory=list)
     invalidation: str = ""
+    constraint_scope: Literal[
+        "", "task", "session", "repository", "user", "ambiguous"
+    ] = ""
+    constraint_durability: Literal[
+        "", "temporary", "durable", "ambiguous"
+    ] = ""
+    constraint_explicit: bool = False
+    semantic_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    decision_reason: str = ""
+    rejection_reason: Literal[
+        "",
+        "temporary_constraint",
+        "insufficient_evidence",
+        "not_reusable",
+        "duplicate_in_batch",
+        "unsupported_claim",
+        "scope_ambiguous",
+        "one_off_detail",
+        "wrong_origin_type",
+    ] = ""
+
+    @field_validator("semantic_confidence", mode="before")
+    @classmethod
+    def _normalize_semantic_confidence(cls, value: Any) -> Any:
+        return _coerce_score(value)
 
 
 class MemoryExtractionResponse(BaseModel):

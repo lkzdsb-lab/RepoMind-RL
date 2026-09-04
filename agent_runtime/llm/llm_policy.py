@@ -10,6 +10,7 @@ from typing import Any
 from ext.focus_files import current_focus_files
 from agent_runtime.actions import ActionArgumentValidator, ActionFactory
 from agent_runtime.llm.llm_nodes import LLMJsonNode, publish_user_update
+from agent_runtime.memory.retrieval import context_for_audience
 from agent_runtime.llm.findings import normalize_finding_candidates
 from ext.tool_summaries import read_file_range_context
 from agent_runtime.rl.action_space import ActionSpace
@@ -593,6 +594,9 @@ def _action_prompt(
             default=str,
         ),
         memory_context=str(state.get("memory_context", ""))[:2500],
+        long_term_memory_context=context_for_audience(
+            state, "action", max_chars=6000
+        ),
         compressed_context=str(state.get("compressed_context", ""))[:2500],
         legal_actions=json.dumps(legal, ensure_ascii=False),
         action_constraints=json.dumps(constraints, ensure_ascii=False, default=str),

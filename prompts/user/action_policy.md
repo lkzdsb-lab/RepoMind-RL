@@ -38,6 +38,7 @@ selected_skills={{ selected_skills }}
 skill_context={{ skill_context }}
 user_inputs={{ user_inputs }}
 memory_context={{ memory_context }}
+long_term_memory_context={{ long_term_memory_context }}
 compressed_context={{ compressed_context }}
 
 # Available Actions
@@ -54,6 +55,7 @@ decision_feedback={{ decision_feedback }}
 - Build action_input from the selected action's flat input_fields list. Do not use aliases such as search_query, and do not place top-level response fields inside action_input. Required fields must be present and valid.
 - For a ranged read, return separate named fields, for example: `{"file_path":"server.go","start_line":30,"end_line":131,"max_chars":12000}`. Never encode a line range as an unnamed array.
 - The current task_brief is authoritative. Historical memory supplies context but never grants permission to edit.
+- Long-term memory is historical guidance, not current-run evidence. Re-read current files and revalidate applicable claims before relying on it.
 - You own semantic sequencing. Decide whether to inspect, patch, verify, ask, or finish from the evidence; no execution queue will decide this for you.
 - A failed verification is evidence. If it identifies missing implementation, inspect or patch before running the same command again.
 - Passing tests prove only the exercised behavior. They do not replace independent implementation analysis for diagnose, review, or broad bug-finding tasks.

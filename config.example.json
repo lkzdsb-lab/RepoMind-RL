@@ -67,8 +67,26 @@
   },
   "long_term_memory": {
     "document_path": ".repomind/memory",
+    "catalog_path": ".repomind/memory/catalog.sqlite3",
+    "catalog_busy_timeout_ms": 5000,
+    "keyword_candidate_multiplier": 8,
+    "retrieval_enabled": true,
+    "retrieval_mode": "keyword",
+    "retrieval_limit": 8,
+    "retrieval_max_chars": 12000,
+    "retrieval_min_score": 0.1,
+    "retrieval_include_draft": true,
+    "retrieval_max_refreshes": 3,
+    "retrieval_max_queries": 4,
+    "retrieval_type_limits": {
+      "preference": 2,
+      "semantic": 4,
+      "procedural": 2,
+      "anti_pattern": 2,
+      "episodic": 2
+    },
     "consolidation_path": ".repomind/consolidation/runs",
-    "pipeline_version": "consolidation-v1",
+    "pipeline_version": "consolidation-v2",
     "extractor_mode": "rule_based",
     "max_candidates": 24
   },

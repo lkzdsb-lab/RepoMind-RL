@@ -63,6 +63,13 @@ class SearchQueryPlanner:
         self._add_text(
             weighted,
             buckets,
+            "memory_terms",
+            _long_term_search_text(state),
+            weight=0.6,
+        )
+        self._add_text(
+            weighted,
+            buckets,
             "skill_terms",
             " ".join(state.get("selected_skills", [])),
             weight=1.5,
@@ -222,3 +229,28 @@ def _list_values(value: Any) -> list[Any]:
     if value in (None, ""):
         return []
     return [value]
+
+
+def _long_term_search_text(state: AgentState, limit: int = 2500) -> str:
+    values: list[str] = []
+    documents = state.get("long_term_memory_documents")
+    if not isinstance(documents, list):
+        return ""
+    for document in documents[:8]:
+        if not isinstance(document, dict):
+            continue
+        values.extend(
+            [
+                str(document.get("title") or ""),
+                str(document.get("knowledge") or "")[:500],
+                " ".join(str(item) for item in document.get("triggers", []) or []),
+                " ".join(str(item) for item in document.get("tags", []) or []),
+            ]
+        )
+        scope = document.get("scope")
+        if isinstance(scope, dict):
+            values.extend(
+                " ".join(str(item) for item in scope.get(key, []) or [])
+                for key in ("files", "symbols")
+            )
+    return " ".join(values)[:limit]
