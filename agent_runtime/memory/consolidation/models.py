@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from agent_runtime.memory.domain.models import MemoryDocument
+
 
 @dataclass(frozen=True)
 class EvidenceItem:
@@ -138,3 +140,75 @@ class ExtractionBatch:
             "raw_response": dict(self.raw_response),
             "metadata": dict(self.metadata),
         }
+
+
+@dataclass(frozen=True)
+class MatchedMemory:
+    document: MemoryDocument
+    score: float
+    source: str
+    model_fingerprint: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "memory_id": self.document.memory_id,
+            "score": self.score,
+            "source": self.source,
+            "knowledge_hash": self.document.knowledge_hash,
+            "revision": self.document.revision,
+            "model_fingerprint": self.model_fingerprint,
+        }
+
+
+@dataclass(frozen=True)
+class RelationAssessment:
+    target_memory_id: str
+    relation: str
+    confidence: float
+    reason: str
+    supporting_evidence_ids: tuple[str, ...] = ()
+    merged_title: str = ""
+    merged_knowledge: str = ""
+    merged_applicability: str = ""
+    merged_invalidation: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class RelationResolution:
+    assessments: tuple[RelationAssessment, ...] = ()
+    source: str = ""
+    error: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+    target_documents: dict[str, MemoryDocument] = field(default_factory=dict, repr=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source": self.source,
+            "error": self.error,
+            "assessments": [item.to_dict() for item in self.assessments],
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass(frozen=True)
+class MemoryMutation:
+    action: str
+    source_candidate_id: str
+    target_memory_id: str
+    before_revision: int = 0
+    after_revision: int = 0
+    before_knowledge_hash: str = ""
+    after_knowledge_hash: str = ""
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class EvolutionResult:
+    document: MemoryDocument
+    mutation: MemoryMutation

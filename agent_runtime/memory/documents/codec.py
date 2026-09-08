@@ -22,6 +22,8 @@ _FRONTMATTER_ORDER = (
     "tags",
     "confidence",
     "evidence_strength",
+    "revision",
+    "knowledge_hash",
     "created_at",
     "updated_at",
     "evidence",

@@ -56,6 +56,17 @@ class LLMConfig:
 
 
 @dataclass
+class EmbeddingConfig:
+    provider: str = "disabled"
+    model: str = ""
+    api_base: str = ""
+    api_key_env: str = "LLM_API_KEY"
+    timeout: int = 60
+    dimensions: int = 0
+    batch_size: int = 32
+
+
+@dataclass
 class DebugAgentConfig:
     """
         agent 相关配置
@@ -93,6 +104,7 @@ class DebugAgentConfig:
     # Markdown 是长期记忆的权威表达；Catalog 和向量索引是可重建投影。
     long_term_memory_path: str = ".repomind/memory"
     memory_catalog_path: str = ".repomind/memory/catalog.sqlite3"
+    memory_semantic_index_path: str = ".repomind/memory/semantic.sqlite3"
     memory_catalog_busy_timeout_ms: int = 5000
     memory_keyword_candidate_multiplier: int = 8
     long_term_memory_retrieval_enabled: bool = True
@@ -113,9 +125,14 @@ class DebugAgentConfig:
         }
     )
     consolidation_run_path: str = ".repomind/consolidation/runs"
-    consolidation_pipeline_version: str = "consolidation-v2"
+    consolidation_pipeline_version: str = "consolidation-v3"
     memory_extractor_mode: str = "rule_based"
     memory_consolidation_max_candidates: int = 24
+    memory_semantic_merge_mode: str = "disabled"
+    memory_semantic_top_k: int = 5
+    memory_semantic_min_similarity: float = 0.78
+    memory_semantic_relation_min_confidence: float = 0.85
+    memory_embedding_config: EmbeddingConfig = field(default_factory=EmbeddingConfig)
 
     # context 压缩
     context_compression_enabled: bool = True
@@ -133,6 +150,7 @@ class DebugAgentConfig:
     task_analysis_llm_config: LLMConfig = field(default_factory=LLMConfig)
     observer_llm_config: LLMConfig = field(default_factory=LLMConfig)
     memory_extractor_llm_config: LLMConfig = field(default_factory=LLMConfig)
+    memory_relation_llm_config: LLMConfig = field(default_factory=LLMConfig)
     code_context_query_llm_config: LLMConfig = field(default_factory=LLMConfig)
     code_context_rerank_llm_config: LLMConfig = field(default_factory=LLMConfig)
     skill_selector_llm_config: LLMConfig = field(default_factory=LLMConfig)
@@ -220,6 +238,7 @@ def default_config_payload() -> dict[str, Any]:
             "task_analysis": {},
             "observer": {},
             "memory_extractor": {},
+            "memory_relation": {},
             "code_context_query": {},
             "code_context_rerank": {},
             "skill_selector": {},
@@ -256,6 +275,7 @@ def default_config_payload() -> dict[str, Any]:
         "long_term_memory": {
             "document_path": config.long_term_memory_path,
             "catalog_path": config.memory_catalog_path,
+            "semantic_index_path": config.memory_semantic_index_path,
             "catalog_busy_timeout_ms": config.memory_catalog_busy_timeout_ms,
             "keyword_candidate_multiplier": config.memory_keyword_candidate_multiplier,
             "retrieval_enabled": config.long_term_memory_retrieval_enabled,
@@ -271,6 +291,14 @@ def default_config_payload() -> dict[str, Any]:
             "pipeline_version": config.consolidation_pipeline_version,
             "extractor_mode": config.memory_extractor_mode,
             "max_candidates": config.memory_consolidation_max_candidates,
+            "semantic_merge_mode": config.memory_semantic_merge_mode,
+            "semantic_top_k": config.memory_semantic_top_k,
+            "semantic_min_similarity": config.memory_semantic_min_similarity,
+            "semantic_relation_min_confidence": config.memory_semantic_relation_min_confidence,
+            "embedding": {
+                field.name: getattr(config.memory_embedding_config, field.name)
+                for field in fields(EmbeddingConfig)
+            },
         },
         "context": {
             "enabled": config.context_compression_enabled,
@@ -452,6 +480,7 @@ def apply_debug_agent_config(config: DebugAgentConfig, data: dict[str, Any]) -> 
         {
             "document_path": "long_term_memory_path",
             "catalog_path": "memory_catalog_path",
+            "semantic_index_path": "memory_semantic_index_path",
             "catalog_busy_timeout_ms": "memory_catalog_busy_timeout_ms",
             "keyword_candidate_multiplier": "memory_keyword_candidate_multiplier",
             "retrieval_enabled": "long_term_memory_retrieval_enabled",
@@ -467,6 +496,11 @@ def apply_debug_agent_config(config: DebugAgentConfig, data: dict[str, Any]) -> 
             "pipeline_version": "consolidation_pipeline_version",
             "extractor_mode": "memory_extractor_mode",
             "max_candidates": "memory_consolidation_max_candidates",
+            "semantic_merge_mode": "memory_semantic_merge_mode",
+            "semantic_top_k": "memory_semantic_top_k",
+            "semantic_min_similarity": "memory_semantic_min_similarity",
+            "semantic_relation_min_confidence": "memory_semantic_relation_min_confidence",
+            "embedding": "memory_embedding_config",
         },
     )
     _apply_section(
@@ -582,6 +616,9 @@ def _apply_section(
         if target.endswith("_llm_config") and isinstance(value, dict):
             setattr(config, target, _llm_config_from_dict(value, getattr(config, target)))
             continue
+        if target == "memory_embedding_config" and isinstance(value, dict):
+            setattr(config, target, _embedding_config_from_dict(value, getattr(config, target)))
+            continue
         if target == "llm_config" and isinstance(value, dict):
             setattr(config, target, _llm_config_from_dict(value, config.llm_config))
             continue
@@ -610,6 +647,7 @@ def _apply_llm_section(config: DebugAgentConfig, section: Any) -> None:
         "task_analysis": "task_analysis_llm_config",
         "observer": "observer_llm_config",
         "memory_extractor": "memory_extractor_llm_config",
+        "memory_relation": "memory_relation_llm_config",
         "code_context_query": "code_context_query_llm_config",
         "code_context_rerank": "code_context_rerank_llm_config",
         "skill_selector": "skill_selector_llm_config",
@@ -626,6 +664,11 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
     _validate_choice("planner_mode", config.planner_mode, {"heuristic", "llm"})
     _validate_choice(
         "memory_extractor_mode", config.memory_extractor_mode, {"rule_based", "llm"}
+    )
+    _validate_choice(
+        "memory_semantic_merge_mode",
+        config.memory_semantic_merge_mode,
+        {"disabled", "observe", "apply"},
     )
     _validate_choice(
         "long_term_memory_retrieval_mode",
@@ -657,6 +700,7 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         "task_analysis_llm_config",
         "observer_llm_config",
         "memory_extractor_llm_config",
+        "memory_relation_llm_config",
         "code_context_query_llm_config",
         "code_context_rerank_llm_config",
         "skill_selector_llm_config",
@@ -677,6 +721,7 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         "session_file_cache_max_spans",
         "session_file_cache_max_bytes",
         "memory_consolidation_max_candidates",
+        "memory_semantic_top_k",
         "memory_catalog_busy_timeout_ms",
         "memory_keyword_candidate_multiplier",
         "long_term_memory_retrieval_limit",
@@ -704,6 +749,15 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         raise ValueError("observer_write_threshold must be between 0 and 1")
     if int(config.memory_consolidation_max_candidates) > 100:
         raise ValueError("memory_consolidation_max_candidates must not exceed 100")
+    if int(config.memory_semantic_top_k) > 20:
+        raise ValueError("memory_semantic_top_k must not exceed 20")
+    for field_name in (
+        "memory_semantic_min_similarity",
+        "memory_semantic_relation_min_confidence",
+    ):
+        if not 0.0 <= float(getattr(config, field_name)) <= 1.0:
+            raise ValueError(f"{field_name} must be between 0 and 1")
+    _validate_embedding_config(config.memory_embedding_config)
     if int(config.memory_keyword_candidate_multiplier) > 100:
         raise ValueError("memory_keyword_candidate_multiplier must not exceed 100")
     if int(config.long_term_memory_retrieval_limit) > 100:
@@ -755,6 +809,16 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         config.memory_extractor_mode == "llm",
         resolve_llm_config(config.llm_config, config.memory_extractor_llm_config),
     )
+    semantic_enabled = config.memory_semantic_merge_mode in {"observe", "apply"}
+    if semantic_enabled and str(config.memory_embedding_config.provider).lower() in {
+        "", "disabled", "none"
+    }:
+        raise ValueError("semantic memory merge requires an enabled embedding provider")
+    _require_llm_config(
+        "long_term_memory.semantic_merge_mode",
+        semantic_enabled,
+        resolve_llm_config(config.llm_config, config.memory_relation_llm_config),
+    )
     _require_llm_config(
         "modes.code_context_query_planner",
         config.code_context_query_planner_mode == "llm",
@@ -796,6 +860,7 @@ def normalize_project_runtime_paths(config: DebugAgentConfig) -> DebugAgentConfi
         "task_archive_path",
         "long_term_memory_path",
         "memory_catalog_path",
+        "memory_semantic_index_path",
         "consolidation_run_path",
         "code_context_index_path",
         "rl_q_table_path",
@@ -836,6 +901,29 @@ def resolve_llm_config(base: LLMConfig, override: LLMConfig) -> LLMConfig:
             else base.max_output_chars
         ),
     )
+
+
+def _embedding_config_from_dict(
+    data: dict[str, Any], base: EmbeddingConfig | None = None
+) -> EmbeddingConfig:
+    current = base or EmbeddingConfig()
+    values = {
+        field.name: data.get(field.name, getattr(current, field.name))
+        for field in fields(EmbeddingConfig)
+    }
+    return EmbeddingConfig(**values)
+
+
+def _validate_embedding_config(config: EmbeddingConfig) -> None:
+    provider = str(config.provider or "").strip().lower()
+    if provider not in {"", "disabled", "none", "openai", "openai_compatible", "openai-compatible"}:
+        raise ValueError(f"unsupported embedding provider: {config.provider}")
+    if provider not in {"", "disabled", "none"} and not str(config.model or "").strip():
+        raise ValueError("embedding model is required when embedding is enabled")
+    if int(config.dimensions) < 0:
+        raise ValueError("embedding dimensions must not be negative")
+    if int(config.batch_size) <= 0:
+        raise ValueError("embedding batch_size must be greater than 0")
 
 
 def _llm_config_from_dict(data: dict[str, Any], base: LLMConfig | None = None) -> LLMConfig:

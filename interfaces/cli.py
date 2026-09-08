@@ -15,11 +15,13 @@ from agent_runtime.memory.archive.repository import repository_id
 from agent_runtime.memory.catalog import SQLiteMemoryCatalog
 from agent_runtime.memory.documents import MarkdownMemoryDocumentStore
 from agent_runtime.memory.consolidation.factory import build_consolidation_pipeline
+from agent_runtime.memory.consolidation.projection import MemoryProjectionCoordinator
 from agent_runtime.memory.domain.models import (
     MemoryQuery,
     MemoryStatus,
     MemoryType,
 )
+from agent_runtime.memory.semantic import SQLiteMemorySemanticIndex, build_embedding_client
 from agent_runtime.session import AgentSession
 from agent_runtime.user_updates import set_change_event_sink
 from config import (
@@ -50,8 +52,13 @@ catalog_app = typer.Typer(
     add_completion=False,
     help="Maintain the rebuildable SQLite memory catalog.",
 )
+semantic_app = typer.Typer(
+    add_completion=False,
+    help="Maintain the rebuildable SQLite knowledge embedding index.",
+)
 app.add_typer(memory_app, name="memory")
 memory_app.add_typer(catalog_app, name="catalog")
+memory_app.add_typer(semantic_app, name="semantic")
 
 
 @app.callback(invoke_without_command=True)
@@ -232,23 +239,38 @@ def memory_deprecate(
     no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
 ) -> None:
     """Mark one memory deprecated without moving or deleting its document."""
-    _, store, catalog = _memory_runtime(repo, config_path, no_config)
+    config, store, catalog = _memory_runtime(repo, config_path, no_config)
     try:
         store.deprecate(memory_id, reason)
     except KeyError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
-    console.print(f"[green]Deprecated memory:[/green] {memory_id}")
     document = store.get(memory_id)
+    warnings: list[str] = []
+    semantic_index = None
     try:
-        if document is not None:
-            catalog.synchronize(document, store.document_path(document))
+        env_file = _resolve_config_path(config_path, config.env_file)
+        load_env_file(env_file, override=config.env_override)
+        client = build_embedding_client(config.memory_embedding_config)
+        if client is not None:
+            semantic_index = SQLiteMemorySemanticIndex.from_config(
+                config,
+                embedding_client=client,
+            )
     except Exception as exc:
-        console.print(
-            "[yellow]Markdown was updated, but Catalog synchronization failed:[/yellow] "
-            f"{exc}"
-        )
-        raise typer.Exit(code=2) from exc
+        warnings.append(f"semantic index initialization failed: {exc}")
+    if document is not None:
+        MemoryProjectionCoordinator(
+            document_store=store,
+            catalog=catalog,
+            semantic_index=semantic_index,
+        ).synchronize(document, warnings)
+    console.print(f"[green]Deprecated memory:[/green] {memory_id}")
+    if warnings:
+        console.print("[yellow]Projection synchronization was partial:[/yellow]")
+        for warning in warnings:
+            console.print(f"[yellow]- {warning}[/yellow]")
+        raise typer.Exit(code=2)
 
 
 @memory_app.command("consolidate")
@@ -415,6 +437,41 @@ def memory_catalog_status(
         identity = f" [{issue.memory_id}]" if issue.memory_id else ""
         console.print(f"[red]{issue.code}{identity}[/red]: {issue.message}")
     raise typer.Exit(code=1)
+
+
+@semantic_app.command("rebuild")
+def memory_semantic_rebuild(
+    repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
+    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
+) -> None:
+    """Rebuild all knowledge embeddings from canonical Markdown memory."""
+    config = _load_base_config(repo, config_path, no_config)
+    env_file = _resolve_config_path(config_path, config.env_file)
+    load_env_file(env_file, override=config.env_override)
+    normalize_project_runtime_paths(config)
+    store = MarkdownMemoryDocumentStore.from_config(config)
+    issues = store.validate()
+    if issues:
+        for issue in issues:
+            console.print(f"[red]{issue.path}[/red]: {issue.message}")
+        raise typer.Exit(code=1)
+    try:
+        client = build_embedding_client(config.memory_embedding_config)
+        if client is None:
+            raise ValueError("configure long_term_memory.embedding before rebuilding")
+        index = SQLiteMemorySemanticIndex.from_config(
+            config,
+            embedding_client=client,
+        )
+        result = index.rebuild(store.list())
+    except Exception as exc:
+        console.print(f"[red]Semantic index rebuild failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(
+        "[green]Semantic index rebuilt.[/green] "
+        f"indexed={result.indexed} removed={result.removed}"
+    )
 
 
 def _build_config(

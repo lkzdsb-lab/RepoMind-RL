@@ -22,11 +22,11 @@ from agent_runtime.memory.domain.models import (
     MemoryQuery,
     MemoryStatus,
 )
-from agent_runtime.memory.io import sha256_file
+from agent_runtime.memory.io import sha256_file, compact_json
 from utils import utc_now
 
 
-CATALOG_SCHEMA_VERSION = 1
+CATALOG_SCHEMA_VERSION = 3
 RANKING_VERSION = "keyword-rank-v1"
 _ACTIVE_STATUSES = (
     MemoryStatus.DRAFT.value,
@@ -94,6 +94,24 @@ class SQLiteMemoryCatalog:
             except Exception:
                 connection.rollback()
                 raise
+
+    def find_exact(self, document: MemoryDocument) -> list[MemoryHit]:
+        if not self.path.is_file() and any(
+            (self.document_root / bucket).is_dir() for bucket in ('repo', 'user', 'global')
+        ):
+            raise RuntimeError('Catalog missing for existing Markdown; run memory catalog rebuild')
+        with self._connect() as connection:
+            self._assert_compatible(connection)
+            rows = connection.execute(
+                "SELECT memory_id, content_hash FROM memories "
+                "WHERE memory_type=? AND repo_id=? AND scope_key=? "
+                "AND knowledge_hash=? AND status IN ('draft','verified','needs_review') "
+                "ORDER BY memory_id LIMIT 20",
+                (document.memory_type.value, document.scope.repo_id,
+                 compact_json(document.scope.to_dict()), document.knowledge_hash),
+            ).fetchall()
+        return [MemoryHit(memory_id=row['memory_id'], score=1.0,
+                          source='exact', content_hash=row['content_hash']) for row in rows]
 
     def sync(
         self,
@@ -427,8 +445,8 @@ class SQLiteMemoryCatalog:
                 memory_id, document_path, content_hash, memory_type, status,
                 scope_level, repo_id, module, title, knowledge, applicability,
                 invalidation, confidence, evidence_strength, source_task_id,
-                created_at, updated_at, indexed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                revision, knowledge_hash, scope_key, created_at, updated_at, indexed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(memory_id) DO UPDATE SET
                 document_path=excluded.document_path,
                 content_hash=excluded.content_hash,
@@ -444,6 +462,9 @@ class SQLiteMemoryCatalog:
                 confidence=excluded.confidence,
                 evidence_strength=excluded.evidence_strength,
                 source_task_id=excluded.source_task_id,
+                revision=excluded.revision,
+                knowledge_hash=excluded.knowledge_hash,
+                scope_key=excluded.scope_key,
                 created_at=excluded.created_at,
                 updated_at=excluded.updated_at,
                 indexed_at=excluded.indexed_at
@@ -464,6 +485,9 @@ class SQLiteMemoryCatalog:
                 document.confidence,
                 document.evidence_strength,
                 document.source.task_id,
+                document.revision,
+                document.knowledge_hash,
+                compact_json(document.scope.to_dict()),
                 document.created_at,
                 document.updated_at,
                 utc_now(),
@@ -709,12 +733,17 @@ class SQLiteMemoryCatalog:
                     confidence REAL NOT NULL,
                     evidence_strength REAL NOT NULL,
                     source_task_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    knowledge_hash TEXT NOT NULL,
+                    scope_key TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     indexed_at TEXT NOT NULL
                 );
                 CREATE INDEX memories_filter_idx
                     ON memories(repo_id, status, memory_type, scope_level);
+                CREATE INDEX memories_exact_idx
+                    ON memories(memory_type, repo_id, scope_key, knowledge_hash, status, memory_id);
                 CREATE TABLE memory_facets(
                     memory_id TEXT NOT NULL REFERENCES memories(memory_id) ON DELETE CASCADE,
                     facet_type TEXT NOT NULL,

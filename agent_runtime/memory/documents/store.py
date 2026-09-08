@@ -10,6 +10,7 @@ from agent_runtime.memory.documents.codec import MarkdownMemoryCodec
 from agent_runtime.memory.domain.models import (
     MemoryDocument,
     MemoryStatus,
+    MemoryType,
     ScopeLevel,
 )
 from agent_runtime.memory.io import atomic_write_bytes, safe_identifier, sha256_file
@@ -100,6 +101,7 @@ class MarkdownMemoryDocumentStore:
         archived = replace(
             document,
             status=MemoryStatus.DEPRECATED,
+            revision=document.revision + 1,
             updated_at=utc_now(),
             extensions=extensions,
         )
@@ -147,7 +149,13 @@ class MarkdownMemoryDocumentStore:
 
     def _find(self, memory_id: str) -> Path | None:
         safe_id = safe_identifier(memory_id, field_name="memory_id")
-        matches = [path for path in self._document_paths() if path.stem == safe_id]
+        # The canonical layout has only three scope buckets and a fixed type set.
+        matches = [
+            path
+            for bucket in ("global", "user", "repo")
+            for kind in MemoryType
+            if (path := self.root / bucket / kind.value / f"{safe_id}.md").is_file()
+        ]
         if len(matches) > 1:
             raise MemoryDocumentConflictError(
                 f"duplicate memory_id {safe_id!r}: {', '.join(str(path) for path in matches)}"

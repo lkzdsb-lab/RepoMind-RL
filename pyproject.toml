@@ -32,6 +32,7 @@ packages = [
   "agent_runtime.memory.domain",
   "agent_runtime.memory.documents",
   "agent_runtime.memory.retrieval",
+  "agent_runtime.memory.semantic",
   "agent_runtime.memory.consolidation",
   "agent_runtime.rl",
   "ext",

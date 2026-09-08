@@ -150,6 +150,7 @@ memory and task archives:
   "long_term_memory": {
     "document_path": ".repomind/memory",
     "catalog_path": ".repomind/memory/catalog.sqlite3",
+    "semantic_index_path": ".repomind/memory/semantic.sqlite3",
     "catalog_busy_timeout_ms": 5000,
     "keyword_candidate_multiplier": 8,
     "retrieval_enabled": true,
@@ -168,9 +169,22 @@ memory and task archives:
       "episodic": 2
     },
     "consolidation_path": ".repomind/consolidation/runs",
-    "pipeline_version": "consolidation-v2",
+    "pipeline_version": "consolidation-v3",
     "extractor_mode": "rule_based",
-    "max_candidates": 24
+    "max_candidates": 24,
+    "semantic_merge_mode": "disabled",
+    "semantic_top_k": 5,
+    "semantic_min_similarity": 0.78,
+    "semantic_relation_min_confidence": 0.85,
+    "embedding": {
+      "provider": "disabled",
+      "model": "",
+      "api_base": "",
+      "api_key_env": "LLM_API_KEY",
+      "timeout": 60,
+      "dimensions": 0,
+      "batch_size": 32
+    }
   }
 }
 ```
@@ -194,6 +208,13 @@ and configure `llm.memory_extractor` (or the shared `llm` settings) to use seman
 extraction; deterministic evidence and promotion policy still owns the final
 status and confidence.
 
+Phase 6 can compare extracted `knowledge` with existing atomic memories during
+offline consolidation. Configure `llm.memory_relation`, an embedding provider,
+and set `semantic_merge_mode` to `observe` before enabling `apply`. Similarity
+only discovers candidates; the relation LLM proposes a relationship and the
+deterministic evolution policy owns every Markdown mutation. This does not
+change the online keyword retrieval mode or split Markdown into chunks.
+
 The Phase 2 format and storage guarantees are documented in
 [`long-term-memory-phase-2.md`](long-term-memory-phase-2.md). The offline archive
 to document pipeline is documented in
@@ -202,6 +223,9 @@ rebuild, and keyword retrieval are documented in
 [`long-term-memory-phase-4.md`](long-term-memory-phase-4.md). Agent integration,
 prompt audiences, refresh rules, and usage tracing are documented in
 [`long-term-memory-phase-5.md`](long-term-memory-phase-5.md).
+Semantic consolidation, stable memory IDs, revisions, and rebuildable knowledge
+embeddings are documented in
+[`long-term-memory-phase-6.md`](long-term-memory-phase-6.md).
 
 ## Example: Enable Only Code Context LLM
 

@@ -1,9 +1,8 @@
-"""Deterministic evidence binding, promotion, identity, and exact deduplication."""
+"""Deterministic evidence binding, promotion, and stable identity."""
 
 from __future__ import annotations
 
 import hashlib
-from dataclasses import replace
 from typing import Any
 
 from agent_runtime.memory.consolidation.models import (
@@ -16,7 +15,6 @@ from agent_runtime.memory.consolidation.constraints import (
     has_repository_marker,
     has_temporary_marker,
 )
-from agent_runtime.memory.documents import MarkdownMemoryDocumentStore
 from agent_runtime.memory.domain.models import (
     MemoryDocument,
     MemoryEvidence,
@@ -32,12 +30,6 @@ from utils import utc_now
 
 _MEMORY_TYPES = {item.value: item for item in MemoryType}
 _SCOPE_LEVELS = {item.value: item for item in ScopeLevel}
-_STATUS_RANK = {
-    MemoryStatus.DRAFT: 0,
-    MemoryStatus.NEEDS_REVIEW: 1,
-    MemoryStatus.VERIFIED: 2,
-}
-
 _ORIGIN_MEMORY_TYPES = {
     "task_outcome": {MemoryType.EPISODIC},
     "user_statement": {MemoryType.PREFERENCE},
@@ -139,7 +131,7 @@ class MemoryDocumentBuilder:
         evidence_strength = round(sum(value.strength for value in evidence) / len(evidence), 4)
         status = _promotion_status(bundle, candidate, memory_type, evidence)
         confidence = _confidence(status, evidence_strength, len(evidence))
-        memory_id = _memory_id(bundle.repo_id, memory_type, scope, knowledge)
+        memory_id = _memory_id(bundle, candidate, memory_type, scope)
         now = utc_now()
         return MemoryDocument(
             memory_id=memory_id,
@@ -178,54 +170,18 @@ class MemoryDocumentBuilder:
         )
 
 
-def save_with_exact_dedup(
-    store: MarkdownMemoryDocumentStore,
-    document: MemoryDocument,
-) -> MemoryDocument:
-    existing = store.get(document.memory_id)
-    if existing is None:
-        store.save(document)
-        return document
-    if (
-        existing.memory_type != document.memory_type
-        or existing.scope != document.scope
-        or existing.knowledge != document.knowledge
-    ):
-        raise ValueError(f"memory ID collision for {document.memory_id}")
-    evidence = {item.evidence_id: item for item in existing.evidence}
-    evidence.update({item.evidence_id: item for item in document.evidence})
-    source_tasks = list(existing.extensions.get("source_tasks") or [])
-    if document.source.task_id not in source_tasks:
-        source_tasks.append(document.source.task_id)
-    extensions = dict(existing.extensions)
-    extensions["source_tasks"] = source_tasks
-    status = existing.status if existing.status not in _STATUS_RANK else max(
-        (existing.status, document.status), key=lambda value: _STATUS_RANK.get(value, -1)
-    )
-    merged = replace(
-        existing,
-        status=status,
-        triggers=tuple(dict.fromkeys(existing.triggers + document.triggers)),
-        tags=tuple(sorted(set(existing.tags + document.tags))),
-        evidence=tuple(evidence.values()),
-        confidence=max(existing.confidence, document.confidence),
-        evidence_strength=max(existing.evidence_strength, document.evidence_strength),
-        updated_at=utc_now(),
-        extensions=extensions,
-    )
-    store.save(merged)
-    return merged
-
-
 def _validated_scope(
     bundle: TaskEvidenceBundle,
     candidate: MemoryCandidate,
     item: ExtractedMemory,
     memory_type: MemoryType,
 ) -> MemoryScope:
+    """ 校验记忆的 scope"""
     level = _SCOPE_LEVELS.get(item.scope_level)
     if level is None:
         raise ValueError(f"unsupported scope level {item.scope_level!r}")
+
+    # 非 preference 类型的记忆不能跨越 repo 的维度
     if memory_type == MemoryType.PREFERENCE:
         level = (
             ScopeLevel.USER
@@ -234,6 +190,8 @@ def _validated_scope(
         )
     elif level in {ScopeLevel.GLOBAL, ScopeLevel.USER}:
         raise ValueError("non-preference memories cannot escape repository scope")
+
+    # 校验文件及的 scope 所绑定的文件是否真实存在
     allowed_files = set(candidate.files)
     requested_files = tuple(path for path in item.files if path in allowed_files)
     if level == ScopeLevel.FILE and not requested_files:
@@ -332,17 +290,18 @@ def _evidence_relation(candidate: MemoryCandidate, evidence_id: str) -> str:
 
 
 def _memory_id(
-    repo_id: str,
+    bundle: TaskEvidenceBundle,
+    candidate: MemoryCandidate,
     memory_type: MemoryType,
     scope: MemoryScope,
-    knowledge: str,
 ) -> str:
     identity = compact_json(
         {
-            "repo_id": repo_id if scope.level != ScopeLevel.USER else "user",
+            "owner": bundle.repo_id if scope.level != ScopeLevel.USER else "user",
+            "archive_hash": bundle.archive_hash,
+            "candidate_id": candidate.candidate_id,
             "memory_type": memory_type.value,
             "scope": scope.to_dict(),
-            "knowledge": " ".join(knowledge.lower().split()),
         }
     )
     return f"mem_{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:24]}"

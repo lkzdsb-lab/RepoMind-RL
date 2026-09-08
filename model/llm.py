@@ -87,6 +87,30 @@ class MemoryExtractionResponse(BaseModel):
     rationale: str = ""
 
 
+class MemoryRelationAssessmentResponse(BaseModel):
+    target_memory_id: str
+    relation: Literal["duplicate", "refine", "conflict", "unrelated"]
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str
+    supporting_evidence_ids: list[str] = Field(default_factory=list, max_length=30)
+    merged_title: str = ""
+    merged_knowledge: str = ""
+    merged_applicability: str = ""
+    merged_invalidation: str = ""
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _normalize_confidence(cls, value: Any) -> Any:
+        return _coerce_score(value)
+
+
+class MemoryRelationResponse(BaseModel):
+    assessments: list[MemoryRelationAssessmentResponse] = Field(
+        default_factory=list, max_length=20
+    )
+    rationale: str = ""
+
+
 class FindingLocationResponse(BaseModel):
     file_path: str
     symbol: str = ""

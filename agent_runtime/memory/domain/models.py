@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Mapping
@@ -9,7 +11,7 @@ from typing import Any, Mapping
 from utils import utc_now
 
 
-MEMORY_SCHEMA_VERSION = 1
+MEMORY_SCHEMA_VERSION = 2
 ARCHIVE_SCHEMA_VERSION = 1
 
 
@@ -191,6 +193,8 @@ class MemoryDocument:
     invalidation: str = ""
     confidence: float = 0.5
     evidence_strength: float = 0.0
+    revision: int = 1
+    knowledge_hash: str = ""
     schema_version: int = MEMORY_SCHEMA_VERSION
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
@@ -208,6 +212,14 @@ class MemoryDocument:
             raise ValueError("source must be a MemorySource")
         object.__setattr__(self, "title", _required_text(self.title, "title", limit=300))
         object.__setattr__(self, "knowledge", _required_text(self.knowledge, "knowledge", limit=50000))
+        expected_knowledge_hash = memory_knowledge_hash(self.knowledge)
+        supplied_knowledge_hash = str(self.knowledge_hash or "").strip().lower()
+        if supplied_knowledge_hash and supplied_knowledge_hash != expected_knowledge_hash:
+            raise ValueError("knowledge_hash does not match normalized knowledge")
+        object.__setattr__(self, "knowledge_hash", expected_knowledge_hash)
+        if int(self.revision) < 1:
+            raise ValueError("revision must be greater than 0")
+        object.__setattr__(self, "revision", int(self.revision))
         object.__setattr__(self, "applicability", _required_text(self.applicability, "applicability", limit=10000))
         object.__setattr__(self, "triggers", tuple(_strings(self.triggers, limit=50, item_limit=300)))
         object.__setattr__(self, "tags", tuple(sorted(_strings(self.tags, limit=50, item_limit=100))))
@@ -233,6 +245,8 @@ class MemoryDocument:
             "tags": list(self.tags),
             "confidence": self.confidence,
             "evidence_strength": self.evidence_strength,
+            "revision": self.revision,
+            "knowledge_hash": self.knowledge_hash,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "knowledge": self.knowledge,
@@ -267,6 +281,8 @@ class MemoryDocument:
             invalidation=str(data.get("invalidation") or ""),
             confidence=data.get("confidence", 0.5),
             evidence_strength=data.get("evidence_strength", 0.0),
+            revision=int(data.get("revision", 1)),
+            knowledge_hash=str(data.get("knowledge_hash") or ""),
             created_at=str(data.get("created_at") or utc_now()),
             updated_at=str(data.get("updated_at") or utc_now()),
             extensions=extensions,
@@ -333,6 +349,16 @@ class MemoryRelation:
     relation_type: str
     score: float
     reason: str = ""
+
+
+def normalize_memory_knowledge(value: str) -> str:
+    """Canonical form used for exact identity checks and embedding input."""
+    return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+
+def memory_knowledge_hash(value: str) -> str:
+    normalized = normalize_memory_knowledge(value)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)

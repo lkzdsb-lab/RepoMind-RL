@@ -32,6 +32,7 @@
     "task_analysis": {},
     "observer": {},
     "memory_extractor": {},
+    "memory_relation": {},
     "code_context_query": {},
     "code_context_rerank": {},
     "skill_selector": {},
@@ -68,6 +69,7 @@
   "long_term_memory": {
     "document_path": ".repomind/memory",
     "catalog_path": ".repomind/memory/catalog.sqlite3",
+    "semantic_index_path": ".repomind/memory/semantic.sqlite3",
     "catalog_busy_timeout_ms": 5000,
     "keyword_candidate_multiplier": 8,
     "retrieval_enabled": true,
@@ -86,9 +88,22 @@
       "episodic": 2
     },
     "consolidation_path": ".repomind/consolidation/runs",
-    "pipeline_version": "consolidation-v2",
+    "pipeline_version": "consolidation-v3",
     "extractor_mode": "rule_based",
-    "max_candidates": 24
+    "max_candidates": 24,
+    "semantic_merge_mode": "disabled",
+    "semantic_top_k": 5,
+    "semantic_min_similarity": 0.78,
+    "semantic_relation_min_confidence": 0.85,
+    "embedding": {
+      "provider": "disabled",
+      "model": "",
+      "api_base": "",
+      "api_key_env": "LLM_API_KEY",
+      "timeout": 60,
+      "dimensions": 0,
+      "batch_size": 32
+    }
   },
   "context": {
     "enabled": true,
