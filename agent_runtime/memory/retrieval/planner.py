@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from agent_runtime.memory.retrieval.models import PlannedMemoryQuery
+from agent_runtime.memory.retrieval.scope import ScopeContext
 from model.agent.graph import AgentState
 
 
@@ -14,7 +15,7 @@ class RuleBasedMemoryQueryPlanner:
         self.max_queries = max(1, min(8, int(max_queries)))
         self.max_query_chars = max(200, int(max_query_chars))
 
-    def plan(self, state: AgentState) -> list[PlannedMemoryQuery]:
+    def plan(self, state: AgentState, scope_context: ScopeContext | None = None) -> list[PlannedMemoryQuery]:
         """ 查询规划器"""
         analysis = state.get("task_analysis")
         if not isinstance(analysis, dict):
@@ -47,14 +48,13 @@ class RuleBasedMemoryQueryPlanner:
                     memory_types=("anti_pattern", "semantic", "episodic"),
                 )
             )
-        scope_hints = tuple(dict.fromkeys(candidate_files + entities))
-        if scope_hints or search_hints:
+        scope_terms = scope_context.query_terms() if scope_context else ()
+        if scope_terms or candidate_files or entities or search_hints:
             queries.append(
                 PlannedMemoryQuery(
                     "scope",
-                    self._bounded(_join(entities, search_hints, candidate_files, main_text)),
+                    self._bounded(_join(scope_terms, entities, search_hints, candidate_files, main_text)),
                     memory_types=("semantic", "procedural", "anti_pattern"),
-                    scope_hints=scope_hints[:30],
                 )
             )
         return _dedupe(queries)[: self.max_queries]
@@ -139,4 +139,3 @@ def _dedupe(values: list[PlannedMemoryQuery]) -> list[PlannedMemoryQuery]:
             result.append(item)
             seen.add(identity)
     return result
-

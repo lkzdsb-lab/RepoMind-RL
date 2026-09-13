@@ -18,6 +18,11 @@ def main() -> None:
         keep_workspace=args.keep_workspace,
         timeout_override=args.timeout,
     )
+    if isinstance(result, dict):
+        print(f"{result['metric']}: {result['recall']}")
+        print(f"passed: {result['passed']}")
+        print(f"report: {result['artifacts']['report']}")
+        raise SystemExit(0 if result["passed"] else 1)
     print(f"case_id: {result.case_id}")
     print(f"passed: {result.passed}")
     print(f"score: {result.score}/100")

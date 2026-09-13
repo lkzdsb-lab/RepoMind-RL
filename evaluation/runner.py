@@ -29,10 +29,16 @@ def run_evaluation(
     config_path: str | Path = "config.json",
     keep_workspace: bool = False,
     timeout_override: int | None = None,
-) -> EvaluationResult:
+) -> EvaluationResult | dict[str, Any]:
     project_root = Path(__file__).resolve().parent.parent
     case_file = Path(case_path).resolve()
     config_file = Path(config_path).resolve()
+    if json.loads(case_file.read_text(encoding="utf-8")).get("kind") == "memory_retrieval":
+        from evaluation.memory_retrieval import run_memory_evaluation
+        return run_memory_evaluation(
+            case_file, config_path=config_file, keep_workspace=keep_workspace,
+            timeout_override=timeout_override,
+        )
     case = EvaluationCase.model_validate_json(case_file.read_text(encoding="utf-8"))
     fixture = Path(case.fixture)
     if not fixture.is_absolute():

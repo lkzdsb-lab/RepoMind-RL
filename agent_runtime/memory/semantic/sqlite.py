@@ -6,6 +6,8 @@ import math
 import os
 import sqlite3
 import struct
+import time
+from contextlib import closing
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -13,6 +15,8 @@ from uuid import uuid4
 
 from agent_runtime.memory.domain.models import (
     MemoryDocument,
+    MemoryQuery,
+    MemoryHit,
     MemoryStatus,
     normalize_memory_knowledge,
 )
@@ -65,6 +69,56 @@ class SQLiteMemorySemanticIndex:
 
     def synchronize(self, document: MemoryDocument) -> None:
         self.synchronize_many([document])
+
+    def retrieve_vector(
+        self, query: MemoryQuery, vector: tuple[float, ...], *,
+        min_score: float, deadline: float,
+    ) -> tuple[list[MemoryHit], int]:
+        """Online read-only search. Never migrate or create an index on this path."""
+        if not self.path.is_file():
+            raise SemanticIndexCompatibilityError("semantic index missing; run memory semantic rebuild")
+        fingerprint = self.embedding_client.model_fingerprint
+        statuses = query.statuses or (
+            MemoryStatus.DRAFT, MemoryStatus.VERIFIED, MemoryStatus.NEEDS_REVIEW,
+        )
+        clauses = ["model_fingerprint = ?", "status IN (" + ",".join("?" for _ in statuses) + ")"]
+        params: list[Any] = [fingerprint, *(status.value for status in statuses)]
+        if query.repo_id:
+            clauses.append("(repo_id = ? OR json_extract(scope_key, '$.level') IN ('user','global'))")
+            params.append(query.repo_id)
+        if query.memory_types:
+            clauses.append("memory_type IN (" + ",".join("?" for _ in query.memory_types) + ")")
+            params.extend(item.value for item in query.memory_types)
+        hits: list[MemoryHit] = []
+        scanned = 0
+        with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=0.2)) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            if connection.execute("PRAGMA user_version").fetchone()[0] != SEMANTIC_SCHEMA_VERSION:
+                raise SemanticIndexCompatibilityError("semantic schema incompatible; rebuild index")
+            if not connection.execute(
+                "SELECT 1 FROM memory_embeddings WHERE model_fingerprint=? LIMIT 1", (fingerprint,)
+            ).fetchone():
+                if connection.execute("SELECT 1 FROM memory_embeddings LIMIT 1").fetchone():
+                    raise SemanticIndexCompatibilityError("embedding model incompatible; rebuild index")
+            for row in connection.execute("SELECT * FROM memory_embeddings WHERE " + " AND ".join(clauses), params):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("semantic scan deadline exceeded")
+                scanned += 1
+                stored = _decode_vector(bytes(row["vector"]), int(row["dimensions"]))
+                if len(stored) != len(vector):
+                    raise SemanticIndexCompatibilityError("embedding dimensions differ; rebuild index")
+                score = _cosine(vector, stored)
+                if score >= min_score:
+                    hits.append(MemoryHit(
+                        memory_id=row["memory_id"], score=score, source="semantic",
+                        knowledge_hash=row["knowledge_hash"], revision=row["revision"],
+                        model_fingerprint=fingerprint,
+                    ))
+                    # Bound retained vectors' metadata while scanning the eligible corpus.
+                    if len(hits) > query.limit * 2:
+                        hits = sorted(hits, key=lambda hit: (-hit.score, hit.memory_id))[:query.limit]
+        return sorted(hits, key=lambda hit: (-hit.score, hit.memory_id))[:query.limit], scanned
 
     def readiness_issue(self) -> str:
         """Bounded diagnostic; full coverage checks belong to offline maintenance."""

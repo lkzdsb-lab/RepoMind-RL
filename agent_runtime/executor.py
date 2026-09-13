@@ -619,6 +619,7 @@ class DebugAgent:
         selected_ids = [item.memory_id for item in batch.memories]
         event = {
             "type": "long_term_memory_retrieval",
+            "diagnostics": payload.get("diagnostics", {}),
             "phase": batch.phase,
             "revision": batch.revision,
             "queries": [item.to_dict() for item in batch.queries],
@@ -629,6 +630,13 @@ class DebugAgent:
                     "score": item.get("score"),
                     "selected": item.get("selected"),
                     "skip_reason": item.get("skip_reason"),
+                    "channels": item.get("channels", {}),
+                    "scope_status": item.get("scope_status"),
+                    "scope_reason": item.get("scope_reason"),
+                    "matched_by": item.get("matched_by", []),
+                    "base_score": item.get("base_score"),
+                    "base_rank": item.get("base_rank"),
+                    "adjusted_rank": item.get("adjusted_rank"),
                 }
                 for item in batch.hits
             ],

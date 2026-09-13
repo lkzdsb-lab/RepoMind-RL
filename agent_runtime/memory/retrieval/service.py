@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from collections.abc import Mapping
 from typing import Any
 
@@ -12,19 +13,24 @@ from agent_runtime.memory.catalog import SQLiteMemoryCatalog
 from agent_runtime.memory.documents import MarkdownMemoryDocumentStore
 from agent_runtime.memory.domain.interfaces import MemoryCatalog, MemoryDocumentStore
 from agent_runtime.memory.domain.models import (
-    MemoryHit,
     MemoryQuery,
     MemoryStatus,
     MemoryType,
-    ScopeLevel,
 )
 from agent_runtime.memory.retrieval.models import (
     MemoryRetrievalBatch,
-    PlannedMemoryQuery,
     RetrievedMemory,
 )
 from agent_runtime.memory.retrieval.planner import RuleBasedMemoryQueryPlanner
 from agent_runtime.memory.retrieval.renderer import MemoryContextRenderer
+from agent_runtime.memory.retrieval.scope import (
+    ScopeContext, ScopeContextBuilder, ScopeMatcher, SCOPE_POLICY_VERSION,
+)
+from agent_runtime.memory.retrieval.channels import (
+    ChannelResult, KeywordRetriever, SemanticRetriever, validated_candidates,
+)
+from agent_runtime.memory.semantic.embeddings import OpenAICompatibleEmbeddingClient
+from agent_runtime.memory.semantic.sqlite import SQLiteMemorySemanticIndex
 from model.agent.graph import AgentState
 
 
@@ -55,11 +61,34 @@ class LongTermMemoryService:
         include_draft: bool = True,
         max_refreshes: int = 3,
         type_limits: Mapping[str, Any] | None = None,
+        mode: str = "keyword",
+        semantic_retriever: SemanticRetriever | None = None,
+        semantic_error: str = "",
+        rrf_k: int = 60,
+        keyword_weight: float = 1.0,
+        semantic_weight: float = 1.0,
+        scope_matched_weight: float = 1.1,
+        scope_unknown_weight: float = 0.5,
+        scope_unknown_limit: int = 2,
     ) -> None:
         self._catalog = catalog
         self._document_store = document_store
+        if mode not in {"keyword", "semantic", "hybrid"}:
+            raise ValueError("unsupported memory retrieval mode")
+        self.mode = mode
+        self.keyword_retriever = KeywordRetriever(catalog)
+        self.semantic_retriever = semantic_retriever
+        self.semantic_error = semantic_error
+        self.rrf_k = max(1, int(rrf_k))
+        self.keyword_weight = keyword_weight
+        self.semantic_weight = semantic_weight
         self.repo_path = str(repo_path or ".")
         self.repo_id = repository_id(self.repo_path)
+        self.scope_builder = ScopeContextBuilder(self.repo_path, self.repo_id)
+        self.scope_matcher = ScopeMatcher()
+        self.scope_matched_weight = scope_matched_weight
+        self.scope_unknown_weight = scope_unknown_weight
+        self.scope_unknown_limit = max(0, int(scope_unknown_limit))
         self.planner = planner or RuleBasedMemoryQueryPlanner()
         self.renderer = renderer or MemoryContextRenderer()
         self.enabled = bool(enabled)
@@ -83,11 +112,35 @@ class LongTermMemoryService:
             getattr(config, "long_term_memory_retrieval_mode", "keyword")
             or "keyword"
         ).strip().lower()
-        if mode != "keyword":
-            raise ValueError(
-                "long_term_memory_retrieval_mode must be 'keyword' for Phase 5"
-            )
+        semantic_retriever = None
+        semantic_error = ""
+        if mode != "keyword" and getattr(config, "long_term_memory_retrieval_enabled", True):
+            try:
+                embedding = config.memory_embedding_config
+                if embedding.provider in {"", "disabled", "none"}:
+                    raise ValueError("embedding provider disabled")
+                timeout = getattr(config, "long_term_memory_semantic_timeout", 5.0)
+                client = OpenAICompatibleEmbeddingClient(
+                    replace(embedding, timeout=timeout, batch_size=max(8, embedding.batch_size)),
+                    max_retries=0,
+                )
+                semantic_retriever = SemanticRetriever(
+                    SQLiteMemorySemanticIndex.from_config(config, embedding_client=client),
+                    timeout=timeout,
+                    min_score=getattr(config, "long_term_memory_semantic_min_score", 0.5),
+                    candidate_limit=getattr(config, "long_term_memory_semantic_candidates", 24),
+                    cache_size=getattr(config, "long_term_memory_query_cache_size", 256),
+                )
+            except Exception as exc:
+                semantic_error = str(exc)
         return cls(
+            mode=mode, semantic_retriever=semantic_retriever, semantic_error=semantic_error,
+            rrf_k=getattr(config, "long_term_memory_rrf_k", 60),
+            keyword_weight=getattr(config, "long_term_memory_keyword_weight", 1.0),
+            semantic_weight=getattr(config, "long_term_memory_semantic_weight", 1.0),
+            scope_matched_weight=getattr(config, "long_term_memory_scope_matched_weight", 1.1),
+            scope_unknown_weight=getattr(config, "long_term_memory_scope_unknown_weight", 0.5),
+            scope_unknown_limit=getattr(config, "long_term_memory_scope_unknown_limit", 2),
             catalog=SQLiteMemoryCatalog.from_config(config),
             document_store=MarkdownMemoryDocumentStore.from_config(config),
             repo_path=getattr(config, "repo_path", "."),
@@ -120,17 +173,30 @@ class LongTermMemoryService:
     ) -> MemoryRetrievalBatch | None:
         if not self.enabled:
             return None
-        revision = self.revision(state)
+        scope_context = self.scope_builder.build(state)
+        revision = self.revision(state, scope_context)
         if not force and revision == str(state.get("long_term_memory_revision") or ""):
             return None
         refresh_count = int(state.get("long_term_memory_refresh_count", 0))
         if not force and refresh_count >= self.max_refreshes:
             return None
-        return self.retrieve(state, phase=phase, revision=revision)
+        return self.retrieve(state, phase=phase, revision=revision, scope_context=scope_context)
 
-    def revision(self, state: AgentState) -> str:
-        """ 根据当前 state 计算指纹来判断是否需要更新长期记忆"""
+    def revision(self, state: AgentState, scope_context: ScopeContext | None = None) -> str:
+        """ 根据当前 state 计算指纹来"""
         payload = {
+            "scope_context": (scope_context or self.scope_builder.build(state)).to_dict(),
+            "scope_policy": [SCOPE_POLICY_VERSION, self.scope_matched_weight,
+                             self.scope_unknown_weight, self.scope_unknown_limit],
+            "mode": self.mode,
+            "max_context_chars": self.max_context_chars,
+            "fusion": [self.rrf_k, self.keyword_weight, self.semantic_weight],
+            "semantic": (
+                [self.semantic_retriever.index.embedding_client.model_fingerprint,
+                 self.semantic_retriever.min_score, self.semantic_retriever.candidate_limit,
+                 self.semantic_retriever.timeout]
+                if self.semantic_retriever else None
+            ),
             "repo_id": self.repo_id,
             "planner": self.planner.fingerprint_payload(state),
             "include_draft": self.include_draft,
@@ -153,75 +219,71 @@ class LongTermMemoryService:
         *,
         phase: str,
         revision: str | None = None,
+        scope_context: ScopeContext | None = None,
     ) -> MemoryRetrievalBatch:
-        revision = revision or self.revision(state)
-        queries = tuple(self.planner.plan(state))
+        scope_context = scope_context or self.scope_builder.build(state)
+        revision = revision or self.revision(state, scope_context)
+        # 从 analyze task 后的 state 中生成 queries
+        queries = tuple(self.planner.plan(state, scope_context))
         warnings: list[str] = []
-        merged: dict[str, dict[str, Any]] = {}
         statuses = () if self.include_draft else (MemoryStatus.VERIFIED,)
-        for planned in queries:
-            try:
-                hits = self._catalog.keyword_search(
-                    MemoryQuery(
-                        text=planned.text,
-                        repo_id=self.repo_id,
-                        memory_types=tuple(
-                            MemoryType(value) for value in planned.memory_types
-                        ),
-                        statuses=statuses,
-                        scope_hints=planned.scope_hints,
-                        tags=planned.tags,
-                        limit=min(100, max(self.retrieval_limit * 3, self.retrieval_limit)),
-                    )
-                )
-            except Exception as exc:
-                warnings.append(f"query {planned.label!r} failed: {exc}")
-                continue
-            for rank, hit in enumerate(hits, start=1):
-                current = merged.get(hit.memory_id)
-                reasons = tuple(
-                    dict.fromkeys(
-                        (f"query={planned.label}", f"query_rank={rank}") + hit.reasons
-                    )
-                )
-                if current is None:
-                    merged[hit.memory_id] = {
-                        "hit": hit,
-                        "score": hit.score,
-                        "reasons": reasons,
-                        "queries": [planned.label],
-                    }
-                    continue
-                current["score"] = max(float(current["score"]), hit.score)
-                current["reasons"] = tuple(
-                    dict.fromkeys(tuple(current["reasons"]) + reasons)
-                )
-                if planned.label not in current["queries"]:
-                    current["queries"].append(planned.label)
-
-        ordered = sorted(
-            merged.items(),
-            key=lambda item: (-float(item[1]["score"]), item[0]),
+        requests = [(planned.label, MemoryQuery(
+            text=planned.text, repo_id=self.repo_id,
+            memory_types=tuple(MemoryType(value) for value in planned.memory_types),
+            statuses=statuses, tags=planned.tags,
+            limit=min(100, self.retrieval_limit * 3),
+        )) for planned in queries]
+        channels: dict[str, ChannelResult] = {}
+        if self.mode != "semantic":
+            channels["keyword"] = self.keyword_retriever.retrieve(requests)
+        if self.mode != "keyword":
+            channels["semantic"] = (
+                self.semantic_retriever.retrieve(requests) if self.semantic_retriever else
+                ChannelResult(warnings=["semantic unavailable: " + self.semantic_error],
+                              diagnostics={"status": "unavailable"})
+            )
+        for result in channels.values():
+            warnings.extend(result.warnings)
+        ordered, documents, rejected = validated_candidates(
+            channels, self._document_store, mode=self.mode, min_keyword_score=self.min_score,
+            rrf_k=self.rrf_k, semantic_weight=self.semantic_weight,
+            keyword_weight=self.keyword_weight, warnings=warnings,
         )
         selected: list[RetrievedMemory] = []
         hit_records: list[dict[str, Any]] = []
+        # 判断 scope，调整选择顺序
+        for rank, (memory_id, record) in enumerate(ordered, 1):
+            match = self.scope_matcher.match(documents[memory_id].scope, scope_context)
+            record["scope_match"] = match
+            record["base_score"] = record["score"]
+            record["base_rank"] = rank
+            record["score"] *= (self.scope_matched_weight if match.status == "matched"
+                                else self.scope_unknown_weight)
+        # Confirmed memories get first access to global/type/context budgets.
+        ordered.sort(key=lambda pair: (pair[1]["scope_match"].status != "matched",
+                                      -pair[1]["score"], pair[0]))
+        unknown_count = 0
         type_counts = {key: 0 for key in self.type_limits}
-        for memory_id, record in ordered:
+        # 检查状态、配额和文件一致性
+        for rank, (memory_id, record) in enumerate(ordered, 1):
             score = float(record["score"])
             diagnostic = {
                 "memory_id": memory_id,
                 "score": score,
                 "reasons": list(record["reasons"]),
                 "queries": list(record["queries"]),
+                "channels": record["channels"],
+                "scope_status": record["scope_match"].status,
+                "scope_reason": record["scope_match"].reason,
+                "matched_by": list(record["scope_match"].matched_by),
+                "base_score": record["base_score"],
+                "base_rank": record["base_rank"],
+                "adjusted_rank": rank,
                 "selected": False,
                 "skip_reason": "",
             }
-            if score < self.min_score:
-                diagnostic["skip_reason"] = "below_min_score"
-                hit_records.append(diagnostic)
-                continue
             try:
-                document = self._document_store.get(memory_id)
+                document = documents[memory_id]
             except Exception as exc:
                 diagnostic["skip_reason"] = "invalid_markdown"
                 warnings.append(f"memory {memory_id} could not be loaded: {exc}")
@@ -236,10 +298,20 @@ class LongTermMemoryService:
                 diagnostic["skip_reason"] = f"status_{document.status.value}"
                 hit_records.append(diagnostic)
                 continue
-            if not _scope_applies(document.scope, state, self.repo_id):
+            match = record["scope_match"]
+            if match.status == "mismatched":
                 diagnostic["skip_reason"] = "scope_mismatch"
                 hit_records.append(diagnostic)
                 continue
+            if match.status == "unknown":
+                if document.memory_type == MemoryType.PREFERENCE:
+                    diagnostic["skip_reason"] = "preference_scope_unconfirmed"
+                    hit_records.append(diagnostic)
+                    continue
+                if unknown_count >= self.scope_unknown_limit:
+                    diagnostic["skip_reason"] = "unknown_scope_quota"
+                    hit_records.append(diagnostic)
+                    continue
             try:
                 current_hash = self._document_store.content_hash(document.memory_id)
             except (OSError, KeyError, ValueError) as exc:
@@ -281,17 +353,22 @@ class LongTermMemoryService:
                 reasons=tuple(record["reasons"]),
                 content_hash=current_hash,
                 source_task_id=document.source.task_id,
+                scope_status=match.status,
+                scope_reason=match.reason,
+                scope_matched_by=match.matched_by,
             )
             selected.append(retrieved)
             type_counts[memory_type] = type_counts.get(memory_type, 0) + 1
+            unknown_count += int(match.status == "unknown")
             diagnostic["selected"] = True
             hit_records.append(diagnostic)
-
+        # 生成有长度限制的上下文
         context, context_ids = self.renderer.render_with_ids(
             selected,
             audience="all",
             max_chars=self.max_context_chars,
         )
+        # 按节点分发，并记录使用情况，为 analyzer、skill、code_search、planner、action 等节点生成各自允许使用的记忆上下文
         context_id_set = set(context_ids)
         selected = [item for item in selected if item.memory_id in context_id_set]
         for diagnostic in hit_records:
@@ -314,12 +391,16 @@ class LongTermMemoryService:
             phase=str(phase or "retrieve")[:80],
             revision=revision,
             queries=queries,
-            hits=tuple(hit_records[:100]),
+            hits=tuple((hit_records + rejected)[:100]),
             memories=tuple(selected),
             context=context,
             sections=sections,
             section_memory_ids=section_memory_ids,
             warnings=tuple(dict.fromkeys(warnings)),
+            diagnostics={"mode": self.mode, "scope_context": scope_context.to_dict(),
+                         "scope_policy": SCOPE_POLICY_VERSION, "channels": {
+                name: result.diagnostics for name, result in channels.items()
+            }},
         )
 
 
@@ -328,52 +409,4 @@ def _status_allowed(status: MemoryStatus, *, include_draft: bool) -> bool:
         return True
     if include_draft and status in {MemoryStatus.DRAFT, MemoryStatus.NEEDS_REVIEW}:
         return True
-    return False
-
-
-def _scope_applies(scope: Any, state: AgentState, repo_id: str) -> bool:
-    if scope.level in {ScopeLevel.GLOBAL, ScopeLevel.USER}:
-        return True
-    if scope.repo_id != repo_id:
-        return False
-    if scope.level == ScopeLevel.REPO:
-        return True
-    analysis = state.get("task_analysis")
-    if not isinstance(analysis, dict):
-        analysis = {}
-    values = [
-        str(state.get("title") or ""),
-        str(state.get("description") or ""),
-        *[str(item) for item in analysis.get("entities", []) or []],
-        *[str(item) for item in analysis.get("search_hints", []) or []],
-        *[str(item) for item in state.get("candidate_files", []) or []],
-    ]
-    haystack = " ".join(values).replace("\\", "/").casefold()
-    candidate_files = {
-        str(item).replace("\\", "/").casefold()
-        for item in state.get("candidate_files", []) or []
-        if str(item).strip()
-    }
-    if scope.level == ScopeLevel.MODULE:
-        module = scope.module.replace("\\", "/").casefold()
-        module_path = module.replace(".", "/")
-        return bool(
-            module
-            and (
-                module in haystack
-                or module_path in haystack
-                or any(path.startswith(module_path + "/") for path in candidate_files)
-            )
-        )
-    if scope.level == ScopeLevel.FILE:
-        return any(
-            normalized in candidate_files
-            or normalized in haystack
-            or normalized.rsplit("/", 1)[-1] in haystack
-            for normalized in (
-                str(path).replace("\\", "/").casefold() for path in scope.files
-            )
-        )
-    if scope.level == ScopeLevel.SYMBOL:
-        return any(str(symbol).casefold() in haystack for symbol in scope.symbols)
     return False

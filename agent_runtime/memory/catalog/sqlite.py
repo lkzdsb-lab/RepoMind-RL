@@ -319,7 +319,9 @@ class SQLiteMemoryCatalog:
         return CatalogStatus(len(records), len(rows), tuple(issues))
 
     def keyword_search(self, query: MemoryQuery) -> list[MemoryHit]:
-        """ 通过关键词使用 FTS 搜索"""
+        """
+            通过关键词使用 FTS 搜索
+        """
         if not self.path.is_file():
             raise CatalogCompatibilityError(
                 "memory catalog is missing; rebuild the catalog before searching"
@@ -529,11 +531,19 @@ class SQLiteMemoryCatalog:
         query: MemoryQuery,
         match_expression: str,
     ) -> tuple[str, list[Any]]:
+        """ 多表联合过滤
+            memory_fts：按查询词找候选、计算 BM25
+                 ↓ JOIN memory_id
+            memories：按仓库、状态、类型过滤，提供评分和一致性检查字段
+                 ↓ 可选 EXISTS
+            memory_facets：按标签或 scope_hints 进一步过滤
+        """
         clauses = ["memory_fts MATCH ?"]
         parameters: list[Any] = [match_expression]
         statuses = tuple(item.value for item in query.statuses) or _ACTIVE_STATUSES
         clauses.append(f"m.status IN ({_placeholders(statuses)})")
         parameters.extend(statuses)
+        # 仓库级过滤
         if query.repo_id:
             clauses.append("(m.scope_level IN ('global', 'user') OR m.repo_id = ?)")
             parameters.append(query.repo_id)
@@ -548,6 +558,7 @@ class SQLiteMemoryCatalog:
                 "AND mf.facet_value = ?)"
             )
             parameters.append(tag)
+        # 已移除这个字段
         if query.scope_hints:
             clauses.append(
                 "(m.module IN ("

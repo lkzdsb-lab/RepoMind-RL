@@ -25,7 +25,7 @@ class EmbeddingClient(Protocol):
 
 
 class OpenAICompatibleEmbeddingClient:
-    def __init__(self, config: EmbeddingConfig) -> None:
+    def __init__(self, config: EmbeddingConfig, *, max_retries: int = 2) -> None:
         self.config = config
         api_key = os.getenv(config.api_key_env) if config.api_key_env else ""
         if not api_key:
@@ -38,6 +38,7 @@ class OpenAICompatibleEmbeddingClient:
             api_key=api_key,
             base_url=config.api_base or None,
             timeout=config.timeout,
+            max_retries=max_retries,
         )
 
     @property

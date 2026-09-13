@@ -109,6 +109,16 @@ class DebugAgentConfig:
     memory_keyword_candidate_multiplier: int = 8
     long_term_memory_retrieval_enabled: bool = True
     long_term_memory_retrieval_mode: str = "keyword"
+    long_term_memory_semantic_candidates: int = 24
+    long_term_memory_semantic_min_score: float = 0.5
+    long_term_memory_semantic_timeout: float = 5.0
+    long_term_memory_query_cache_size: int = 256
+    long_term_memory_rrf_k: int = 60
+    long_term_memory_keyword_weight: float = 1.0
+    long_term_memory_semantic_weight: float = 1.0
+    long_term_memory_scope_matched_weight: float = 1.1
+    long_term_memory_scope_unknown_weight: float = 0.5
+    long_term_memory_scope_unknown_limit: int = 2
     long_term_memory_retrieval_limit: int = 8
     long_term_memory_retrieval_max_chars: int = 12000
     long_term_memory_retrieval_min_score: float = 0.1
@@ -280,6 +290,16 @@ def default_config_payload() -> dict[str, Any]:
             "keyword_candidate_multiplier": config.memory_keyword_candidate_multiplier,
             "retrieval_enabled": config.long_term_memory_retrieval_enabled,
             "retrieval_mode": config.long_term_memory_retrieval_mode,
+            "semantic_candidates": config.long_term_memory_semantic_candidates,
+            "semantic_min_score": config.long_term_memory_semantic_min_score,
+            "semantic_timeout": config.long_term_memory_semantic_timeout,
+            "query_cache_size": config.long_term_memory_query_cache_size,
+            "rrf_k": config.long_term_memory_rrf_k,
+            "keyword_weight": config.long_term_memory_keyword_weight,
+            "semantic_weight": config.long_term_memory_semantic_weight,
+            "scope_matched_weight": config.long_term_memory_scope_matched_weight,
+            "scope_unknown_weight": config.long_term_memory_scope_unknown_weight,
+            "scope_unknown_limit": config.long_term_memory_scope_unknown_limit,
             "retrieval_limit": config.long_term_memory_retrieval_limit,
             "retrieval_max_chars": config.long_term_memory_retrieval_max_chars,
             "retrieval_min_score": config.long_term_memory_retrieval_min_score,
@@ -485,6 +505,16 @@ def apply_debug_agent_config(config: DebugAgentConfig, data: dict[str, Any]) -> 
             "keyword_candidate_multiplier": "memory_keyword_candidate_multiplier",
             "retrieval_enabled": "long_term_memory_retrieval_enabled",
             "retrieval_mode": "long_term_memory_retrieval_mode",
+            "semantic_candidates": "long_term_memory_semantic_candidates",
+            "semantic_min_score": "long_term_memory_semantic_min_score",
+            "semantic_timeout": "long_term_memory_semantic_timeout",
+            "query_cache_size": "long_term_memory_query_cache_size",
+            "rrf_k": "long_term_memory_rrf_k",
+            "keyword_weight": "long_term_memory_keyword_weight",
+            "semantic_weight": "long_term_memory_semantic_weight",
+            "scope_matched_weight": "long_term_memory_scope_matched_weight",
+            "scope_unknown_weight": "long_term_memory_scope_unknown_weight",
+            "scope_unknown_limit": "long_term_memory_scope_unknown_limit",
             "retrieval_limit": "long_term_memory_retrieval_limit",
             "retrieval_max_chars": "long_term_memory_retrieval_max_chars",
             "retrieval_min_score": "long_term_memory_retrieval_min_score",
@@ -673,7 +703,7 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
     _validate_choice(
         "long_term_memory_retrieval_mode",
         config.long_term_memory_retrieval_mode,
-        {"keyword"},
+        {"keyword", "semantic", "hybrid"},
     )
     _validate_choice(
         "context_compressor_mode",
@@ -760,24 +790,7 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
     _validate_embedding_config(config.memory_embedding_config)
     if int(config.memory_keyword_candidate_multiplier) > 100:
         raise ValueError("memory_keyword_candidate_multiplier must not exceed 100")
-    if int(config.long_term_memory_retrieval_limit) > 100:
-        raise ValueError("long_term_memory_retrieval_limit must not exceed 100")
-    if int(config.long_term_memory_retrieval_max_refreshes) > 10:
-        raise ValueError("long_term_memory_retrieval_max_refreshes must not exceed 10")
-    if int(config.long_term_memory_retrieval_max_queries) > 8:
-        raise ValueError("long_term_memory_retrieval_max_queries must not exceed 8")
-    if not 0.0 <= float(config.long_term_memory_retrieval_min_score) <= 1.0:
-        raise ValueError("long_term_memory_retrieval_min_score must be between 0 and 1")
-    allowed_memory_types = {
-        "preference", "semantic", "procedural", "anti_pattern", "episodic"
-    }
-    if not isinstance(config.long_term_memory_retrieval_type_limits, dict):
-        raise ValueError("long_term_memory_retrieval_type_limits must be an object")
-    for memory_type, limit in config.long_term_memory_retrieval_type_limits.items():
-        if memory_type not in allowed_memory_types:
-            raise ValueError(f"unsupported retrieval memory type limit: {memory_type}")
-        if int(limit) < 0:
-            raise ValueError(f"retrieval type limit for {memory_type} must not be negative")
+    validate_memory_retrieval_config(config)
 
     _require_llm_config(
         "modes.planner",
@@ -844,6 +857,37 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         config.completion_judge_mode == "llm",
         resolve_llm_config(config.llm_config, config.completion_judge_llm_config),
     )
+
+
+def validate_memory_retrieval_config(config: DebugAgentConfig) -> None:
+    """Validate retrieval without requiring unrelated agent LLM capabilities."""
+    _validate_choice("long_term_memory_retrieval_mode", config.long_term_memory_retrieval_mode,
+                     {"keyword", "semantic", "hybrid"})
+    _validate_embedding_config(config.memory_embedding_config)
+    for name, low, high in (
+        ("semantic_candidates", 1, 100), ("semantic_min_score", 0, 1),
+        ("semantic_timeout", 0.01, 60), ("query_cache_size", 1, 10000),
+        ("rrf_k", 1, 1000), ("keyword_weight", 0.001, 100), ("semantic_weight", 0.001, 100),
+        ("scope_matched_weight", 1, 2), ("scope_unknown_weight", 0.01, 1),
+        ("scope_unknown_limit", 0, 100),
+        ("retrieval_limit", 1, 100), ("retrieval_max_queries", 1, 8),
+        ("retrieval_max_refreshes", 1, 10), ("retrieval_min_score", 0, 1),
+        ("retrieval_max_chars", 1000, 10000000),
+    ):
+        value = float(getattr(config, "long_term_memory_" + name))
+        if not low <= value <= high:
+            raise ValueError(f"long_term_memory_{name} must be between {low} and {high}")
+        if name in {"semantic_candidates", "query_cache_size", "rrf_k", "scope_unknown_limit", "retrieval_limit",
+                    "retrieval_max_queries", "retrieval_max_refreshes", "retrieval_max_chars"} and not value.is_integer():
+            raise ValueError(f"long_term_memory_{name} must be an integer")
+    limits = config.long_term_memory_retrieval_type_limits
+    if not isinstance(limits, dict):
+        raise ValueError("long_term_memory_retrieval_type_limits must be an object")
+    for memory_type, limit in limits.items():
+        if memory_type not in {"preference", "semantic", "procedural", "anti_pattern", "episodic"}:
+            raise ValueError(f"unsupported retrieval memory type limit: {memory_type}")
+        if int(limit) < 0:
+            raise ValueError(f"retrieval type limit for {memory_type} must not be negative")
 
 
 def normalize_project_runtime_paths(config: DebugAgentConfig) -> DebugAgentConfig:

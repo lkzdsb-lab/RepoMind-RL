@@ -36,6 +36,9 @@ class RetrievedMemory:
     reasons: tuple[str, ...]
     content_hash: str
     source_task_id: str
+    scope_status: str = "matched"
+    scope_reason: str = ""
+    scope_matched_by: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -52,6 +55,7 @@ class MemoryRetrievalBatch:
     sections: dict[str, str] = field(default_factory=dict)
     section_memory_ids: dict[str, tuple[str, ...]] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -66,4 +70,5 @@ class MemoryRetrievalBatch:
                 key: list(values) for key, values in self.section_memory_ids.items()
             },
             "warnings": list(self.warnings),
+            "diagnostics": dict(self.diagnostics),
         }

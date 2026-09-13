@@ -340,6 +340,9 @@ class MemoryHit:
     reasons: tuple[str, ...] = ()
     content_hash: str = ""
     document_path: str = ""
+    knowledge_hash: str = ""
+    revision: int = 0
+    model_fingerprint: str = ""
 
 
 @dataclass(frozen=True)
