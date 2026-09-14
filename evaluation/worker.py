@@ -24,7 +24,10 @@ def run_worker(request_path: Path) -> int:
     workspace = Path(request["workspace"]).resolve()
     output_path = Path(request["raw_result_path"]).resolve()
     traces_dir = Path(request["traces_dir"]).resolve()
-    config_path = Path(request["config_path"]).resolve()
+    config_path = Path(request["config_path"])
+    if not config_path.is_absolute():
+        raise ValueError("Evaluation worker requires an absolute config_path")
+    config_path = config_path.resolve()
 
     turns: list[dict[str, Any]] = []
     traces_dir.mkdir(parents=True, exist_ok=True)

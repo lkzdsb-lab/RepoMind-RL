@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from config import load_config_payload, locate_config_file
 from evaluation.models import EvaluationCase, EvaluationResult, VerificationResult
 from evaluation.reporting import markdown_report
 from evaluation.scoring import score_evaluation
@@ -26,13 +27,14 @@ from evaluation.workspace import (
 def run_evaluation(
     case_path: str | Path,
     *,
-    config_path: str | Path = "config.json",
+    config_path: str | Path | None = None,
     keep_workspace: bool = False,
     timeout_override: int | None = None,
 ) -> EvaluationResult | dict[str, Any]:
     project_root = Path(__file__).resolve().parent.parent
     case_file = Path(case_path).resolve()
-    config_file = Path(config_path).resolve()
+    config_file = locate_config_file(config_path)
+    load_config_payload(config_file, require_exists=True)
     if json.loads(case_file.read_text(encoding="utf-8")).get("kind") == "memory_retrieval":
         from evaluation.memory_retrieval import run_memory_evaluation
         return run_memory_evaluation(
@@ -40,6 +42,8 @@ def run_evaluation(
             timeout_override=timeout_override,
         )
     case = EvaluationCase.model_validate_json(case_file.read_text(encoding="utf-8"))
+    from evaluation.bug_baseline import resolve_case_baseline
+    case = resolve_case_baseline(case, project_root)
     fixture = Path(case.fixture)
     if not fixture.is_absolute():
         fixture = project_root / fixture
@@ -130,11 +134,24 @@ def run_evaluation(
 
 
 def _run_verification(case: EvaluationCase, workspace: Path) -> VerificationResult:
+    if case.verification.http_baseline:
+        baseline = Path(__file__).resolve().parent.parent / case.verification.http_baseline
+        argv = [sys.executable, "-m", "evaluation.debug_http", "--workspace", str(workspace),
+                "--baseline", str(baseline.resolve()), "--report", str(workspace.parent / "http_verification.json"),
+                "--timeout", str(max(10, case.verification.timeout - 5))]
+        for difficulty in case.bug_difficulties:
+            argv.extend(["--difficulty", difficulty])
+        if case.verification.skip_race:
+            argv.append("--skip-race")
+        case = case.model_copy(update={"verification": case.verification.model_copy(update={"argv": argv})})
+        verification_cwd = Path(__file__).resolve().parent.parent
+    else:
+        verification_cwd = workspace
     started = time.perf_counter()
     try:
         completed = subprocess.run(
             case.verification.argv,
-            cwd=workspace,
+            cwd=verification_cwd,
             capture_output=True,
             text=True,
             encoding="utf-8",

@@ -212,6 +212,88 @@ class DebugAgentConfig:
 
 
 DEFAULT_CONFIG_PATH = "config.json"
+CONFIG_ENV_VAR = "REPOMIND_CONFIG"
+
+
+@dataclass(frozen=True)
+class ResolvedConfigPath:
+    """An absolute configuration path and the source that selected it."""
+
+    path: Path
+    source: str
+
+
+class ConfigLocator:
+    """Locate Agent configuration without depending on the target repo cwd."""
+
+    def __init__(
+        self,
+        *,
+        runtime_root: str | Path | None = None,
+        invocation_dir: str | Path | None = None,
+        environ: dict[str, str] | None = None,
+    ) -> None:
+        self.runtime_root = Path(runtime_root or Path(__file__).resolve().parent).resolve()
+        self.invocation_dir = Path(invocation_dir or Path.cwd()).resolve()
+        self.environ = os.environ if environ is None else environ
+
+    def resolve(self, explicit_path: str | Path | None = None) -> ResolvedConfigPath:
+        """Resolve an existing config; explicit relative paths belong to the caller cwd."""
+        if explicit_path is not None:
+            return self._require_file(
+                self._absolute(explicit_path, self.invocation_dir),
+                source="explicit",
+            )
+
+        configured = str(self.environ.get(CONFIG_ENV_VAR, "")).strip()
+        if configured:
+            return self._require_file(
+                self._absolute(configured, self.invocation_dir),
+                source="environment",
+            )
+
+        candidates = [
+            (self.runtime_root / DEFAULT_CONFIG_PATH, "runtime"),
+            (self._user_config_dir() / DEFAULT_CONFIG_PATH, "user"),
+        ]
+        for candidate, source in candidates:
+            if candidate.is_file():
+                return ResolvedConfigPath(candidate.resolve(), source)
+
+        searched = ", ".join(str(path.resolve()) for path, _ in candidates)
+        raise FileNotFoundError(
+            "No RepoMind config file was found. "
+            f"Set {CONFIG_ENV_VAR}, pass --config, or create one at: {searched}"
+        )
+
+    def _absolute(self, value: str | Path, base: Path) -> Path:
+        path = Path(value).expanduser()
+        return path.resolve() if path.is_absolute() else (base / path).resolve()
+
+    def _require_file(self, path: Path, *, source: str) -> ResolvedConfigPath:
+        if not path.exists():
+            raise FileNotFoundError(f"Config file does not exist: {path}")
+        if not path.is_file():
+            raise IsADirectoryError(f"Config path is not a file: {path}")
+        return ResolvedConfigPath(path, source)
+
+    def _user_config_dir(self) -> Path:
+        local_app_data = str(self.environ.get("LOCALAPPDATA", "")).strip()
+        if local_app_data:
+            return Path(local_app_data).expanduser() / "RepoMind"
+        xdg_config_home = str(self.environ.get("XDG_CONFIG_HOME", "")).strip()
+        if xdg_config_home:
+            return Path(xdg_config_home).expanduser() / "repomind"
+        return Path.home() / ".config" / "repomind"
+
+
+def locate_config_file(
+    path: str | Path | None = None,
+    *,
+    invocation_dir: str | Path | None = None,
+) -> Path:
+    """Public shared resolver used by the CLI and isolated evaluation processes."""
+    return ConfigLocator(invocation_dir=invocation_dir).resolve(path).path
 
 
 def default_config_payload() -> dict[str, Any]:

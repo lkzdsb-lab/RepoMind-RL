@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 
 from evaluation.runner import run_evaluation
 
@@ -8,16 +9,23 @@ from evaluation.runner import run_evaluation
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run one Lee-Agent conversation evaluation.")
     parser.add_argument("--case", required=True, help="Path to an evaluation case JSON file.")
-    parser.add_argument("--config", default="config.json", help="Agent config JSON file.")
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Agent config JSON file. Relative paths are resolved from the invocation directory.",
+    )
     parser.add_argument("--keep-workspace", action="store_true", help="Keep a successful workspace.")
     parser.add_argument("--timeout", type=int, default=None, help="Override the case timeout in seconds.")
     args = parser.parse_args()
-    result = run_evaluation(
-        args.case,
-        config_path=args.config,
-        keep_workspace=args.keep_workspace,
-        timeout_override=args.timeout,
-    )
+    try:
+        result = run_evaluation(
+            args.case,
+            config_path=args.config,
+            keep_workspace=args.keep_workspace,
+            timeout_override=args.timeout,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        parser.error(str(exc))
     if isinstance(result, dict):
         print(f"{result['metric']}: {result['recall']}")
         print(f"passed: {result['passed']}")

@@ -9,6 +9,18 @@ Run the fixed Go debugging conversation against an isolated workspace:
 The evaluator records every conversation turn, computes repository changes
 without relying on Git, and runs the configured verification command itself.
 Artifacts are written under `.repomind/evaluation/<case_id>/<run_id>/`.
+An explicit relative `--config` path is resolved from the invocation directory.
+When `--config` is omitted, both the CLI and evaluator use the same stable lookup:
+`REPOMIND_CONFIG`, then the RepoMind runtime root, then the user config directory.
+The resolved absolute path is validated before a run directory is created and is
+passed unchanged to the isolated worker, so the target workspace never controls
+which Agent configuration is loaded.
+
+The Go case now uses the parent `../agent test` fixture and the centralized Bug
+baseline at `evaluation/baselines/go_web_debug.json`. The easy/medium/hard cases
+select subsets. Local HTTP fixture acceptance (without an Agent/LLM), explicit
+race exclusion and D-drive cache locations are documented in
+`docs/debug-benchmark-v2.md`.
 
 ## Long-term memory Recall@K
 

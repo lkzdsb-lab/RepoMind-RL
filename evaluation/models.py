@@ -20,6 +20,8 @@ class ExpectedFinding(BaseModel):
 class VerificationSpec(BaseModel):
     argv: list[str] = Field(min_length=1)
     timeout: int = Field(default=120, ge=1, le=1800)
+    http_baseline: str = ""
+    skip_race: bool = False
 
 
 class EvaluationLimits(BaseModel):
@@ -36,6 +38,8 @@ class EvaluationCase(BaseModel):
     intent: Literal["diagnose", "implement", "review"]
     turns: list[EvaluationTurn] = Field(min_length=1)
     expected_findings: list[ExpectedFinding] = Field(default_factory=list)
+    bug_baseline: str = ""
+    bug_difficulties: list[Literal["easy", "medium", "hard"]] = Field(default_factory=list)
     allowed_changed_files: list[str] = Field(default_factory=list)
     forbidden_changed_files: list[str] = Field(default_factory=list)
     verification: VerificationSpec

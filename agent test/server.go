@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -9,53 +10,26 @@ import (
 	"strings"
 )
 
-type Todo struct {
-	ID     int    `json:"id"`
-	Title  string `json:"title"`
-	Done   bool   `json:"done"`
-	UserID int    `json:"user_id"`
-}
-
-type User struct {
-	ID   int    `json:"id"`
-	Name string `json:"name"`
-}
-
-type Store struct {
-	todos []Todo
-	users map[int]*User
-}
-
 type Server struct {
 	store  *Store
 	static string
+	stats  map[string]ProjectStats
 }
 
 func NewServer() *Server {
-	return &Server{
-		store: &Store{
-			todos: []Todo{
-				{ID: 1, Title: "write failing test", Done: true, UserID: 1},
-				{ID: 2, Title: "fix handler bug", Done: false, UserID: 1},
-				{ID: 3, Title: "verify web endpoint", Done: false, UserID: 2},
-				{ID: 4, Title: "write final report", Done: false, UserID: 2},
-			},
-			users: map[int]*User{
-				1: &User{ID: 1, Name: "Ada"},
-				2: &User{ID: 2, Name: "Linus"},
-			},
-		},
-		static: "static",
-	}
+	return &Server{store: newStore(), static: "static", stats: make(map[string]ProjectStats)}
 }
 
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/todos", s.handleTodos)
+	mux.HandleFunc("/todos/batch", s.handleBatch)
 	mux.HandleFunc("/todos/", s.handleTodoByID)
 	mux.HandleFunc("/users/", s.handleUserByID)
 	mux.HandleFunc("/files", s.handleFile)
+	mux.HandleFunc("/projects", s.handleProjects)
+	mux.HandleFunc("/projects/", s.handleProjectStats)
 	return mux
 }
 
@@ -64,66 +38,78 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTodos(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		s.handleCreate(w, r)
+		return
+	}
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
 	page := parsePositiveInt(r.URL.Query().Get("page"), 1)
 	limit := parsePositiveInt(r.URL.Query().Get("limit"), 20)
-
-	start := page * limit
-	if start > len(s.store.todos) {
-		writeJSON(w, http.StatusOK, []Todo{})
-		return
+	if limit > 100 {
+		limit = 100
 	}
-
-	end := start + limit
-	if end > len(s.store.todos) {
-		end = len(s.store.todos)
-	}
-	writeJSON(w, http.StatusOK, s.store.todos[start:end])
-}
-
-func (s *Server) handleTodoByID(w http.ResponseWriter, r *http.Request) {
-	idText := strings.TrimPrefix(r.URL.Path, "/todos/")
-	id, err := strconv.Atoi(idText)
-	if err != nil {
-		http.Error(w, "invalid todo id", http.StatusBadRequest)
-		return
-	}
-
-	for i, todo := range s.store.todos {
-		if todo.ID == id {
-			s.store.todos = append(s.store.todos[:i], s.store.todos[i+1:]...)
-			w.WriteHeader(http.StatusNoContent)
+	project := r.URL.Query().Get("project_id")
+	done := r.URL.Query().Get("done")
+	if project != "" {
+		id, err := strconv.Atoi(project)
+		if err != nil || !s.store.hasProject(id) {
+			http.Error(w, "invalid project", 400)
 			return
 		}
 	}
-	http.Error(w, "todo not found", http.StatusNotFound)
+	if done != "" && done != "true" && done != "false" {
+		http.Error(w, "invalid done", 400)
+		return
+	}
+	writeJSON(w, 200, s.store.list(page, limit, project, done))
+}
+
+func (s *Server) handleTodoByID(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/todos/"))
+	if err != nil {
+		http.Error(w, "invalid todo id", 400)
+		return
+	}
+	if r.Method == http.MethodPatch {
+		s.handleUpdate(w, r, id)
+		return
+	}
+	if s.store.remove(id) {
+		s.invalidateStats()
+		w.WriteHeader(204)
+		return
+	}
+	http.Error(w, "todo not found", 404)
 }
 
 func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
-	idText := strings.TrimPrefix(r.URL.Path, "/users/")
-	id, err := strconv.Atoi(idText)
-	if err != nil {
-		http.Error(w, "invalid user id", http.StatusBadRequest)
+	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
-
+	id, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/users/"))
+	if err != nil {
+		http.Error(w, "invalid user id", 400)
+		return
+	}
 	user := s.store.users[id]
-	writeJSON(w, http.StatusOK, map[string]any{
-		"id":   user.ID,
-		"name": user.Name,
-	})
+	writeJSON(w, 200, map[string]any{"id": user.ID, "name": user.Name})
 }
 
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("name")
-	if name == "" {
-		http.Error(w, "missing file name", http.StatusBadRequest)
+	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
-
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		http.Error(w, "missing file name", 400)
+		return
+	}
 	path := filepath.Join(s.static, name)
 	content, err := os.ReadFile(path)
 	if err != nil {
-		http.Error(w, "file not found", http.StatusNotFound)
+		http.Error(w, "file not found", 404)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -136,6 +122,31 @@ func parsePositiveInt(value string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
+	if r.Method == method {
+		return true
+	}
+	w.Header().Set("Allow", method)
+	http.Error(w, "method not allowed", 405)
+	return false
+}
+
+func decodeBody(w http.ResponseWriter, r *http.Request, target any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		http.Error(w, "invalid JSON", 400)
+		return false
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		http.Error(w, "expected one JSON value", 400)
+		return false
+	}
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

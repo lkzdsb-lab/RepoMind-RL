@@ -25,10 +25,9 @@ from agent_runtime.memory.semantic import SQLiteMemorySemanticIndex, build_embed
 from agent_runtime.session import AgentSession
 from agent_runtime.user_updates import set_change_event_sink
 from config import (
-    DEFAULT_CONFIG_PATH,
     DebugAgentConfig,
     debug_agent_config_from_dict,
-    ensure_default_config_file,
+    locate_config_file,
     load_config_payload,
     load_env_file,
     normalize_project_runtime_paths,
@@ -65,7 +64,7 @@ memory_app.add_typer(semantic_app, name="semantic")
 def default(
     ctx: typer.Context,
     repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
-    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    config_path: Optional[str] = typer.Option(None, "--config", help="Runtime config file."),
     no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
     max_loops: Optional[int] = typer.Option(None, "--max-loops", help="Maximum agent loops."),
     manifest_dir: Optional[str] = typer.Option(None, "--manifest-dir", help="Runtime registry manifest directory."),
@@ -115,7 +114,7 @@ def default(
 @app.command()
 def chat(
     repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
-    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    config_path: Optional[str] = typer.Option(None, "--config", help="Runtime config file."),
     no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
     max_loops: Optional[int] = typer.Option(None, "--max-loops", help="Maximum agent loops."),
     manifest_dir: Optional[str] = typer.Option(None, "--manifest-dir", help="Runtime registry manifest directory."),
@@ -181,7 +180,7 @@ def main() -> None:
 @memory_app.command("list")
 def memory_list(
     repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
-    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    config_path: Optional[str] = typer.Option(None, "--config", help="Runtime config file."),
     no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
 ) -> None:
     """List canonical Markdown memory documents."""
@@ -202,7 +201,7 @@ def memory_list(
 def memory_show(
     memory_id: str = typer.Argument(..., help="Memory document ID."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
-    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    config_path: Optional[str] = typer.Option(None, "--config", help="Runtime config file."),
     no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
 ) -> None:
     """Print one canonical Markdown memory document."""
@@ -217,7 +216,7 @@ def memory_show(
 @memory_app.command("validate")
 def memory_validate(
     repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
-    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    config_path: Optional[str] = typer.Option(None, "--config", help="Runtime config file."),
     no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
 ) -> None:
     """Validate layout, schema, IDs, and canonical formatting."""
@@ -235,7 +234,7 @@ def memory_deprecate(
     memory_id: str = typer.Argument(..., help="Memory document ID."),
     reason: str = typer.Option(..., "--reason", help="Why this memory is deprecated."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
-    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    config_path: Optional[str] = typer.Option(None, "--config", help="Runtime config file."),
     no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
 ) -> None:
     """Mark one memory deprecated without moving or deleting its document."""
@@ -249,7 +248,11 @@ def memory_deprecate(
     warnings: list[str] = []
     semantic_index = None
     try:
-        env_file = _resolve_config_path(config_path, config.env_file)
+        env_file = _resolve_config_path(
+            config_path,
+            config.env_file,
+            no_config=no_config,
+        )
         load_env_file(env_file, override=config.env_override)
         client = build_embedding_client(config.memory_embedding_config)
         if client is not None:
@@ -283,7 +286,7 @@ def memory_consolidate(
         None, "--pipeline-version", help="Immutable consolidation pipeline version."
     ),
     repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
-    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    config_path: Optional[str] = typer.Option(None, "--config", help="Runtime config file."),
     no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
 ) -> None:
     """Consolidate one verified Task Archive into Markdown memory documents."""
@@ -292,7 +295,11 @@ def memory_consolidate(
         config.memory_extractor_mode = extractor_mode
     if pipeline_version is not None:
         config.consolidation_pipeline_version = pipeline_version
-    env_file = _resolve_config_path(config_path, config.env_file)
+    env_file = _resolve_config_path(
+        config_path,
+        config.env_file,
+        no_config=no_config,
+    )
     load_env_file(env_file, override=config.env_override)
     normalize_project_runtime_paths(config)
     try:
@@ -331,7 +338,7 @@ def memory_search(
         False, "--all-repos", help="Do not apply current repository scope filtering."
     ),
     repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
-    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    config_path: Optional[str] = typer.Option(None, "--config", help="Runtime config file."),
     no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
 ) -> None:
     """Search the SQLite keyword projection and explain each result."""
@@ -369,7 +376,7 @@ def memory_search(
 @catalog_app.command("rebuild")
 def memory_catalog_rebuild(
     repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
-    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    config_path: Optional[str] = typer.Option(None, "--config", help="Runtime config file."),
     no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
 ) -> None:
     """Build a temporary catalog and atomically replace the current projection."""
@@ -393,7 +400,7 @@ def memory_catalog_rebuild(
 @catalog_app.command("sync")
 def memory_catalog_sync(
     repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
-    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    config_path: Optional[str] = typer.Option(None, "--config", help="Runtime config file."),
     no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
 ) -> None:
     """Incrementally synchronize Markdown and remove orphaned projections."""
@@ -417,7 +424,7 @@ def memory_catalog_sync(
 @catalog_app.command("status")
 def memory_catalog_status(
     repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
-    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    config_path: Optional[str] = typer.Option(None, "--config", help="Runtime config file."),
     no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
 ) -> None:
     """Check schema, hashes, paths, FTS rows, and orphan projections."""
@@ -442,12 +449,16 @@ def memory_catalog_status(
 @semantic_app.command("rebuild")
 def memory_semantic_rebuild(
     repo: Optional[str] = typer.Option(None, "--repo", help="Target repository path."),
-    config_path: str = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Runtime config file."),
+    config_path: Optional[str] = typer.Option(None, "--config", help="Runtime config file."),
     no_config: bool = typer.Option(False, "--no-config", help="Do not load config.json."),
 ) -> None:
     """Rebuild all knowledge embeddings from canonical Markdown memory."""
     config = _load_base_config(repo, config_path, no_config)
-    env_file = _resolve_config_path(config_path, config.env_file)
+    env_file = _resolve_config_path(
+        config_path,
+        config.env_file,
+        no_config=no_config,
+    )
     load_env_file(env_file, override=config.env_override)
     normalize_project_runtime_paths(config)
     store = MarkdownMemoryDocumentStore.from_config(config)
@@ -477,7 +488,7 @@ def memory_semantic_rebuild(
 def _build_config(
     *,
     repo: str | None,
-    config_path: str,
+    config_path: str | None,
     no_config: bool,
     max_loops: int | None,
     manifest_dir: str | None,
@@ -511,7 +522,11 @@ def _build_config(
         config.log_level = log_level
     if not console_log:
         config.log_to_console = False
-    env_file = _resolve_config_path(config_path, config.env_file)
+    env_file = _resolve_config_path(
+        config_path,
+        config.env_file,
+        no_config=no_config,
+    )
     load_env_file(env_file, override=config.env_override)
     normalize_project_runtime_paths(config)
     validate_debug_agent_config(config)
@@ -520,12 +535,15 @@ def _build_config(
 
 def _load_base_config(
     repo: str | None,
-    config_path: str,
+    config_path: str | Path | None,
     no_config: bool,
 ) -> DebugAgentConfig:
-    if not no_config:
-        ensure_default_config_file(config_path)
-    payload = {} if no_config else load_config_payload(config_path)
+    resolved_config = None if no_config else locate_config_file(config_path)
+    payload = (
+        {}
+        if resolved_config is None
+        else load_config_payload(resolved_config, require_exists=True)
+    )
     config = debug_agent_config_from_dict(payload)
     if repo:
         config.repo_path = repo
@@ -536,7 +554,7 @@ def _load_base_config(
 
 def _memory_store(
     repo: str | None,
-    config_path: str,
+    config_path: str | None,
     no_config: bool,
 ) -> MarkdownMemoryDocumentStore:
     _, store, _ = _memory_runtime(repo, config_path, no_config)
@@ -545,7 +563,7 @@ def _memory_store(
 
 def _memory_runtime(
     repo: str | None,
-    config_path: str,
+    config_path: str | None,
     no_config: bool,
 ) -> tuple[DebugAgentConfig, MarkdownMemoryDocumentStore, SQLiteMemoryCatalog]:
     config = _load_base_config(repo, config_path, no_config)
@@ -592,15 +610,18 @@ def _load_trace_state(path_value: str) -> dict:
     return data
 
 
-def _resolve_config_path(config_path: str | None, value: str | None) -> Path | None:
+def _resolve_config_path(
+    config_path: str | Path | None,
+    value: str | None,
+    *,
+    no_config: bool = False,
+) -> Path | None:
     if not value:
         return None
     path = Path(value)
     if path.is_absolute():
         return path
-    base = Path(config_path or DEFAULT_CONFIG_PATH)
-    if not base.is_absolute():
-        base = Path.cwd() / base
+    base = Path.cwd() / "config.json" if no_config else locate_config_file(config_path)
     return base.parent / path
 
 
