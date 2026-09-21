@@ -719,6 +719,8 @@ def _compact_schema_type(field_schema: dict[str, Any]) -> str:
 
 
 def _legal_action_note(action_name: str, state: AgentState, phase: str, focus_files: list[str]) -> str:
+    if action_name == "execution_task":
+        return 'Provide objective, context and acceptance_criteria=[{"criterion_id":"stable_id","description":"expected behavior"}]. No host paths or permissions. Do not resubmit an unchanged blocked/failed task.'
     if action_name == "read_file":
         if focus_files:
             return f"Prefer focus files first: {', '.join(focus_files[:3])}."

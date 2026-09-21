@@ -261,6 +261,7 @@ class DebugAgent:
             "llm_token_usage": state.get("llm_token_usage", _empty_llm_token_usage()),
             "llm_errors": state.get("llm_errors", []),
             "editing_enabled": self.config.editing_enabled,
+            "execution_enabled": self.config.execution_enabled,
             "editing_config": _editing_config_dict(self.config),
             "edit_results": state.get("edit_results", []),
             "edited_files": state.get("edited_files", []),
@@ -579,6 +580,8 @@ class DebugAgent:
             plan_mode_evaluation="",
             plan_mode_events=[],
             editing_enabled=self.config.editing_enabled,
+            execution_enabled=self.config.execution_enabled,
+            execution_results=[],
             editing_config=_editing_config_dict(self.config),
             edit_results=[],
             edited_files=[],
@@ -1056,6 +1059,8 @@ class DebugAgent:
             else:
                 action_args = dict(action.args)
                 runtime_context: dict[str, Any] | None = None
+                if action.name == "execution_task":
+                    runtime_context = {"config": self.config, "task_id": state.get("task_id", "")}
                 if action.name == "build_codebase_context":
                     action_args.setdefault("index_path", self.config.code_context_index_path)
                 if action.name == "apply_code_patch":
@@ -1317,6 +1322,8 @@ class DebugAgent:
             限制 llm action
         """
         permissions = {"repo:read", "repo:command", "agent:plan"}
+        if self.config.execution_enabled:
+            permissions.add("agent:execution")
         if self.config.editing_enabled:
             permissions.add("repo:write")
         return sorted(permissions)

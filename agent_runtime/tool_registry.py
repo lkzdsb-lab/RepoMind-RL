@@ -7,12 +7,14 @@ RL policies can share the same sandbox interface.
 
 from __future__ import annotations
 
-from types import MappingProxyType
-from typing import Any, Dict, Literal, Mapping
+from typing import Any, Dict, Literal
 
 from config import FileConfig
+from agent_runtime.execution.contracts import ExecutionTaskInput
+from agent_runtime.execution.runner import run_execution_task
 from agent_runtime.memory.file_cache import cache_after_patch, cache_read_result
-from model.agent.tools import ToolSpec, normalize_tool_result, run_tool_spec
+from model.agent.tool_registry import ToolRegistryBase
+from model.agent.tools import ToolSpec
 from tools.code_tools.code import search_code
 from tools.code_tools.context import build_codebase_context, search_code_context
 from tools.code_tools.edit import apply_code_patch
@@ -21,7 +23,6 @@ from tools.code_tools.search_text import search_text
 from tools.git_tools.diff import git_diff
 from tools.plan_tools.mode import enter_plan_mode, exit_plan_mode
 from tools.shell_tools.command import run_shell_command
-from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -426,6 +427,12 @@ def _candidate_file_priority(path: str, preferred_paths: set[str]) -> tuple[int,
     return (is_preferred, is_source, is_low_signal + is_test, normalized)
 
 
+def reduce_execution_output(state: Dict[str, Any], output: Dict[str, Any]) -> Dict[str, Any]:
+    # Specialist observations do not replace the project's required regression suite.
+    return {"command_results": state.get("command_results", []) + [output],
+            "execution_results": state.get("execution_results", []) + [output.get("execution_result", {})]}
+
+
 def reduce_run_shell_command_output(
     state: Dict[str, Any],
     output: Dict[str, Any],
@@ -768,51 +775,21 @@ def parse_unified_diff(diff: str) -> list[dict[str, Any]]:
     return [item for item in file_hunks if item.get("file_path")]
 
 # 工具注册
-class ToolRegistry:
+class ToolRegistry(ToolRegistryBase):
     def __init__(self, include_defaults: bool = True) -> None:
-        self._tools: dict[str, ToolSpec] = {}
+        super().__init__()
         if include_defaults:
             self.register_defaults()
 
-    # 后续新注册 tools
-    def register(self, spec: ToolSpec) -> None:
-        if spec.name in self._tools:
-            logger.warning("overriding registered tool name={}", spec.name)
-        else:
-            logger.debug("registering tool name={}", spec.name)
-        self._tools[spec.name] = spec
-
-    def run(
-        self,
-        name: str,
-        repo_path: str,
-        args: Dict[str, Any] | None = None,
-        *,
-        allowed_permissions: list[str] | None = None,
-        runtime_context: Dict[str, Any] | None = None,
-    ) -> Dict[str, Any]:
-        if name not in self._tools:
-            logger.warning("unknown tool requested name={}", name)
-            return normalize_tool_result({"error": f"Unknown tool: {name}"}, tool_name=name)
-        logger.debug("tool registry dispatch name={} repo_path={} args={}", name, repo_path, args or {})
-        return run_tool_spec(
-            self._tools[name],
-            repo_path,
-            args or {},
-            allowed_permissions=allowed_permissions,
-            runtime_context=runtime_context,
-        )
-
-    def names(self) -> list[str]:
-        return sorted(self._tools)
-
-    def get(self, name: str) -> ToolSpec | None:
-        return self._tools.get(name)
-
-    def items(self) -> Mapping[str, ToolSpec]:
-        return MappingProxyType(dict(self._tools))
-
     def register_defaults(self) -> None:
+        self.register(ToolSpec(
+            name="execution_task",
+            description="Delegate bounded local runtime verification to an execution specialist. Returns criteria verdicts, evidence references and cleanup status. Runs trusted project commands, not a sandbox.",
+            runner=run_execution_task,
+            input_schema=ExecutionTaskInput,
+            permissions=["repo:read", "agent:execution"],
+            reducer=reduce_execution_output,
+        ))
         self.register(
             ToolSpec(
                 name="build_codebase_context",

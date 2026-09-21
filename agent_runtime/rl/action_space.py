@@ -31,6 +31,7 @@ class ActionSpace:
                 "request_user_input",
                 "run_tests",
                 "run_shell_command",
+                "execution_task",
                 "git_diff",
                 "finish",
             ]
@@ -59,6 +60,8 @@ class ActionSpace:
         self._append(specs, available, "read_file", "Read the file or line range needed for the next decision.")
         self._append(specs, available, "run_shell_command", "Run an allowed diagnostic or verification command.")
         self._append(specs, available, "run_tests", "Run an allowed project verification command.")
+        if state.get("execution_enabled"):
+            self._append(specs, available, "execution_task", "Delegate service startup and runtime checks with explicit acceptance criteria; internal recovery is autonomous.")
         self._append(specs, available, "request_user_input", "Ask a concrete question only when repository tools cannot resolve it.")
 
         if plan_mode:

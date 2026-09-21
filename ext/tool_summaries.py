@@ -53,6 +53,18 @@ def tool_call_summaries(
         _put_if_present(summary, "input", call.get("input"))
         _put_if_present(summary, "error", call.get("error"))
         if output:
+            execution = output.get("execution_result")
+            if isinstance(execution, dict):
+                summary["execution"] = {
+                    key: execution.get(key)
+                    for key in ("task_id", "attempt_id", "execution_status", "verdict", "cleanup_status", "source_fingerprint")
+                }
+                summary["execution"]["criteria_results"] = [
+                    {**item, "explanation": str(item.get("explanation", ""))[:400]}
+                    for item in execution.get("criteria_results", [])[:16]
+                ]
+                summary["execution"]["artifacts"] = output.get("artifacts", [])
+                summary["execution"]["evidence_excerpts"] = output.get("evidence_excerpts", [])
             summary["output_keys"] = sorted(str(key) for key in output.keys())
             output_fields = {
                 key: output[key]

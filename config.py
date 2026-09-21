@@ -53,6 +53,8 @@ class LLMConfig:
     timeout: int = 60
     temperature: float = 0.0
     max_output_chars: int = 12000
+    structured_fallback: bool = True
+    max_retries: int = 2
 
 
 @dataclass
@@ -74,6 +76,17 @@ class DebugAgentConfig:
     # 仓库路径
     repo_path: str = ""
     max_loops: int = 8
+    execution_enabled: bool = False
+    execution_env: dict[str, str] = field(default_factory=dict)
+    execution_timeout: int = 300
+    execution_model_calls: int = 16
+    execution_tool_calls: int = 32
+    execution_retries: int = 8
+    execution_startup_timeout: int = 30
+    execution_operation_timeout: int = 30
+    execution_cleanup_timeout: int = 5
+    execution_resources: dict = field(default_factory=lambda: {
+        "memory_limit_mb": 2048, "cpu_limit_percent": 50, "max_processes": 64, "mode": "strict"})
     env_file: str | None = ".env"
     env_override: bool = False
 
@@ -307,6 +320,16 @@ def default_config_payload() -> dict[str, Any]:
         },
         "repo_path": ".",
         "max_loops": config.max_loops,
+        "execution_enabled": config.execution_enabled,
+        "execution_env": config.execution_env,
+        "execution_timeout": config.execution_timeout,
+        "execution_model_calls": config.execution_model_calls,
+        "execution_tool_calls": config.execution_tool_calls,
+        "execution_retries": config.execution_retries,
+        "execution_startup_timeout": config.execution_startup_timeout,
+        "execution_operation_timeout": config.execution_operation_timeout,
+        "execution_cleanup_timeout": config.execution_cleanup_timeout,
+        "execution_resources": config.execution_resources,
         "env_file": config.env_file,
         "env_override": config.env_override,
         "manifest_dir": config.manifest_dir,
@@ -773,6 +796,20 @@ def _apply_llm_section(config: DebugAgentConfig, section: Any) -> None:
 
 
 def validate_debug_agent_config(config: DebugAgentConfig) -> None:
+    from agent_runtime.execution.contracts import Limits, ResourceLimits
+    Limits(timeout=config.execution_timeout, model_calls=config.execution_model_calls,
+           tool_calls=config.execution_tool_calls, retries=config.execution_retries,
+           startup_timeout=config.execution_startup_timeout, operation_timeout=config.execution_operation_timeout,
+           cleanup_timeout=config.execution_cleanup_timeout)
+    ResourceLimits.model_validate(config.execution_resources)
+    if not isinstance(config.execution_enabled, bool):
+        raise ValueError("execution_enabled must be a boolean")
+    if not isinstance(config.execution_env, dict) or any(
+        not isinstance(key, str) or not key or "=" in key or "\0" in key
+        or not isinstance(value, str) or "\0" in value
+        for key, value in config.execution_env.items()
+    ):
+        raise ValueError("execution_env must map valid environment names to strings")
     _validate_choice("planner_mode", config.planner_mode, {"heuristic", "llm"})
     _validate_choice(
         "memory_extractor_mode", config.memory_extractor_mode, {"rule_based", "llm"}
@@ -1026,6 +1063,12 @@ def resolve_llm_config(base: LLMConfig, override: LLMConfig) -> LLMConfig:
             if override.max_output_chars != default.max_output_chars
             else base.max_output_chars
         ),
+        structured_fallback=(
+            override.structured_fallback
+            if override.structured_fallback != default.structured_fallback
+            else base.structured_fallback
+        ),
+        max_retries=override.max_retries if override.max_retries != default.max_retries else base.max_retries,
     )
 
 
@@ -1076,6 +1119,10 @@ def _validate_choice(field_name: str, value: Any, choices: set[str]) -> None:
 
 
 def _validate_llm_config(field_name: str, value: LLMConfig) -> None:
+    if type(value.max_retries) is not int or value.max_retries < 0:
+        raise ValueError(f"{field_name}.max_retries must be a nonnegative integer")
+    if not isinstance(value.structured_fallback, bool):
+        raise ValueError(f"{field_name}.structured_fallback must be a boolean")
     provider = str(value.provider).strip().lower()
     allowed = {"", "disabled", "none", "openai", "openai_compatible", "openai-compatible", "enable"}
     if provider not in allowed:

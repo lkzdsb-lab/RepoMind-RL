@@ -32,6 +32,8 @@ class TrajectoryStep(TypedDict, total=False):
 
 # 记录 agent 活动状态格式
 class AgentState(TypedDict, total=False):
+    execution_enabled: bool
+    execution_results: List[Dict[str, Any]]
     task_id: str  # 后续考虑是否添加 trace id 跟踪任务流程
     session_id: str
     task_type: Literal["BUG_FIX", "FEATURE_IMPL", "DIAGNOSE"]

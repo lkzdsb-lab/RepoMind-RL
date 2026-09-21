@@ -1,4 +1,7 @@
 # Lee-Agent
+
+执行型 Subagent 的配置、通用进程工具、异常恢复和任务证据说明见 [Execution Subagent](docs/execution-subagent.md)。
+
 RepoMind-RL 是一个能在真实代码仓库中自动定位 Bug、生成补丁并运行测试的 Coding Agent。当前版本使用会话级记忆维持多轮上下文，长期记忆晋升与 skill 沉淀将由后续离线流程负责。
 
 ## 第一版 Agent

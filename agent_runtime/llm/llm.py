@@ -39,6 +39,7 @@ class OpenAICompatibleLLMClient:
             api_key=api_key,
             base_url=config.api_base or None,
             timeout=config.timeout,
+            max_retries=config.max_retries,
         )
 
     def complete(self, request: LLMRequest) -> LLMResponse:
@@ -74,6 +75,8 @@ class OpenAICompatibleLLMClient:
             completion = self.client.beta.chat.completions.parse(**kwargs)
             parsed = _extract_parsed_message(completion)
         except Exception as exc:
+            if not self.config.structured_fallback:
+                raise
             logger.warning(
                 "structured parse failed; retrying with plain completion error_type={} error={}",
                 exc.__class__.__name__,

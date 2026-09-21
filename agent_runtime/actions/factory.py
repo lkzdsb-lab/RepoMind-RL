@@ -82,6 +82,11 @@ class ActionFactory:
         defaults = default_args if default_args is not None else self.default_args(spec, state)
         action_name = spec.name
 
+        if action_name == "execution_task":
+            return {"objective": raw_input.get("objective", ""),
+                    "acceptance_criteria": raw_input.get("acceptance_criteria", []),
+                    "context": raw_input.get("context", "")}
+
         if action_name == "apply_code_patch":
             return {
                 "changes": raw_input.get("changes", []),

@@ -7,6 +7,7 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict
+from tools.shell_tools.process import run_process
 
 
 DENIED_EXECUTABLES = {
@@ -75,12 +76,9 @@ def run_shell_command(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
             argv = shlex.split(command)
             if not argv:
                 return {"error": "Command parsed to an empty argv.", "exit_code": -1}
-            result = subprocess.run(
+            result = run_process(
                 argv,
                 cwd=repo,
-                shell=False,
-                capture_output=True,
-                text=True,
                 timeout=timeout,
             )
     except subprocess.TimeoutExpired as exc:
@@ -92,7 +90,7 @@ def run_shell_command(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
             "reason": reason,
             "exit_code": -1,
             "stdout": _tail(exc.stdout or "", 6000),
-            "stderr": _tail((exc.stderr or "") + "\ncommand timeout", 6000),
+            "stderr": _tail(exc.stderr or "", 5980) + "\ncommand timeout",
             "duration_ms": round(duration_ms, 1),
             "timeout": True,
         }
@@ -131,16 +129,26 @@ def _deny_reason(command: str, *, allow_shell: bool) -> str:
     lowered = " ".join(command.lower().split())
     if allow_shell and any(token in lowered for token in [";", "&&", "||", "`", "$("]):
         return "Shell control operators are not allowed in run_shell_command."
-    for token in DENIED_TOKENS:
-        if token in lowered:
-            return f"Denied potentially destructive command pattern: {token}"
     try:
         argv = shlex.split(command)
     except ValueError as exc:
         return str(exc)
     if not argv:
         return "Command parsed to an empty argv."
+    return validate_command_argv(argv)
+
+
+def validate_command_argv(argv: list[str]) -> str:
+    """Shared best-effort guard; running trusted project code is not sandboxing."""
+    if not argv or not argv[0] or any("\0" in value for value in argv):
+        return "Command requires nonempty argv without null bytes."
+    lowered = " ".join(argv).lower()
+    for token in DENIED_TOKENS:
+        if token in lowered:
+            return f"Denied potentially destructive command pattern: {token}"
     executable = Path(argv[0]).name.lower()
+    if executable.endswith(".exe"):
+        executable = executable[:-4]
     if executable in DENIED_EXECUTABLES:
         return f"Denied executable: {executable}"
     if executable == "git" and len(argv) >= 3:
