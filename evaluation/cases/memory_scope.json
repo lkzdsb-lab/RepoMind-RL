@@ -1,0 +1,329 @@
+{
+  "kind": "memory_retrieval",
+  "case_id": "memory_scope",
+  "version": 1,
+  "fixture": "evaluation/fixtures/memory_scope",
+  "documents": [
+    {
+      "memory_type": "semantic",
+      "status": "verified",
+      "source": {
+        "task_id": "scope_fixture",
+        "archive_path": "fixture:scope",
+        "archive_hash": "scope-v1"
+      },
+      "applicability": "Revalidate referenced code before use.",
+      "confidence": 0.9,
+      "evidence_strength": 0.8,
+      "created_at": "2026-09-10T00:00:00+00:00",
+      "updated_at": "2026-09-10T00:00:00+00:00",
+      "memory_id": "mem_cache",
+      "title": "cachepolicy",
+      "knowledge": "cachepolicy requires checking the associated code before applying changes.",
+      "scope": {
+        "repo_id": "$current",
+        "level": "file",
+        "files": [
+          "internal/cache.py"
+        ]
+      }
+    },
+    {
+      "memory_type": "semantic",
+      "status": "verified",
+      "source": {
+        "task_id": "scope_fixture",
+        "archive_path": "fixture:scope",
+        "archive_hash": "scope-v1"
+      },
+      "applicability": "Revalidate referenced code before use.",
+      "confidence": 0.9,
+      "evidence_strength": 0.8,
+      "created_at": "2026-09-10T00:00:00+00:00",
+      "updated_at": "2026-09-10T00:00:00+00:00",
+      "memory_id": "mem_foreign",
+      "title": "cachepolicy",
+      "knowledge": "cachepolicy requires checking the associated code before applying changes.",
+      "scope": {
+        "repo_id": "other-repository",
+        "level": "repo"
+      }
+    },
+    {
+      "memory_type": "preference",
+      "status": "verified",
+      "source": {
+        "task_id": "scope_fixture",
+        "archive_path": "fixture:scope",
+        "archive_hash": "scope-v1"
+      },
+      "applicability": "Revalidate referenced code before use.",
+      "confidence": 0.9,
+      "evidence_strength": 0.8,
+      "created_at": "2026-09-10T00:00:00+00:00",
+      "updated_at": "2026-09-10T00:00:00+00:00",
+      "memory_id": "mem_preference",
+      "title": "cachepolicy",
+      "knowledge": "cachepolicy requires checking the associated code before applying changes.",
+      "scope": {
+        "repo_id": "$current",
+        "level": "file",
+        "files": [
+          "other/cache.py"
+        ]
+      }
+    },
+    {
+      "memory_type": "semantic",
+      "status": "verified",
+      "source": {
+        "task_id": "scope_fixture",
+        "archive_path": "fixture:scope",
+        "archive_hash": "scope-v1"
+      },
+      "applicability": "Revalidate referenced code before use.",
+      "confidence": 0.9,
+      "evidence_strength": 0.8,
+      "created_at": "2026-09-10T00:00:00+00:00",
+      "updated_at": "2026-09-10T00:00:00+00:00",
+      "memory_id": "mem_basename",
+      "title": "barepolicy",
+      "knowledge": "barepolicy requires checking the associated code before applying changes.",
+      "scope": {
+        "repo_id": "$current",
+        "level": "file",
+        "files": [
+          "cache.py"
+        ]
+      }
+    },
+    {
+      "memory_type": "semantic",
+      "status": "verified",
+      "source": {
+        "task_id": "scope_fixture",
+        "archive_path": "fixture:scope",
+        "archive_hash": "scope-v1"
+      },
+      "applicability": "Revalidate referenced code before use.",
+      "confidence": 0.9,
+      "evidence_strength": 0.8,
+      "created_at": "2026-09-10T00:00:00+00:00",
+      "updated_at": "2026-09-10T00:00:00+00:00",
+      "memory_id": "mem_symbol",
+      "title": "releasepolicy",
+      "knowledge": "releasepolicy requires checking the associated code before applying changes.",
+      "scope": {
+        "repo_id": "$current",
+        "level": "symbol",
+        "files": [
+          "internal/cache.py"
+        ],
+        "symbols": [
+          "Cache.Close"
+        ]
+      }
+    },
+    {
+      "memory_type": "semantic",
+      "status": "verified",
+      "source": {
+        "task_id": "scope_fixture",
+        "archive_path": "fixture:scope",
+        "archive_hash": "scope-v1"
+      },
+      "applicability": "Revalidate referenced code before use.",
+      "confidence": 0.9,
+      "evidence_strength": 0.8,
+      "created_at": "2026-09-10T00:00:00+00:00",
+      "updated_at": "2026-09-10T00:00:00+00:00",
+      "memory_id": "mem_module",
+      "title": "modulepolicy",
+      "knowledge": "modulepolicy requires checking the associated code before applying changes.",
+      "scope": {
+        "repo_id": "$current",
+        "level": "module",
+        "module": "internal/cache"
+      }
+    }
+  ],
+  "queries": [
+    {
+      "query_id": "bootstrap",
+      "state": {
+        "title": "cachepolicy"
+      },
+      "relevant_memory_ids": [
+        "mem_cache"
+      ],
+      "expected_scope_status": {
+        "mem_cache": "unknown"
+      },
+      "forbidden_memory_ids": [
+        "mem_foreign",
+        "mem_preference"
+      ]
+    },
+    {
+      "query_id": "exact_file",
+      "state": {
+        "title": "cachepolicy",
+        "candidate_files": [
+          "internal/cache.py"
+        ]
+      },
+      "relevant_memory_ids": [
+        "mem_cache"
+      ],
+      "expected_scope_status": {
+        "mem_cache": "matched"
+      },
+      "forbidden_memory_ids": [
+        "mem_foreign",
+        "mem_preference"
+      ]
+    },
+    {
+      "query_id": "basename_hint",
+      "state": {
+        "title": "cachepolicy",
+        "candidate_files": [
+          "cache.py"
+        ],
+        "task_analysis": {
+          "entities": [
+            "cache.py"
+          ]
+        }
+      },
+      "relevant_memory_ids": [
+        "mem_cache"
+      ],
+      "expected_scope_status": {
+        "mem_cache": "unknown"
+      },
+      "forbidden_memory_ids": [
+        "mem_foreign",
+        "mem_preference"
+      ]
+    },
+    {
+      "query_id": "ambiguous_basename",
+      "state": {
+        "title": "barepolicy",
+        "candidate_files": [
+          "internal/cache.py",
+          "other/cache.py"
+        ]
+      },
+      "relevant_memory_ids": [
+        "mem_basename"
+      ],
+      "expected_scope_status": {
+        "mem_basename": "unknown"
+      },
+      "forbidden_memory_ids": []
+    },
+    {
+      "query_id": "confirmed_symbol",
+      "state": {
+        "title": "releasepolicy",
+        "selected_code_context": {
+          "symbols": [
+            {
+              "name": "Close",
+              "receiver": "Cache",
+              "file_path": "internal/cache.py",
+              "line": 2
+            }
+          ]
+        }
+      },
+      "relevant_memory_ids": [
+        "mem_symbol"
+      ],
+      "expected_scope_status": {
+        "mem_symbol": "matched"
+      },
+      "forbidden_memory_ids": []
+    },
+    {
+      "query_id": "bare_symbol",
+      "state": {
+        "title": "releasepolicy",
+        "task_analysis": {
+          "entities": [
+            "Cache.Close"
+          ]
+        }
+      },
+      "relevant_memory_ids": [
+        "mem_symbol"
+      ],
+      "expected_scope_status": {
+        "mem_symbol": "unknown"
+      },
+      "forbidden_memory_ids": []
+    },
+    {
+      "query_id": "other_file_same_symbol",
+      "state": {
+        "title": "releasepolicy",
+        "selected_code_context": {
+          "symbols": [
+            {
+              "name": "Close",
+              "receiver": "Cache",
+              "file_path": "other/cache.py",
+              "line": 2
+            }
+          ]
+        }
+      },
+      "relevant_memory_ids": [
+        "mem_symbol"
+      ],
+      "expected_scope_status": {
+        "mem_symbol": "unknown"
+      },
+      "forbidden_memory_ids": []
+    },
+    {
+      "query_id": "module_boundary",
+      "state": {
+        "title": "modulepolicy",
+        "candidate_files": [
+          "internal/cachex/config.py"
+        ]
+      },
+      "relevant_memory_ids": [
+        "mem_module"
+      ],
+      "expected_scope_status": {
+        "mem_module": "unknown"
+      },
+      "forbidden_memory_ids": []
+    },
+    {
+      "query_id": "module_confirmed",
+      "state": {
+        "title": "modulepolicy",
+        "candidate_files": [
+          "internal/cache/config.py"
+        ]
+      },
+      "relevant_memory_ids": [
+        "mem_module"
+      ],
+      "expected_scope_status": {
+        "mem_module": "matched"
+      },
+      "forbidden_memory_ids": []
+    }
+  ],
+  "modes": [
+    "keyword"
+  ],
+  "k": 5,
+  "minimum_recall": 1
+}

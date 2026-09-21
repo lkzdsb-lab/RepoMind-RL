@@ -1,0 +1,624 @@
+{
+  "schema_version": 1,
+  "benchmark_version": 2,
+  "description": "Deliberately seeded faults; labels await human confirmation. Not a production quality benchmark.",
+  "bugs": [
+    {
+      "bug_id": "todos-pagination-off-by-one",
+      "difficulty": "easy",
+      "file": "store.go",
+      "symbol": "list",
+      "category": "boundary",
+      "keywords": [],
+      "symptom": "第一页跳过了前两条任务",
+      "root_cause": "无过滤列表使用 page*limit 作为起点",
+      "repair_contract": "起点应为 (page-1)*limit；保留空页与溢出边界处理",
+      "preconditions": "Fresh process with default seed data. No preceding scenarios.",
+      "review_status": "pending_human_review",
+      "related_bugs": [],
+      "verification": {
+        "kind": "http",
+        "steps": [
+          {
+            "method": "GET",
+            "path": "/todos?page=1&limit=2",
+            "expect": {
+              "status": 200,
+              "fields": {
+                "0.id": 1,
+                "1.id": 2
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bug_id": "todo-delete-method-not-checked",
+      "difficulty": "easy",
+      "file": "server.go",
+      "symbol": "handleTodoByID",
+      "category": "api_contract",
+      "keywords": [],
+      "symptom": "GET 请求意外删除任务",
+      "root_cause": "非 PATCH 分支没有检查 DELETE 方法",
+      "repair_contract": "不支持的方法返回405且状态不变",
+      "preconditions": "Fresh process with default seed data. No preceding scenarios.",
+      "review_status": "pending_human_review",
+      "related_bugs": [],
+      "verification": {
+        "kind": "http",
+        "steps": [
+          {
+            "method": "GET",
+            "path": "/todos/1",
+            "expect": {
+              "status": 405,
+              "fields": {}
+            }
+          },
+          {
+            "method": "GET",
+            "path": "/projects/1/stats",
+            "expect": {
+              "status": 200,
+              "fields": {
+                "total": 2
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bug_id": "unknown-user-nil-dereference",
+      "difficulty": "easy",
+      "file": "server.go",
+      "symbol": "handleUserByID",
+      "category": "correctness",
+      "keywords": [],
+      "symptom": "不存在的用户导致连接中断",
+      "root_cause": "解引用不存在的用户指针",
+      "repair_contract": "返回404而不是panic",
+      "preconditions": "Fresh process with default seed data. No preceding scenarios.",
+      "review_status": "pending_human_review",
+      "related_bugs": [],
+      "verification": {
+        "kind": "http",
+        "steps": [
+          {
+            "method": "GET",
+            "path": "/users/999",
+            "expect": {
+              "status": 404,
+              "fields": {}
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bug_id": "file-path-traversal",
+      "difficulty": "medium",
+      "file": "server.go",
+      "symbol": "handleFile",
+      "category": "security",
+      "keywords": [],
+      "symptom": "可读取static以外的文件",
+      "root_cause": "Join后直接ReadFile，没有目录边界检查",
+      "repair_contract": "拒绝越界路径，包括符号链接逃逸；合法静态文件仍可读",
+      "preconditions": "Fresh process with default seed data. No preceding scenarios.",
+      "review_status": "pending_human_review",
+      "related_bugs": [],
+      "verification": {
+        "kind": "http",
+        "steps": [
+          {
+            "method": "GET",
+            "path": "/files?name=../go.mod",
+            "expect": {
+              "status": 400,
+              "fields": {}
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bug_id": "store-data-race",
+      "difficulty": "hard",
+      "file": "store.go",
+      "symbol": "Store",
+      "category": "concurrency",
+      "keywords": [],
+      "symptom": "并发读写内存状态产生竞态",
+      "root_cause": "共享切片、映射、计数器及缓存缺少统一同步",
+      "repair_contract": "并发操作和版本检查须在一致的同步边界内，race detector无报告",
+      "preconditions": "Fresh process with default seed data. No preceding scenarios.",
+      "review_status": "pending_human_review",
+      "related_bugs": [],
+      "verification": {
+        "kind": "race",
+        "steps": []
+      }
+    },
+    {
+      "bug_id": "todo-whitespace-title",
+      "difficulty": "easy",
+      "file": "tasks.go",
+      "symbol": "handleCreate",
+      "category": "boundary",
+      "keywords": [],
+      "symptom": "空白标题可以创建任务",
+      "root_cause": "只比较空字符串，没有检查TrimSpace后的内容",
+      "repair_contract": "空白标题返回400且不创建任务",
+      "preconditions": "Fresh process with default seed data. No preceding scenarios.",
+      "review_status": "pending_human_review",
+      "related_bugs": [],
+      "verification": {
+        "kind": "http",
+        "steps": [
+          {
+            "method": "POST",
+            "path": "/todos",
+            "expect": {
+              "status": 400,
+              "fields": {}
+            },
+            "body": {
+              "title": "   ",
+              "user_id": 1,
+              "project_id": 1,
+              "priority": 2
+            }
+          },
+          {
+            "method": "GET",
+            "path": "/projects/1/stats",
+            "expect": {
+              "status": 200,
+              "fields": {
+                "total": 2
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bug_id": "priority-upper-bound",
+      "difficulty": "easy",
+      "file": "tasks.go",
+      "symbol": "validPriority",
+      "category": "boundary",
+      "keywords": [],
+      "symptom": "合法优先级5被拒绝",
+      "root_cause": "上界使用 <5 而非 <=5",
+      "repair_contract": "创建和更新一致接受1..5；拒绝0和6",
+      "preconditions": "Fresh process with default seed data. No preceding scenarios.",
+      "review_status": "pending_human_review",
+      "related_bugs": [],
+      "verification": {
+        "kind": "http",
+        "steps": [
+          {
+            "method": "POST",
+            "path": "/todos",
+            "expect": {
+              "status": 201,
+              "fields": {
+                "priority": 5
+              }
+            },
+            "body": {
+              "title": "priority task",
+              "user_id": 1,
+              "project_id": 1,
+              "priority": 5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bug_id": "filter-after-pagination",
+      "difficulty": "medium",
+      "file": "store.go",
+      "symbol": "list",
+      "category": "correctness",
+      "keywords": [],
+      "symptom": "筛选后分页结果漏项",
+      "root_cause": "先对全体任务截取分页，再执行筛选",
+      "repair_contract": "先筛选再分页，结果保持ID顺序",
+      "preconditions": "Fresh process with default seed data. No preceding scenarios.",
+      "review_status": "pending_human_review",
+      "related_bugs": [],
+      "verification": {
+        "kind": "http",
+        "steps": [
+          {
+            "method": "GET",
+            "path": "/todos?project_id=2&page=1&limit=2",
+            "expect": {
+              "status": 200,
+              "fields": {
+                "0.id": 3,
+                "1.id": 4
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bug_id": "stats-cache-not-invalidated",
+      "difficulty": "medium",
+      "file": "tasks.go",
+      "symbol": "handleUpdate",
+      "category": "correctness",
+      "keywords": [],
+      "symptom": "修改完成状态后统计仍是旧值",
+      "root_cause": "单任务更新没有清理统计缓存",
+      "repair_contract": "成功变更后立即可见；失败请求不得改变统计",
+      "preconditions": "Fresh process with default seed data. No preceding scenarios.",
+      "review_status": "pending_human_review",
+      "related_bugs": [],
+      "verification": {
+        "kind": "http",
+        "steps": [
+          {
+            "method": "GET",
+            "path": "/projects/1/stats",
+            "expect": {
+              "status": 200,
+              "fields": {
+                "completed": 1
+              }
+            }
+          },
+          {
+            "method": "PATCH",
+            "path": "/todos/2",
+            "expect": {
+              "status": 200,
+              "fields": {
+                "done": true,
+                "version": 2
+              }
+            },
+            "body": {
+              "version": 1,
+              "done": true
+            }
+          },
+          {
+            "method": "GET",
+            "path": "/projects/1/stats",
+            "expect": {
+              "status": 200,
+              "fields": {
+                "completed": 2
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bug_id": "stats-cache-project-key",
+      "difficulty": "medium",
+      "file": "projects.go",
+      "symbol": "projectStats",
+      "category": "correctness",
+      "keywords": [],
+      "symptom": "两个项目查询到相同统计",
+      "root_cause": "缓存键固定为summary，没有项目维度",
+      "repair_contract": "缓存按项目隔离",
+      "preconditions": "Fresh process with default seed data. No preceding scenarios.",
+      "review_status": "pending_human_review",
+      "related_bugs": [],
+      "verification": {
+        "kind": "http",
+        "steps": [
+          {
+            "method": "GET",
+            "path": "/projects/1/stats",
+            "expect": {
+              "status": 200,
+              "fields": {
+                "project_id": 1,
+                "completed": 1
+              }
+            }
+          },
+          {
+            "method": "GET",
+            "path": "/projects/2/stats",
+            "expect": {
+              "status": 200,
+              "fields": {
+                "project_id": 2,
+                "completed": 0
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bug_id": "batch-partial-commit",
+      "difficulty": "hard",
+      "file": "store.go",
+      "symbol": "batch",
+      "category": "correctness",
+      "keywords": [],
+      "symptom": "批量请求失败但前面任务已修改",
+      "root_cause": "逐个更新并在后续遇错时直接返回",
+      "repair_contract": "完整校验后原子提交；任意失败保持所有任务原状态",
+      "preconditions": "Fresh process with default seed data. No preceding scenarios.",
+      "review_status": "pending_human_review",
+      "related_bugs": [
+        "version-check-after-write"
+      ],
+      "verification": {
+        "kind": "http",
+        "steps": [
+          {
+            "method": "PATCH",
+            "path": "/todos/batch",
+            "expect": {
+              "status": 404,
+              "fields": {}
+            },
+            "body": {
+              "items": [
+                {
+                  "id": 2,
+                  "version": 1,
+                  "done": true
+                },
+                {
+                  "id": 999,
+                  "version": 1,
+                  "done": true
+                }
+              ]
+            }
+          },
+          {
+            "method": "PATCH",
+            "path": "/todos/2",
+            "expect": {
+              "status": 200,
+              "fields": {
+                "done": false,
+                "version": 2
+              }
+            },
+            "body": {
+              "version": 1,
+              "title": "check original version"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bug_id": "idempotency-project-key",
+      "difficulty": "hard",
+      "file": "store.go",
+      "symbol": "create",
+      "category": "correctness",
+      "keywords": [],
+      "symptom": "另一项目复用请求键时返回第一项目的任务",
+      "root_cause": "幂等记录只使用请求键",
+      "repair_contract": "按项目与key联合隔离；同项目重试不能重复创建",
+      "preconditions": "Fresh process with default seed data. No preceding scenarios.",
+      "review_status": "pending_human_review",
+      "related_bugs": [],
+      "verification": {
+        "kind": "http",
+        "steps": [
+          {
+            "method": "POST",
+            "path": "/todos",
+            "expect": {
+              "status": 201,
+              "fields": {
+                "project_id": 1
+              }
+            },
+            "body": {
+              "title": "new task",
+              "user_id": 1,
+              "project_id": 1,
+              "priority": 2
+            },
+            "headers": {
+              "Idempotency-Key": "shared"
+            }
+          },
+          {
+            "method": "POST",
+            "path": "/todos",
+            "expect": {
+              "status": 200,
+              "fields": {
+                "project_id": 1
+              }
+            },
+            "body": {
+              "title": "new task",
+              "user_id": 1,
+              "project_id": 1,
+              "priority": 2
+            },
+            "headers": {
+              "Idempotency-Key": "shared"
+            }
+          },
+          {
+            "method": "POST",
+            "path": "/todos",
+            "expect": {
+              "status": 201,
+              "fields": {
+                "project_id": 2
+              }
+            },
+            "body": {
+              "title": "new task",
+              "user_id": 1,
+              "project_id": 2,
+              "priority": 2
+            },
+            "headers": {
+              "Idempotency-Key": "shared"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "bug_id": "version-check-after-write",
+      "difficulty": "hard",
+      "file": "store.go",
+      "symbol": "update",
+      "category": "correctness",
+      "keywords": [],
+      "symptom": "返回409后任务字段和版本已改变",
+      "root_cause": "先修改字段和版本，然后比较旧版本",
+      "repair_contract": "先校验再修改；冲突请求没有任何副作用",
+      "preconditions": "Fresh process with default seed data. No preceding scenarios.",
+      "review_status": "pending_human_review",
+      "related_bugs": [],
+      "verification": {
+        "kind": "http",
+        "steps": [
+          {
+            "method": "PATCH",
+            "path": "/todos/2",
+            "expect": {
+              "status": 200,
+              "fields": {
+                "version": 2
+              }
+            },
+            "body": {
+              "version": 1,
+              "title": "accepted"
+            }
+          },
+          {
+            "method": "PATCH",
+            "path": "/todos/2",
+            "expect": {
+              "status": 409,
+              "fields": {}
+            },
+            "body": {
+              "version": 1,
+              "done": true
+            }
+          },
+          {
+            "method": "PATCH",
+            "path": "/todos/2",
+            "expect": {
+              "status": 200,
+              "fields": {
+                "version": 3,
+                "done": false,
+                "title": "accepted"
+              }
+            },
+            "body": {
+              "version": 2
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "smoke_steps": [
+    {
+      "method": "GET",
+      "path": "/health",
+      "expect": {
+        "status": 200,
+        "fields": {
+          "status": "ok"
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/projects",
+      "expect": {
+        "status": 200,
+        "fields": {
+          "0.id": 1,
+          "1.id": 2
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/users/1",
+      "expect": {
+        "status": 200,
+        "fields": {
+          "id": 1
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/files?name=welcome.txt",
+      "expect": {
+        "status": 200,
+        "fields": {}
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/todos",
+      "expect": {
+        "status": 201,
+        "fields": {
+          "id": 5,
+          "version": 1
+        }
+      },
+      "body": {
+        "title": "new task",
+        "user_id": 1,
+        "project_id": 1,
+        "priority": 2
+      }
+    },
+    {
+      "method": "PATCH",
+      "path": "/todos/5",
+      "expect": {
+        "status": 200,
+        "fields": {
+          "version": 2,
+          "title": "updated"
+        }
+      },
+      "body": {
+        "version": 1,
+        "title": "updated"
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/todos/5",
+      "expect": {
+        "status": 204,
+        "fields": {}
+      }
+    }
+  ]
+}

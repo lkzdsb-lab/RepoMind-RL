@@ -1,0 +1,47 @@
+{
+  "case_id": "go_web_debug_medium",
+  "version": 2,
+  "fixture": "../agent test",
+  "intent": "implement",
+  "turns": [
+    {
+      "message": "检查这个多项目任务管理 Go Web 服务，依据 README 接口契约查找缺陷。先只诊断，不修改代码；报告触发条件、根因位置及影响。"
+    },
+    {
+      "message": "修复上一轮发现的缺陷，并验证接口契约、跨请求状态一致性和并发安全。不要修改 README、测试或数据来绕过问题。"
+    }
+  ],
+  "allowed_changed_files": [
+    "server.go",
+    "store.go",
+    "tasks.go",
+    "projects.go",
+    "main.go"
+  ],
+  "forbidden_changed_files": [
+    "*_test.go",
+    "go.mod",
+    "README.md",
+    "static/**"
+  ],
+  "verification": {
+    "argv": [
+      "go",
+      "test",
+      "./..."
+    ],
+    "http_baseline": "evaluation/baselines/go_web_debug.json",
+    "skip_race": true,
+    "timeout": 300
+  },
+  "limits": {
+    "case_timeout": 1800,
+    "max_loops": 30,
+    "max_tool_calls": 100,
+    "max_total_tokens": 200000
+  },
+  "bug_baseline": "evaluation/baselines/go_web_debug.json",
+  "bug_difficulties": [
+    "medium"
+  ]
+}

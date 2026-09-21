@@ -1,0 +1,185 @@
+{
+  "kind": "memory_retrieval",
+  "case_id": "memory_recall",
+  "version": 1,
+  "fixture": "agent test",
+  "documents": [
+    {
+      "memory_id": "mem_connection",
+      "memory_type": "semantic",
+      "title": "连接释放",
+      "knowledge": "无论请求正常结束还是异常退出，都必须释放已获取的连接。",
+      "scope": {
+        "level": "repo",
+        "repo_id": "$current"
+      },
+      "status": "verified",
+      "source": {
+        "task_id": "evaluation_fixture",
+        "archive_path": "fixture:manual",
+        "archive_hash": "evaluation-corpus-v1"
+      },
+      "applicability": "用于对应任务；以当前源码为准。",
+      "confidence": 0.9,
+      "evidence_strength": 0.8,
+      "created_at": "2026-09-08T00:00:00+00:00",
+      "updated_at": "2026-09-08T00:00:00+00:00"
+    },
+    {
+      "memory_id": "mem_retry",
+      "memory_type": "anti_pattern",
+      "title": "请求重试",
+      "knowledge": "非幂等写入不能在失败后无条件自动重试。",
+      "scope": {
+        "level": "repo",
+        "repo_id": "$current"
+      },
+      "status": "verified",
+      "source": {
+        "task_id": "evaluation_fixture",
+        "archive_path": "fixture:manual",
+        "archive_hash": "evaluation-corpus-v1"
+      },
+      "applicability": "用于对应任务；以当前源码为准。",
+      "confidence": 0.9,
+      "evidence_strength": 0.8,
+      "created_at": "2026-09-08T00:00:00+00:00",
+      "updated_at": "2026-09-08T00:00:00+00:00"
+    },
+    {
+      "memory_id": "mem_preference",
+      "memory_type": "preference",
+      "title": "用户说明偏好",
+      "knowledge": "我偏好使用中文解释代码修改的原因。",
+      "scope": {
+        "level": "user",
+        "repo_id": ""
+      },
+      "status": "verified",
+      "source": {
+        "task_id": "evaluation_fixture",
+        "archive_path": "fixture:manual",
+        "archive_hash": "evaluation-corpus-v1"
+      },
+      "applicability": "用于对应任务；以当前源码为准。",
+      "confidence": 0.9,
+      "evidence_strength": 0.8,
+      "created_at": "2026-09-08T00:00:00+00:00",
+      "updated_at": "2026-09-08T00:00:00+00:00"
+    },
+    {
+      "memory_id": "mem_other_repo",
+      "memory_type": "semantic",
+      "title": "连接释放",
+      "knowledge": "另一个项目使用连接池统一回收，不在请求内关闭底层连接。",
+      "scope": {
+        "level": "repo",
+        "repo_id": "other-repository"
+      },
+      "status": "verified",
+      "source": {
+        "task_id": "evaluation_fixture",
+        "archive_path": "fixture:manual",
+        "archive_hash": "evaluation-corpus-v1"
+      },
+      "applicability": "用于对应任务；以当前源码为准。",
+      "confidence": 0.9,
+      "evidence_strength": 0.8,
+      "created_at": "2026-09-08T00:00:00+00:00",
+      "updated_at": "2026-09-08T00:00:00+00:00"
+    },
+    {
+      "memory_id": "mem_logging",
+      "memory_type": "semantic",
+      "title": "日志格式",
+      "knowledge": "日志应包含请求标识和错误原因，禁止写入访问令牌。",
+      "scope": {
+        "level": "repo",
+        "repo_id": "$current"
+      },
+      "status": "verified",
+      "source": {
+        "task_id": "evaluation_fixture",
+        "archive_path": "fixture:manual",
+        "archive_hash": "evaluation-corpus-v1"
+      },
+      "applicability": "用于对应任务；以当前源码为准。",
+      "confidence": 0.9,
+      "evidence_strength": 0.8,
+      "created_at": "2026-09-08T00:00:00+00:00",
+      "updated_at": "2026-09-08T00:00:00+00:00"
+    },
+    {
+      "memory_id": "mem_file",
+      "memory_type": "semantic",
+      "title": "缓存刷新",
+      "knowledge": "缓存配置改变后需要显式刷新本地缓存。",
+      "scope": {
+        "level": "file",
+        "repo_id": "$current",
+        "files": [
+          "internal/cache.go"
+        ]
+      },
+      "status": "verified",
+      "source": {
+        "task_id": "evaluation_fixture",
+        "archive_path": "fixture:manual",
+        "archive_hash": "evaluation-corpus-v1"
+      },
+      "applicability": "用于对应任务；以当前源码为准。",
+      "confidence": 0.9,
+      "evidence_strength": 0.8,
+      "created_at": "2026-09-08T00:00:00+00:00",
+      "updated_at": "2026-09-08T00:00:00+00:00"
+    }
+  ],
+  "k": 5,
+  "minimum_recall": 0,
+  "modes": [
+    "keyword",
+    "semantic",
+    "hybrid"
+  ],
+  "queries": [
+    {
+      "query_id": "literal",
+      "state": {
+        "title": "检查连接释放与异常退出"
+      },
+      "relevant_memory_ids": [
+        "mem_connection"
+      ]
+    },
+    {
+      "query_id": "paraphrase",
+      "state": {
+        "title": "请求中途报错时怎样避免资源泄漏"
+      },
+      "relevant_memory_ids": [
+        "mem_connection"
+      ]
+    },
+    {
+      "query_id": "preference",
+      "state": {
+        "title": "用户偏好用什么语言解释代码修改"
+      },
+      "relevant_memory_ids": [
+        "mem_preference"
+      ]
+    },
+    {
+      "query_id": "file_scope",
+      "state": {
+        "title": "缓存配置改变后没有生效",
+        "candidate_files": [
+          "internal/cache.go"
+        ]
+      },
+      "relevant_memory_ids": [
+        "mem_file"
+      ]
+    }
+  ]
+}
