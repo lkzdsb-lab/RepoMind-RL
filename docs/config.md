@@ -6,6 +6,51 @@ are still supported, but only explicitly provided flags override the file.
 
 ## LLM Rules
 
+Completion review uses its own `llm.completion_judge` generation limits; the
+shipped Qwen example sets `max_completion_tokens=8192` and
+`extra_body.thinking_budget=4096`. Limits on `action_policy` do not apply to it.
+The finish controller owns review retries: SDK retries and format fallback are
+disabled for this node, even if enabled globally. A timeout, connection failure
+or server 5xx error gets at most one retry within the same finish action. Other
+failures terminate immediately. Failed reviews never become `continue` or
+request extra source reads. Failure reports are deterministic and retain pending
+findings without labeling them confirmed.
+
+Successful `continue` decisions are reused for unchanged task evidence. The
+second subsequent finish with unchanged evidence ends the task as incomplete.
+Plans, confidence changes, timestamps and duplicate tool observations do not
+constitute new evidence. Finish actions count toward `max_loops`. The state
+records `completion_review_failure_count`, `completion_judge_continue_count`,
+`completion_review_unchanged_count`, failed `completion_review_attempts`, and the
+last successful `completion_review_cache` separately.
+
+Generation limits are optional at the root `llm` level and can be overridden per
+node, for example `llm.action_policy`:
+
+```json
+{
+  "max_completion_tokens": 4096,
+  "extra_body": { "thinking_budget": 2048 }
+}
+```
+
+This example targets Qwen3.8 on DashScope. `max_completion_tokens` limits thinking
+plus answer tokens; `thinking_budget` limits the thinking portion. These are
+initial tuning values, not a response-time guarantee. Configure only parameters
+supported by your provider. Optional `reasoning_effort` is passed as a standard
+request parameter; Qwen3.8 cannot combine it with `thinking_budget`.
+
+Unset/null scalar limits inherit the root value. `extra_body` merges root and
+node keys, with node keys taking precedence; it cannot override managed request
+fields such as `model`, `messages`, `stream`, or token limits. Generic defaults
+leave generation limits unset. `max_output_chars` only truncates received text
+locally and does not limit server generation. A `finish_reason` of `length` is
+reported as `generation_budget` before JSON parsing, without format fallback or
+automatic budget increases. Other malformed JSON is `response_format`; timeouts
+are `timeout`. Response usage is retained on budget/JSON errors when supplied by
+the provider. Generation logs include node, limits, elapsed time, finish reason
+and provider usage (including reasoning details); a timeout has unknown usage.
+
 `llm` at the root is only the default LLM config. It does not mean every LLM
 module is enabled.
 

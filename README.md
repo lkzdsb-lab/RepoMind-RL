@@ -208,6 +208,10 @@ Agent 每轮 action 前会调用 `ContextCompressionManager`。当估算 token �
 
 如果 LLM 未配置、请求失败或返回无法解析的 JSON，会自动降级到 rule-based compression，并把 fallback 原因写入 digest constraints。
 
+压缩现在以 action policy 最终渲染的 system/user 提示总量估算为触发依据，不再给各事件分类分配 token 配额。`context.compression_target` 默认 `0.55`，必须小于 `compression_threshold`（默认 `0.75`）。仅合并上一份摘要与新增蒸馏事件；同一轮最多进行一次语义压缩，随后规则裁剪摘要和源码投影，并记录 `context_budget` 的 before/after/target/target_met。已归纳事件退出活动上下文，原始工具记录仍保留。固定必需内容导致目标不可达时如实记录；超过 max_tokens 时停止发送 action 请求，而不是反复压缩旧历史。这是本地 token 估算，不是服务端精确计数。
+
+文件正文缓存和分析进度分开保存：`analysis_records` 记录文件版本、行范围、分析维度、结论、关联 finding 与未决问题；读取不自动表示分析完成，正文淘汰也不删除这些记录。版本变化会将记录标为 stale。连续回访相同证据且没有分析进展时，运行时给出有界纠正机会，仍重复则转交 completion judge 审查，而不是直接宣告任务成功。日志含源码实际展示范围、分析更新、重复拦截与压缩达标情况。
+
 ## Codebase Context Layer
 
 默认代码搜索已经从原始 grep 切到结构化索引工具 `search_code_context`。首次查询会在目标仓库生成：

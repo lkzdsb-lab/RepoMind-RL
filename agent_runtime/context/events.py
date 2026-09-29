@@ -268,6 +268,12 @@ def _payload_for_tool(name: str, raw_input: Any, output: dict[str, Any]) -> dict
     }
     for key in (
         "file_path",
+        "file_revision",
+        "source_edit_revision",
+        "start_line",
+        "end_line",
+        "total_lines",
+        "truncated",
         "pattern",
         "query",
         "command",
@@ -292,6 +298,8 @@ def _payload_for_tool(name: str, raw_input: Any, output: dict[str, Any]) -> dict
         payload["files"] = _files_from_code_context(output)[:20]
     elif name == "read_file":
         payload["content_excerpt"] = _truncate(str(output.get("content") or ""), 1600)
+        payload["source_truncated"] = bool(output.get("truncated"))
+        payload["excerpt_truncated"] = len(str(output.get("content") or "")) > 1600
     elif name in {"run_tests", "run_shell_command"}:
         payload["stdout_excerpt"] = _truncate(str(output.get("stdout") or ""), 1000)
         payload["stderr_excerpt"] = _truncate(str(output.get("stderr") or ""), 1000)

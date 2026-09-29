@@ -69,8 +69,12 @@ def _distill_event(event: ContextEvent, state: AgentState) -> DistilledEvent:
     elif event.event_type == "verification_event":
         facts.extend(_verification_facts(event))
         if event.payload.get("exit_code") not in (None, 0):
-            risks.append("Latest verification failed.")
-            next_actions.append("Inspect verification stderr/stdout and update the hypothesis.")
+            risks.append("This command returned a nonzero exit code; inspect whether it is a reproduction or an environment failure.")
+            next_actions.append(
+                "Inspect the result and update the hypothesis; a reproduced bug may satisfy a diagnostic task without a fix."
+                if not state.get("verification_required", True)
+                else "Inspect verification stderr/stdout and update the hypothesis."
+            )
             memory_candidates.append(
                 _memory_candidate(
                     event,
@@ -167,6 +171,13 @@ def _search_facts(event: ContextEvent) -> list[str]:
 def _file_facts(event: ContextEvent) -> list[str]:
     path = str(event.payload.get("file_path") or "").strip()
     facts = [f"Read file {path}." if path else event.summary]
+    facts.append(
+        f"revision={event.payload.get('file_revision', '')}; "
+        f"returned_lines={event.payload.get('start_line')}-{event.payload.get('end_line')}; "
+        f"source_truncated={bool(event.payload.get('source_truncated'))}; "
+        f"excerpt_truncated={bool(event.payload.get('excerpt_truncated'))}. "
+        "This is a read observation, not an analysis-completion record."
+    )
     excerpt = str(event.payload.get("content_excerpt") or "").strip()
     if excerpt:
         facts.append(f"relevant_excerpt={excerpt[:700]}")

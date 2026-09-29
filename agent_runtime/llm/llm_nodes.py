@@ -12,7 +12,8 @@ from config import LLMConfig
 from loguru import logger
 from model.agent.graph import AgentState
 from model.llm import LLMMessage, LLMRequest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
+from openai import APITimeoutError, APIConnectionError, AuthenticationError, PermissionDeniedError, RateLimitError
 from utils import _safe_int
 
 
@@ -93,6 +94,9 @@ class LLMJsonNode:
                     publish_user_update(state, self.name, user_update)
             return data
         except Exception as exc:
+            failed_response = getattr(exc, "response", None)
+            if getattr(failed_response, "usage", None):
+                _record_llm_usage(state, self.name, failed_response)
             _record_llm_error(state, self.name, exc)
             logger.bind(task_id=state.get("task_id"), llm_node=self.name).opt(
                 exception=self.raise_on_error
@@ -222,10 +226,25 @@ def _record_llm_error(state: AgentState, node: str, exc: Exception) -> None:
 
 def _llm_error_payload(node: str, exc: Exception) -> dict[str, Any]:
     text = str(exc)
+    category = getattr(exc, "category", None)
+    if category is None:
+        category = _classify_llm_error(text)
+        if isinstance(exc, APITimeoutError):
+            category = "timeout"
+        elif isinstance(exc, (AuthenticationError, PermissionDeniedError)):
+            category = "auth_or_access"
+        elif isinstance(exc, RateLimitError) and category != "billing_or_quota":
+            category = "rate_limit"
+        elif isinstance(exc, APIConnectionError):
+            category = "connection"
+        elif isinstance(exc, ValidationError):
+            category = "response_format"
+        elif getattr(exc, "status_code", 0) and 500 <= exc.status_code < 600:
+            category = "server_error"
     return {
         "node": node,
         "type": exc.__class__.__name__,
-        "category": _classify_llm_error(text),
+        "category": category,
         "message": text[:1200],
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -237,8 +256,8 @@ def _classify_llm_error(message: str) -> str:
         return "billing_or_quota"
     if "rate limit" in text or "too many requests" in text:
         return "rate_limit"
-    if "api key" in text or "unauthorized" in text or "access denied" in text:
+    if any(keyword in text for keyword in ("api key", "api-key", "api_key", "unauthorized", "access denied")):
         return "auth_or_access"
-    if "timeout" in text:
+    if "timeout" in text or "timed out" in text:
         return "timeout"
     return "unknown"

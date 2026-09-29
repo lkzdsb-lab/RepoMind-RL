@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent_runtime.memory.file_cache import content_for_range, range_is_cached, merge_ranges, subtract_range
 from ext.focus_files import current_focus_files
 from model.agent.graph import AgentState
 from utils import _truncate_text, _put_if_present
@@ -188,19 +189,26 @@ def read_file_range_context(
     if not isinstance(cache, dict) or not cache:
         return []
 
-    paths = current_focus_files(state, limit=file_limit)
+    paths: list[str] = []
+    last_read = state.get("last_read") or {}
+    latest_path = str(last_read.get("file_path") or "")
+    if latest_path in cache:
+        paths.append(latest_path)
     order = state.get("read_file_order")
     if isinstance(order, list):
         for value in reversed(order):
             path = str(value or "").strip()
             if path and path in cache and path not in paths:
                 paths.append(path)
-            if len(paths) >= file_limit:
-                break
+    for path in current_focus_files(state, limit=file_limit):
+        if path in cache and path not in paths:
+            paths.append(path)
 
     remaining = max(1000, int(total_chars))
     result: list[dict[str, Any]] = []
-    for path in paths[:file_limit]:
+    for path in paths:
+        if len(result) >= file_limit:
+            break
         snapshot = cache.get(path)
         if not isinstance(snapshot, dict):
             continue
@@ -216,16 +224,23 @@ def read_file_range_context(
             content = _content_for_range(snapshot, start, end)
             if not content:
                 continue
+            excerpt_truncated = False
             if len(content) > remaining:
                 if excerpts or result:
                     break
+                excerpt_truncated = True
                 content = content[:remaining]
+                if "\n" in content:
+                    content = content[: content.rfind("\n") + 1]
+                if not content:
+                    break
             excerpts.append(
                 {
                     "start_line": start,
                     "end_line": start + max(0, len(content.splitlines()) - 1),
                     "reason": reason,
                     "content": content,
+                    "excerpt_truncated": excerpt_truncated,
                 }
             )
             remaining -= len(content)
@@ -235,9 +250,16 @@ def read_file_range_context(
             result.append(
                 {
                     "file_path": str(snapshot.get("file_path") or path),
-                    "file_revision": str(snapshot.get("file_revision") or "")[:16],
+                    "file_revision": str(snapshot.get("file_revision") or ""),
                     "total_lines": int(snapshot.get("total_lines") or 0),
                     "session_cache_reused": bool(snapshot.get("session_cache_reused", False)),
+                    "has_full_content": _has_full_span(snapshot),
+                    "shown_ranges_are_excerpt_only": not (
+                        len(excerpts) == 1
+                        and excerpts[0]["start_line"] == 1
+                        and excerpts[0]["end_line"] == int(snapshot.get("total_lines") or 0)
+                        and not excerpts[0]["excerpt_truncated"]
+                    ),
                     "ranges": excerpts,
                 }
             )
@@ -255,6 +277,40 @@ def read_file_range_context(
         if remaining <= 0:
             break
     return result
+
+
+def build_read_projection(state: AgentState, *, total_chars: int = 12000, file_limit: int = 4) -> dict[str, Any]:
+    """Keep prompt source and its coverage metadata in one projection."""
+    files = read_file_range_context(state, total_chars=total_chars, file_limit=file_limit) if file_limit > 0 else []
+    shown: list[dict[str, Any]] = []
+    for item in files:
+        for span in item.get("ranges", []):
+            end = span["end_line"]
+            if span.get("excerpt_truncated") and not span["content"].endswith(("\n", "\r")):
+                end -= 1
+            if end >= span["start_line"]:
+                shown.append({
+                    "file_path": item["file_path"], "file_revision": item["file_revision"],
+                    "start_line": span["start_line"], "end_line": end,
+                })
+    omitted = []
+    for path, snapshot in (state.get("read_file_cache") or {}).items():
+        remaining = merge_ranges(snapshot.get("spans", []))
+        for span in shown:
+            if span["file_path"] == path and span["file_revision"] == snapshot.get("file_revision"):
+                remaining = subtract_range(remaining, span["start_line"], span["end_line"])
+        if remaining:
+            omitted.append({"file_path": path, "ranges": remaining})
+    return {"files": files, "shown_ranges": shown, "omitted_ranges": omitted}
+
+
+def read_range_is_shown(projection: dict[str, Any], coverage: dict[str, Any]) -> bool:
+    spans = [
+        span for span in projection["shown_ranges"]
+        if span["file_path"] == coverage["file_path"]
+        and span["file_revision"] == coverage["file_revision"]
+    ]
+    return range_is_cached({"spans": spans}, *coverage["requested_range"])
 
 
 def validated_cache_summary(state: AgentState, *, limit: int = 20) -> list[dict[str, Any]]:
@@ -288,6 +344,34 @@ def validated_cache_summary(state: AgentState, *, limit: int = 20) -> list[dict[
             }
         )
     return summaries
+
+
+def cached_source_excerpt(
+    state: AgentState,
+    file_path: str,
+    start_line: int,
+    end_line: int,
+    *,
+    max_chars: int = 3000,
+) -> dict[str, Any]:
+    """Show a bounded piece of a rejected cached read during decision repair."""
+    cache = state.get("read_file_cache")
+    snapshot = cache.get(file_path) if isinstance(cache, dict) else None
+    if not isinstance(snapshot, dict) or not range_is_cached(snapshot, start_line, end_line):
+        return {}
+    content = _content_for_range(snapshot, start_line, end_line)
+    excerpt_truncated = len(content) > max_chars
+    if excerpt_truncated:
+        content = content[:max_chars]
+        if "\n" in content:
+            content = content[: content.rfind("\n") + 1]
+    return {
+        "file_path": file_path,
+        "start_line": start_line,
+        "end_line": start_line + max(0, len(content.splitlines()) - 1),
+        "content": content,
+        "excerpt_truncated": excerpt_truncated,
+    }
 
 
 def candidate_evidence_packets(
@@ -407,7 +491,7 @@ def _candidate_location_range(
 ) -> tuple[int, int] | None:
     total_lines = max(1, int(snapshot.get("total_lines") or 1))
     normalized = _normalize_source_range(location, total_lines, padding)
-    if normalized and _range_is_covered(snapshot, *normalized):
+    if normalized and range_is_cached(snapshot, *normalized):
         return normalized
     symbol = str(location.get("symbol") or "").strip()
     if not symbol:
@@ -417,7 +501,7 @@ def _candidate_location_range(
         return None
     start = max(1, line - padding)
     end = min(total_lines, line + padding * 2)
-    return (start, end) if _range_is_covered(snapshot, start, end) else None
+    return (start, end) if range_is_cached(snapshot, start, end) else None
 
 
 def _test_source_evidence(
@@ -475,6 +559,15 @@ def _source_ranges_for_file(
 ) -> list[tuple[int, int, str]]:
     total_lines = max(1, int(snapshot.get("total_lines") or 1))
     candidates: list[tuple[int, int, str]] = []
+    last_read = state.get("last_read") or {}
+    if (
+        last_read.get("file_path") == file_path
+        and last_read.get("file_revision") == snapshot.get("file_revision")
+    ):
+        start = int(last_read.get("start_line") or 1)
+        end = int(last_read.get("complete_end_line", last_read.get("end_line") or start))
+        if range_is_cached(snapshot, start, end):
+            return [(start, end, "last_requested_read")]
 
     for item in reversed(state.get("edit_results", []) or []):
         if not isinstance(item, dict):
@@ -515,7 +608,7 @@ def _source_ranges_for_file(
             candidates.append((*normalized, "cached_focus"))
 
     spans = [item for item in snapshot.get("spans", []) if isinstance(item, dict)]
-    if not candidates and _has_full_span(snapshot):
+    if _has_full_span(snapshot):
         content = _content_for_range(snapshot, 1, total_lines)
         if len(content) <= 6000:
             return [(1, total_lines, "validated_full_file")]
@@ -527,7 +620,7 @@ def _source_ranges_for_file(
 
     merged: list[tuple[int, int, str]] = []
     for start, end, reason in candidates:
-        if not _range_is_covered(snapshot, start, end):
+        if not range_is_cached(snapshot, start, end):
             continue
         overlap_index = next(
             (
@@ -574,33 +667,15 @@ def _normalize_source_range(
     return max(1, start - padding), min(total_lines, end + padding)
 
 
-def _range_is_covered(snapshot: dict[str, Any], start: int, end: int) -> bool:
-    return any(
-        int(item.get("start_line") or 1) <= start
-        and int(item.get("end_line") or 0) >= end
-        for item in snapshot.get("spans", []) or []
-        if isinstance(item, dict)
-    )
-
-
 def _content_for_range(snapshot: dict[str, Any], start: int, end: int) -> str:
-    for item in reversed(snapshot.get("spans", []) or []):
-        if not isinstance(item, dict):
-            continue
-        span_start = int(item.get("start_line") or 1)
-        span_end = int(item.get("end_line") or span_start)
-        if span_start > start or span_end < end:
-            continue
-        lines = str(item.get("content") or "").splitlines(keepends=True)
-        return "".join(lines[start - span_start : end - span_start + 1])
-    return ""
+    return content_for_range(snapshot, start, end)
 
 
 def _has_full_span(snapshot: dict[str, Any]) -> bool:
     total_lines = int(snapshot.get("total_lines") or 0)
     if total_lines <= 0:
         return bool(snapshot.get("is_empty", False))
-    return _range_is_covered(snapshot, 1, total_lines)
+    return range_is_cached(snapshot, 1, total_lines)
 
 
 def _compact_file_note(snapshot: dict[str, Any], *, max_chars: int = 180) -> str:

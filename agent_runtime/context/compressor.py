@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from agent_runtime.context.assembler import ContextAssembler
 from agent_runtime.context.cards import ContextDigest, ContextItem
+from agent_runtime.context.active import active_events, incremental_fallback, bound_digest
 from agent_runtime.context.distiller import distill_context_events
 from agent_runtime.context.events import collect_context_events
-from agent_runtime.context.token_counter import estimate_context_tokens
+from agent_runtime.context.token_counter import estimate_context_tokens, estimate_tokens
 from agent_runtime.llm.llm_nodes import LLMJsonNode
 from model.agent.graph import AgentState
 from model.llm import ContextCompressionResponse
@@ -29,6 +31,7 @@ class ContextCompressionPolicy:
     enabled: bool = True
     max_context_tokens: int = 32000
     threshold: float = 0.75
+    target: float = 0.55
     recent_items: int = 8
     min_new_tokens: int = 1200
 
@@ -40,49 +43,7 @@ class ContextCompressionPolicy:
 
 class RuleBasedContextCompressor:
     def compress(self, items: list[ContextItem], state: AgentState) -> ContextDigest:
-        tool_results = [_summarize_tool_call(call) for call in state.get("tool_calls", [])[-12:]]
-        trajectory = state.get("trajectory", [])
-        completed = [
-            f"{step.get('node')}: {step.get('thought')}"
-            for step in trajectory[-8:]
-            if step.get("node") and step.get("thought")
-        ]
-        observations = _summarize_observations(state.get("observations", [])[-10:])
-        memory_refs = _summarize_memory_refs(state.get("session_memory", {}))
-        code_changes = []
-        if state.get("patch_summary"):
-            code_changes.append(str(state["patch_summary"]))
-
-        latest_error = state.get("error")
-        constraints = [
-            f"repo_path={state.get('repo_path', '')}",
-            f"verification_required={bool(state.get('verification_required', True))}",
-            f"verification_capabilities={json.dumps(state.get('verification_capabilities', {}), ensure_ascii=False, default=str)[:800]}",
-        ]
-        if latest_error:
-            constraints.append(f"latest_error={latest_error}")
-
-        return ContextDigest(
-            summary=_first_non_empty(
-                [
-                    f"Task `{state.get('title', '')}` is in step `{state.get('current_step', '')}`.",
-                    "Prior context was compressed from runtime state.",
-                ]
-            ),
-            current_goal=" ".join(
-                part for part in [state.get("title", ""), state.get("description", "")] if part
-            ),
-            constraints=constraints,
-            decisions=[],
-            completed_tasks=completed,
-            open_tasks=_open_tasks(state),
-            key_observations=observations,
-            tool_results=tool_results,
-            code_changes=code_changes,
-            memory_refs=memory_refs,
-            source_item_ids=[item.item_id for item in items],
-            compression_method="rule_based",
-        )
+        return incremental_fallback(items, state)
 
 
 class LLMContextCompressor:
@@ -105,6 +66,13 @@ class LLMContextCompressor:
 
     def compress(self, items: list[ContextItem], state: AgentState) -> ContextDigest:
         fallback_digest = self.fallback.compress(items, state)
+        context = {"items": items, "fallback_digest": fallback_digest}
+        input_size = estimate_tokens(self.node.system_prompt + _build_llm_compression_prompt(state, context))
+        if input_size > int(state.get("_compression_max_tokens", 32000)):
+            logger.bind(task_id=state.get("task_id")).warning(
+                "compression input exceeds budget tokens={}; using deterministic fallback", input_size,
+            )
+            return fallback_digest.with_error("compression_input_exceeds_budget")
         logger.bind(task_id=state.get("task_id")).info(
             "llm context compression requested items={} model={} provider={}",
             len(items),
@@ -140,7 +108,7 @@ class ContextCompressionManager:
     ) -> None:
         self.policy = policy
         self.compressor = compressor
-        self.assembler = ContextAssembler(max_tokens=policy.max_context_tokens)
+        self.assembler = ContextAssembler()
 
     @classmethod
     def from_config(cls, config: DebugAgentConfig) -> "ContextCompressionManager":
@@ -150,6 +118,7 @@ class ContextCompressionManager:
             threshold=config.context_compression_threshold,
             recent_items=config.context_recent_items,
             min_new_tokens=config.context_min_new_tokens,
+            target=config.context_compression_target,
         )
         mode = (config.context_compressor_mode or "rule_based").strip().lower()
         compressor: ContextCompressor
@@ -177,119 +146,84 @@ class ContextCompressionManager:
         return cls(policy=policy, compressor=compressor)
 
     def prepare(self, state: AgentState) -> AgentState:
-        items = collect_context_items(state)
-        raw_items = [item for item in items if item.item_type != "compressed_context"]
-        context_events = collect_context_events(state)
-        distilled_events, memory_candidates = distill_context_events(context_events, state)
-        assembled = self.assembler.assemble(distilled_events, state)
-        token_estimate = estimate_context_tokens(raw_items)
-        threshold_tokens = int(self.policy.max_context_tokens * self.policy.threshold)
-        context_updates = {
-            "context_events": [event.to_dict() for event in context_events],
-            "distilled_events": [event.to_dict() for event in distilled_events],
-            "working_context": assembled.working_context,
-            "archive_context": assembled.archive_context,
-            "context_sections": assembled.context_sections,
-            "memory_candidates": memory_candidates,
-            "compressed_context": _merge_context_text(
-                assembled.working_context,
-                _render_state_digest(state),
-                assembled.archive_context,
-            ),
-        }
-        if not self.policy.enabled:
-            logger.bind(task_id=state.get("task_id")).debug(
-                "context compression disabled items={} estimated_tokens={}",
-                len(items),
-                token_estimate,
-            )
-            return {
-                **state,
-                **context_updates,
-                "context_items": [item.to_dict() for item in items[-self.policy.recent_items :]],
-            }
-        if token_estimate < threshold_tokens:
-            logger.bind(task_id=state.get("task_id")).debug(
-                "context compression skipped items={} estimated_tokens={} threshold_tokens={}",
-                len(items),
-                token_estimate,
-                threshold_tokens,
-            )
-            return {
-                **state,
-                **context_updates,
-                "context_items": [item.to_dict() for item in items[-self.policy.recent_items :]],
-            }
-
-        pinned = [item for item in items if item.pinned]
-        recent = items[-self.policy.recent_items :]
-        recent_ids = {item.item_id for item in recent}
-        pinned_ids = {item.item_id for item in pinned}
-        already_compressed = set(
-            (state.get("context_digest") or {}).get("source_item_ids", [])
-        )
-        already_compressed.update(_string_set(state.get("compressed_context_item_ids")))
-        compressible = [
-            item
-            for item in items
-            if item.item_id not in recent_ids
-            and item.item_id not in pinned_ids
-            and item.item_id not in already_compressed
-            and item.item_type != "compressed_context"
-        ]
-        if not compressible:
-            logger.bind(task_id=state.get("task_id")).debug(
-                "context compression skipped; no new compressible items items={}",
-                len(items),
-            )
-            return {
-                **state,
-                **context_updates,
-                "context_items": [item.to_dict() for item in items],
-            }
-        new_token_estimate = estimate_context_tokens(compressible)
-        if state.get("context_digest") and new_token_estimate < self.policy.min_new_tokens:
-            logger.bind(task_id=state.get("task_id")).debug(
-                "context compression skipped; new compressible tokens below minimum new_tokens={} min_new_tokens={}",
-                new_token_estimate,
-                self.policy.min_new_tokens,
-            )
-            return {
-                **state,
-                **context_updates,
-                "compressed_context_item_ids": sorted(already_compressed),
-                "context_items": [item.to_dict() for item in pinned + recent],
-            }
-
-        logger.bind(task_id=state.get("task_id")).info(
-            "context compression started items={} compressible={} estimated_tokens={} new_tokens={} threshold_tokens={}",
-            len(items),
-            len(compressible),
-            token_estimate,
-            new_token_estimate,
-            threshold_tokens,
-        )
-        digest = self.compressor.compress(compressible, state)
-        compressed_item_ids = sorted(already_compressed.union(digest.source_item_ids))
-        logger.bind(task_id=state.get("task_id")).info(
-            "context compression completed method={} source_items={} total_source_items={}",
-            digest.compression_method,
-            len(digest.source_item_ids),
-            len(compressed_item_ids),
-        )
+        events = collect_context_events(state)
+        distilled, candidates = distill_context_events(events, state)
+        consumed = set(state.get("compressed_context_item_ids") or [])
+        pending, items = active_events(events, distilled, consumed)
+        assembled = self.assembler.assemble(pending, state)
         return {
             **state,
-            **context_updates,
-            "context_digest": digest.to_dict(),
-            "compressed_context_item_ids": compressed_item_ids,
+            "context_events": [event.to_dict() for event in events],
+            "distilled_events": [event.to_dict() for event in distilled],
+            "memory_candidates": candidates,
+            "context_pending_items": [item.to_dict() for item in items],
+            "context_items": [item.to_dict() for item in items],
+            "context_sections": assembled.context_sections,
+            "working_context": assembled.working_context,
+            "archive_context": assembled.archive_context,
             "compressed_context": _merge_context_text(
-                assembled.working_context,
-                digest.render_for_prompt(),
-                assembled.archive_context,
+                _render_state_digest(state), assembled.working_context, assembled.archive_context,
             ),
-            "context_items": [item.to_dict() for item in pinned + recent],
         }
 
+    def fit_prompt(self, state: AgentState, render: Callable[[], str], shrink_source: Callable[[], bool]) -> None:
+        """Measure the rendered request once; at most one semantic compression per loop."""
+        before = estimate_tokens(render())
+        threshold = int(self.policy.max_context_tokens * self.policy.threshold)
+        target = int(self.policy.max_context_tokens * self.policy.target)
+        if not self.policy.enabled or before < threshold:
+            state["context_budget"] = {
+                **(state.get("context_budget") or {}),
+                "before": before, "after": before, "compressed": False,
+            }
+            logger.bind(task_id=state.get("task_id")).debug(
+                "context budget tokens={} threshold={} compression_skipped=true", before, threshold,
+            )
+            return
+        items = [ContextItem(**item) for item in state.get("context_pending_items", [])]
+        loop = int(state.get("loop_count", 0))
+        previous_budget = state.get("context_budget") or {}
+        state["_compression_max_tokens"] = self.policy.max_context_tokens
+        state["_compression_target_tokens"] = max(0, target - estimate_tokens(
+            render().replace(str(state.get("compressed_context") or ""), "")
+        ))
+        if items and previous_budget.get("compressed_loop") != loop:
+            # Too little new information uses deterministic consolidation instead of another LLM call.
+            digest = (
+                self.compressor.compress(items, state)
+                if estimate_context_tokens(items) >= self.policy.min_new_tokens
+                else incremental_fallback(items, state)
+            )
+            digest = bound_digest(digest, state["_compression_target_tokens"])
+            state["context_digest"] = digest.to_dict()
+            consumed = set(state.get("compressed_context_item_ids") or [])
+            consumed.update(item.item_id for item in items)
+            state["compressed_context_item_ids"] = sorted(consumed)
+            state["context_pending_items"] = []
+            state["context_items"] = []
+            state["working_context"] = ""
+            state["archive_context"] = ""
+            state["context_sections"] = {}
+            state["compressed_context"] = digest.render_for_prompt()
+        elif state.get("context_digest"):
+            digest = bound_digest(ContextDigest.from_dict(state["context_digest"]), state["_compression_target_tokens"])
+            state["context_digest"] = digest.to_dict()
+            state["compressed_context"] = digest.render_for_prompt()
+        after = estimate_tokens(render())
+        while after > target and shrink_source():
+            after = estimate_tokens(render())
+        state["context_budget"] = {
+            "before": before, "after": after, "target": target,
+            "compressed": True,
+            "target_met": after <= target, "compressed_loop": loop,
+            "consumed_events": len(items),
+        }
+        logger.bind(task_id=state.get("task_id")).info(
+            "context budget before={} after={} target={} target_met={} new_events={}",
+            before, after, target, after <= target, len(items),
+        )
+        if after > self.policy.max_context_tokens:
+            raise RuntimeError("Required prompt content exceeds context_max_tokens after bounded compression.")
 
 def collect_context_items(state: AgentState) -> list[ContextItem]:
     items: list[ContextItem] = []
@@ -453,11 +387,14 @@ def _summarize_payload(value: Any) -> Any:
         }
     if "content" in value and "file_path" in value:
         content = str(value.get("content") or "")
+        excerpt = content[:1000]
         return {
             "file_path": value.get("file_path"),
             "content_chars": len(content),
-            "excerpt": content[:1000],
-            "truncated": value.get("truncated"),
+            "excerpt": excerpt,
+            # 标记文件是否被截断
+            "source_truncated": bool(value.get("truncated", False)),
+            "excerpt_truncated": len(excerpt) < len(content),
             "start_line": value.get("start_line"),
             "end_line": value.get("end_line"),
             "total_lines": value.get("total_lines"),
@@ -530,16 +467,14 @@ def _build_llm_compression_prompt(
     context: dict[str, Any],
 ) -> str:
     items = context.get("items") or []
-    fallback_digest = context.get("fallback_digest")
-    if not isinstance(fallback_digest, ContextDigest):
-        fallback_digest = RuleBasedContextCompressor().compress(items, state)
     item_text = "\n\n".join(
         f"[{idx}] role={item.role} type={item.item_type} pinned={item.pinned}\n{item.content[:4000]}"
         for idx, item in enumerate(items, start=1)
     )
     return render_prompt(
         "user/context_compressor.md",
-        fallback_digest=json.dumps(fallback_digest.to_dict(), ensure_ascii=False),
+        previous_digest=json.dumps(state.get("context_digest") or {}, ensure_ascii=False),
+        target_tokens=state.get("_compression_target_tokens", 4000),
         title=state.get("title", ""),
         description=state.get("description", ""),
         current_step=state.get("current_step", ""),

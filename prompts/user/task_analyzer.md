@@ -66,6 +66,8 @@ Return exactly one JSON object:
   "user_update": "brief progress message or empty string"
 }
 
+search_hints must be a list of strings; use [] when there are no grounded search terms.
+
 Do not invent repository facts. Keep historical findings separate from current
 acceptance criteria. Do not include completion criteria, dependencies, evidence
 policies, obligations, or execution queues.

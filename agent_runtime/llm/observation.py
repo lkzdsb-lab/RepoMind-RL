@@ -142,6 +142,7 @@ def _observation_prompt(state: AgentState, context: dict[str, Any]) -> str:
     return render_prompt(
         "user/observer.md",
         observation_mode="full" if full_state else "delta",
+        draft_findings=json.dumps(state.get("draft_findings", []), ensure_ascii=False),
         title=state.get("title", ""),
         description=state.get("description", ""),
         task_analysis=json.dumps(state.get("task_analysis", {}), ensure_ascii=False) if full_state else "{}",

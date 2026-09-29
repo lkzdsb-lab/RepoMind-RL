@@ -12,7 +12,8 @@ from typing import Any, Dict, Literal
 from config import FileConfig
 from agent_runtime.execution.contracts import ExecutionTaskInput
 from agent_runtime.execution.runner import run_execution_task
-from agent_runtime.memory.file_cache import cache_after_patch, cache_read_result
+from agent_runtime.memory.file_cache import cache_after_patch, cache_read_result, cached_read_result
+from loguru import logger
 from model.agent.tool_registry import ToolRegistryBase
 from model.agent.tools import ToolSpec
 from tools.code_tools.code import search_code
@@ -66,6 +67,26 @@ class ReadFileInput(ToolInput):
     max_chars: int = Field(default=8000, ge=1, le=200000)
     start_line: int | None = Field(default=None, ge=1)
     end_line: int | None = Field(default=None, ge=1)
+
+
+def run_read_file(repo: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    context = args.get("_runtime_context") or {}
+    output = cached_read_result(
+        {"repo_path": repo, "read_file_cache": context.get("read_file_cache", {})}, args,
+    )
+    if output is None:
+        output = read_file(
+            repo, str(args.get("file_path", "")),
+            max_chars=int(args.get("max_chars", 8000)),
+            start_line=args.get("start_line"), end_line=args.get("end_line"),
+        )
+        output["source"] = "disk"
+    logger.debug(
+        "file read source={} file={} requested={}:{} returned={}:{} truncated={}",
+        output.get("source"), args.get("file_path"), args.get("start_line"), args.get("end_line"),
+        output.get("start_line"), output.get("end_line"), output.get("truncated"),
+    )
+    return output
 
 
 def reduce_read_file_output(
@@ -887,13 +908,7 @@ class ToolRegistry(ToolRegistryBase):
                 name="read_file",
                 description="Read a repository file by relative path.",
                 reducer=reduce_read_file_output,
-                runner=lambda repo, args: read_file(
-                    repo,
-                    str(args.get("file_path", "")),
-                    max_chars=int(args.get("max_chars", 8000)),
-                    start_line=args.get("start_line"),
-                    end_line=args.get("end_line"),
-                ),
+                runner=run_read_file,
                 input_schema=ReadFileInput,
                 permissions=["repo:read"],
             )

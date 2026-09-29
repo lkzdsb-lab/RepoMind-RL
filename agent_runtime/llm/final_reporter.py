@@ -48,12 +48,12 @@ class RuleBasedFinalReporter:
             f"已编辑文件：{len(edited_files)} 个",
             "有 patch" if has_patch else "没有 patch",
         ]
-        if not _verification_required(state):
-            summary_parts.append("LLM 判定无需运行验证命令")
-        elif test_results:
+        if test_results:
             summary_parts.append(f"验证结果：{test_results[-1]}")
         else:
             summary_parts.append("验证未运行")
+        if not _verification_required(state):
+            summary_parts.append("本任务未设置修复后验证门槛")
         if state.get("verification_stale"):
             summary_parts.append("最新修改尚未通过验证")
         llm_errors = state.get("llm_errors")
@@ -61,7 +61,7 @@ class RuleBasedFinalReporter:
             latest_error = llm_errors[-1] if isinstance(llm_errors[-1], dict) else {}
             category = str(latest_error.get("category") or "unknown")
             summary_parts.append(f"LLM 调用异常：{category}")
-        return {
+        report = {
             "summary": "；".join(summary_parts) + "。",
             "findings": _confirmed_finding_claims(state),
             "work_done": work_done,
@@ -73,6 +73,27 @@ class RuleBasedFinalReporter:
             "next_steps": next_steps,
             "source": "rule_based",
         }
+        if state.get("completion_review_failed"):
+            judgement = state.get("completion_judgement") or {}
+            resolved_ids = {item.get("candidate_id") for item in judgement.get("reviewed_findings", [])
+                            if item.get("verdict") in {"confirmed", "rejected"}}
+            pending = [dict(item) for item in state.get("draft_findings", [])
+                       if item.get("candidate_id") not in resolved_ids]
+            lines = [f"任务未完成：{state.get('error') or '完成审查未通过'}。",
+                     "本轮工具操作：" + "；".join(work_done) + "。",
+                     f"保留 {len(pending)} 条待完成审查的候选发现，尚不能作为确认结论："]
+            for item in pending:
+                locations = ", ".join(
+                    f"{loc.get('file_path', '')}:{loc.get('start_line', '')}"
+                    for loc in item.get("locations", [])
+                )
+                lines.append(f"- [待审查] {item.get('claim', '')} ({locations})")
+            if not pending:
+                lines[-1] = "没有待审查的候选发现；本次任务仍未通过完成审查。"
+            report.update(summary="\n".join(lines), pending_findings=pending,
+                          review_status="incomplete", command_results=_command_result_summaries(state),
+                          completion_review_error=judgement.get("error") or {"category": "incomplete", "message": state.get("error", "")})
+        return report
 
 
 @dataclass
@@ -133,7 +154,7 @@ def _final_report_prompt(state: AgentState, context: dict[str, Any]) -> str:
         plan_mode_evaluation=state.get("plan_mode_evaluation", ""),
         plan=json.dumps(state.get("plan", []), ensure_ascii=False),
         candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),
-        read_files=json.dumps(read_file_summaries(state), ensure_ascii=False, default=str),
+        read_files=json.dumps(read_file_summaries({**state, "read_file_cache": {}, "read_file_order": []}), ensure_ascii=False, default=str),
         test_results=json.dumps(_test_result_summaries(state), ensure_ascii=False),
         edit_results=json.dumps(state.get("edit_results", [])[-5:], ensure_ascii=False, default=str),
         change_summaries=json.dumps(
@@ -221,13 +242,10 @@ def _work_done_from_tools(tool_names: list[str]) -> list[str]:
         label = labels.get(name, name)
         if label and label not in work_done:
             work_done.append(label)
-    return work_done or ["完成任务分析和运行状态整理"]
+    return work_done or ["本轮没有执行仓库工具"]
 
 
 def _test_result_summaries(state: AgentState) -> list[str]:
-    if not _verification_required(state):
-        reason = str(state.get("verification_reason") or "LLM decided verification is not required.")
-        return [f"跳过验证命令：{reason}"]
     results = []
     for item in state.get("test_results", [])[-5:]:
         if not isinstance(item, dict):

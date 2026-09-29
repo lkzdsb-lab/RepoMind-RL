@@ -12,7 +12,15 @@ from agent_runtime.actions import ActionArgumentValidator, ActionFactory
 from agent_runtime.llm.llm_nodes import LLMJsonNode, publish_user_update
 from agent_runtime.memory.retrieval import context_for_audience
 from agent_runtime.llm.findings import normalize_finding_candidates
-from ext.tool_summaries import read_file_range_context
+from ext.tool_summaries import (
+    cached_source_excerpt,
+    build_read_projection,
+    read_range_is_shown,
+    validated_cache_summary,
+)
+from agent_runtime.memory.file_cache import cached_read_coverage, source_revision
+from agent_runtime.context.analysis_progress import merge_analysis_updates, analysis_fingerprint, evidence_request_key
+from agent_runtime.llm.findings import merge_finding_candidates
 from agent_runtime.rl.action_space import ActionSpace
 from agent_runtime.rl.state_encoder import StateEncoder
 from config import LLMConfig
@@ -42,6 +50,7 @@ class LLMActionPolicy:
     encoder: StateEncoder | None = None
     q_top_k: int = 3
     deny_threshold: float = -0.5
+    context_manager: Any = None
     MAX_DECISION_ATTEMPTS = 2
 
     def __post_init__(self) -> None:
@@ -87,18 +96,71 @@ class LLMActionPolicy:
         decision_feedback: dict[str, Any] = {}
         last_error = "LLM did not produce a valid action."
         required_action = ""
+        read_projection = build_read_projection(state)
+        source_budget = 12000
+
+        def render_user_prompt() -> str:
+            return _action_prompt(
+                state, legal_specs, qtable_context,
+                decision_feedback=decision_feedback, read_projection=read_projection,
+            )
+
+        def shrink_source() -> bool:
+            nonlocal source_budget
+            if not read_projection["files"]:
+                return False
+            source_budget //= 2
+            replacement = build_read_projection(
+                state, total_chars=max(1000, source_budget),
+                file_limit=4 if source_budget >= 1000 else 0,
+            )
+            read_projection.clear()
+            read_projection.update(replacement)
+            return True
+        logger.bind(task_id=state.get("task_id")).debug(
+            "read source projection shown={} omitted={}",
+            read_projection["shown_ranges"], read_projection["omitted_ranges"],
+        )
         # 最多重读执行一次 action
         for attempt in range(1, self.MAX_DECISION_ATTEMPTS + 1):
+            if self.context_manager is not None:
+                self.context_manager.fit_prompt(
+                    state, lambda: self.node.system_prompt + "\n" + render_user_prompt(), shrink_source,
+                )
+            logger.bind(task_id=state.get("task_id")).debug(
+                "decision source projection shown={} omitted={}",
+                read_projection["shown_ranges"], read_projection["omitted_ranges"],
+            )
             data = self.node.run(
                 state,
                 {
                     "legal_specs": legal_specs,
                     "guard": qtable_context,
                     "decision_feedback": decision_feedback,
+                    "read_projection": read_projection,
+                    "rendered_prompt": render_user_prompt(),
                 },
                 publish_update=False,
             )
             action_name = str(data.get("action", "")).strip()
+            records, analysis_errors = merge_analysis_updates(
+                state, data.get("analysis_updates", []), read_projection["shown_ranges"],
+                merge_finding_candidates(state.get("draft_findings", []), data.get("draft_findings", [])),
+            )
+            if analysis_errors:
+                last_error = "; ".join(analysis_errors)
+                decision_feedback = {"reason": "invalid_analysis_update", "errors": analysis_errors}
+                continue
+            analysis_changed = analysis_fingerprint(records) != analysis_fingerprint(state.get("analysis_records", []))
+            # Valid analysis survives rejection/repair of the accompanying action.
+            if analysis_changed:
+                state["analysis_records"] = records
+                state["analysis_progress"] = {**(state.get("analysis_progress") or {}), "no_progress": 0}
+                logger.bind(task_id=state.get("task_id")).debug("analysis records accepted count={}", len(records))
+            findings = merge_finding_candidates(state.get("draft_findings", []), data.get("draft_findings", []))
+            if findings != state.get("draft_findings", []):
+                state["draft_findings"] = findings
+                state["analysis_progress"] = {**(state.get("analysis_progress") or {}), "no_progress": 0}
             reason = str(data.get("reason", "")).strip()
             if required_action and action_name != required_action:
                 last_error = (
@@ -260,7 +322,49 @@ class LLMActionPolicy:
                 )
                 continue
 
-            if _repeats_last_action(state, selected_spec.name, action_args):
+            # 处理工具调用却没有进展的情况
+            progress = state.get("analysis_progress") or {}
+            repeated_request = evidence_request_key(selected_spec.name, action_args) in progress.get("requests", [])
+            # 1.先过滤掉源文件被修改的请求
+            if repeated_request and selected_spec.name == "read_file":
+                path = str(action_args.get("file_path") or "")
+                repeated_request = source_revision(state, path) == progress.get("read_revisions", {}).get(path)
+            # 2.再过滤掉三次都没有进展的请求
+            if repeated_request and int(progress.get("no_progress", 0)) >= 3:
+                decision_feedback = {
+                    "reason": "repeated_evidence_without_analysis_progress",
+                    "instruction": "Several actions revisited unchanged evidence. Submit source-grounded analysis_updates, inspect new evidence, or choose finish for completion review.",
+                }
+                logger.bind(task_id=state.get("task_id")).warning(
+                    "repeated evidence blocked action={} no_progress={} attempt={}",
+                    selected_spec.name, progress.get("no_progress"), attempt,
+                )
+                if attempt == self.MAX_DECISION_ATTEMPTS:
+                    return self.action_factory.create("finish", thought="Repeated unchanged evidence requires completion review.")
+                continue
+            if selected_spec.name == "read_file":
+                cached = cached_read_coverage(state, action_args)
+                if cached and read_range_is_shown(read_projection, cached):
+                    last_error = f"Requested read_file range is already shown in the current prompt at revision {cached['file_revision']}."
+                    decision_feedback = {
+                        "rejected_action": "read_file",
+                        "reason": "read_range_already_shown",
+                        "cached_file": cached,
+                        "cached_source": cached_source_excerpt(
+                            state,
+                            cached["file_path"],
+                            *cached["requested_range"],
+                        ),
+                        "instruction": "This range is already fully shown in the current prompt. Use it to analyze, report findings, or choose a range not shown. Changing max_chars adds no information.",
+                        "legal_actions": list(legal_by_name),
+                    }
+                    logger.bind(task_id=state.get("task_id")).warning(
+                        "llm action read rejected reason=already_shown attempt={}/{} file={} cached_ranges={}",
+                        attempt, self.MAX_DECISION_ATTEMPTS, cached["file_path"], cached["covered_ranges"],
+                    )
+                    continue
+
+            if selected_spec.name not in {"read_file", "finish"} and _repeats_last_action(state, selected_spec.name, action_args):
                 last_error = f"Selected action `{selected_spec.name}` exactly repeats the previous call."
                 decision_feedback = {
                     "rejected_action": selected_spec.name,
@@ -311,6 +415,7 @@ class LLMActionPolicy:
                     },
                     "plan_update": data.get("plan_update", {}),
                     "draft_findings": data.get("draft_findings", []),
+                    "analysis_records": records,
                     "llm_guard": {
                         "selected_action": selected_spec.name,
                         "guard": guard.to_dict(),
@@ -385,6 +490,8 @@ def _action_node_prompt(
     state: AgentState,
     context: dict[str, Any],
 ) -> str:
+    if "rendered_prompt" in context:
+        return context["rendered_prompt"]
     legal_specs = context.get("legal_specs") or []
     guard = context.get("guard")
     if not isinstance(guard, GuardDecision):
@@ -401,6 +508,7 @@ def _action_node_prompt(
         legal_specs,
         guard,
         decision_feedback=context.get("decision_feedback") or {},
+        read_projection=context.get("read_projection"),
     )
 
 
@@ -441,6 +549,7 @@ def _normalize_action_choice(
         "confidence": confidence,
         "plan_update": _normalize_plan_update(data.get("plan_update")),
         "draft_findings": normalize_finding_candidates(data.get("draft_findings")),
+        "analysis_updates": data.get("analysis_updates", []),
     }
 
 
@@ -509,12 +618,14 @@ def _action_prompt(
     guard: GuardDecision,
     *,
     decision_feedback: dict[str, Any],
+    read_projection: dict[str, Any] | None = None,
 ) -> str:
     """
         构造每个 action 的 prompt 格式
     """
     legal = _compact_legal_actions(state, legal_specs)
     constraints = _action_constraints(state, guard, legal_specs)
+    read_projection = read_projection if read_projection is not None else build_read_projection(state)
     return render_prompt(
         "user/action_policy.md",
         title=state.get("title", ""),
@@ -573,16 +684,20 @@ def _action_prompt(
             1800,
         ),
         candidate_files=json.dumps(state.get("candidate_files", []), ensure_ascii=False),
+        analysis_records=json.dumps(state.get("analysis_records", []), ensure_ascii=False),
+        analysis_progress=json.dumps(state.get("analysis_progress", {}), ensure_ascii=False),
+        read_file_inventory=json.dumps(
+            validated_cache_summary(state, limit=20), ensure_ascii=False, default=str,
+        ),
         read_files=json.dumps(
-            read_file_range_context(
-                state,
-                file_limit=4,
-                ranges_per_file=3,
-                total_chars=12000,
-            ),
+            read_projection["files"],
             ensure_ascii=False,
             default=str,
         ),
+        read_file_projection=json.dumps({
+            "shown_ranges": read_projection["shown_ranges"],
+            "omitted_ranges": read_projection["omitted_ranges"],
+        }, ensure_ascii=False),
         test_results=json.dumps(state.get("test_results", [])[-2:], ensure_ascii=False, default=str),
         patch_summary=state.get("patch_summary"),
         editing_enabled=json.dumps(bool(state.get("editing_enabled", False))),
@@ -597,7 +712,7 @@ def _action_prompt(
         long_term_memory_context=context_for_audience(
             state, "action", max_chars=6000
         ),
-        compressed_context=str(state.get("compressed_context", ""))[:2500],
+        compressed_context=str(state.get("compressed_context", "")),
         legal_actions=json.dumps(legal, ensure_ascii=False),
         action_constraints=json.dumps(constraints, ensure_ascii=False, default=str),
         decision_feedback=json.dumps(decision_feedback, ensure_ascii=False, default=str),

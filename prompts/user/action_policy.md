@@ -30,7 +30,11 @@ pending_resolution={{ pending_resolution }}
 
 attention_focus={{ attention_focus }}
 candidate_files={{ candidate_files }}
+analysis_records={{ analysis_records }}
+analysis_progress={{ analysis_progress }}
+read_file_inventory={{ read_file_inventory }}
 read_files={{ read_files }}
+read_file_projection={{ read_file_projection }}
 selected_code_context_summary={{ selected_code_context_summary }}
 test_results={{ test_results }}
 patch_summary={{ patch_summary }}
@@ -50,8 +54,12 @@ decision_feedback={{ decision_feedback }}
 # Decision Rules
 
 - Choose exactly one action from legal_actions. Never invent an action.
+- Return analysis_updates after analyzing shown source, including when no defect was found. Each update needs file_path, full file_revision from shown_ranges, start_line, end_line, dimension, conclusion, status (partial or complete), finding_ids and open_questions. A read alone is not completed analysis. Complete means the stated range and dimension are resolved; use partial when questions remain.
+- Reuse non-stale analysis_records even when their source is omitted in this prompt. Revisit analyzed code only to answer a concrete new question or reconcile evidence. Omitted source does not reset analysis progress. Do not repeatedly reconfirm unchanged conclusions before finish.
+- Finding IDs in analysis_updates must be existing runtime candidate IDs; leave finding_ids empty for a new finding whose runtime ID is not yet assigned.
 - Always return top-level confidence as a number between 0 and 1. It is required for every action; never omit it, set it to null, or place it inside action_input.
 - When decision_feedback contains required_action, keep that action and repair only its action_input using validation_errors and expected_input_fields.
+- When decision_feedback.reason is read_range_already_shown, the requested range is already fully present in this prompt. Use that source to continue analysis; changing max_chars adds no information. Decision repair attempts are bounded.
 - Build action_input from the selected action's flat input_fields list. Do not use aliases such as search_query, and do not place top-level response fields inside action_input. Required fields must be present and valid.
 - For a ranged read, return separate named fields, for example: `{"file_path":"server.go","start_line":30,"end_line":131,"max_chars":12000}`. Never encode a line range as an unnamed array.
 - The current task_brief is authoritative. Historical memory supplies context but never grants permission to edit.
@@ -67,7 +75,7 @@ decision_feedback={{ decision_feedback }}
 - Do not repeat an identical command when repository state and evidence have not changed.
 - After list_files identifies concrete files, read the relevant candidates instead of listing or searching for the same files again. A deterministic repository lookup cannot be repeated until an edit changes repository evidence.
 - Decide the necessary file scope yourself. Prefer focused line ranges for large files and full reads only when whole-file structure matters.
-- The read_files section contains exact source ranges from the current validated cache. Reuse them instead of reading the same file again when they cover the required code.
+- read_file_inventory describes cached coverage; read_files contains the source actually shown in this prompt. read_file_projection lists shown_ranges and omitted_ranges. If needed source is cached but omitted, request a focused read_file range: the runtime can return it from cache. Reuse ranges already fully shown instead of reading them again. A successful read does not itself mean its code has been analyzed.
 - Before patching, ensure every exact old_text anchor appears in source read during this run. The runtime validates this requirement.
 - Copy patch old_text exactly from one supplied source range. Never reconstruct an anchor from memory, plans, summaries, or historical findings. If the required source is absent, request a focused read_file range.
 - After a successful patch, verification_stale becomes true. You may inspect or patch further, but finish remains invalid until the latest edit is successfully verified.
@@ -75,6 +83,7 @@ decision_feedback={{ decision_feedback }}
 - For implement intent, use Plan Mode before the first patch. After it is approved, continue to patch, inspect, and verify as evidence requires.
 - Use request_user_input only when repository tools cannot resolve a concrete ambiguity.
 - When completion_judgement requests more evidence for a draft finding, use its focused recommended action before attempting finish again.
+- When completion_judgement.cached is true, the runtime reused a successful review because the evidence is unchanged. Address its missing_evidence or recommended_next_action; rewriting the plan or calling finish again adds no evidence. Repeated unchanged finish requests terminate the run as incomplete.
 - When work_plan changes, return plan_update with exactly steps, current_focus, and open_questions. Each step requires id, description, and status; status must be pending, in_progress, done, or blocked. Include the complete current step list. Return an empty plan_update when nothing changed. Do not claim a step is done without evidence.
 
 # Output
@@ -87,9 +96,10 @@ Return exactly one JSON object:
   "action_input": {},
   "uncertainty_questions": [],
   "confidence": 0.0,
+  "analysis_updates": [],
   "draft_findings": [
     {
-      "candidate_id": "optional; runtime assigns the stable id",
+      "candidate_id": "reuse the existing ID for an update; empty string for a new defect",
       "claim": "candidate conclusion to review",
       "locations": [
         {
@@ -125,5 +135,9 @@ choosing finish, include any additional distinct issue not already present in
 draft_findings. Never omit an existing candidate to make completion easier.
 Include precise current-run file locations and related test names when
 available. Do not hide a candidate merely because its confidence is low.
+
+For an existing defect, reuse its exact candidate_id from draft_findings when adding
+evidence, correcting or rewording the claim. New test evidence does not create a new
+defect. Different root causes in the same file/function must remain separate candidates.
 
 Keep plan_update empty when no plan state changed. Do not reveal chain-of-thought.

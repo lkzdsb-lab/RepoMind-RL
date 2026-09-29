@@ -62,9 +62,17 @@ class AgentState(TypedDict, total=False):
     current_step: str
 
     candidate_files: List[str] # llm 想要调用的 files
-    # todo 考虑使用本地缓存实现
     read_file_cache: Dict[str, Dict[str, Any]]
     read_file_order: List[str]
+    last_read: Dict[str, Any]
+    # 保存文件版本、行范围、分析维度、结论和未决问题
+    analysis_records: List[Dict[str, Any]]
+    # 会跨轮记录读文件和执行命令得到的证据
+    analysis_progress: Dict[str, Any]
+    context_pending_items: List[Dict[str, Any]]
+    context_budget: Dict[str, Any]
+    _compression_target_tokens: int
+    _compression_max_tokens: int
     file_cache_access_seq: int
     file_cache_last_touch_loop: int
     code_context: Dict[str, Any]
@@ -93,6 +101,12 @@ class AgentState(TypedDict, total=False):
     pending_user_questions: List[str]
     needs_user_input_reason: str
     completion_judge_continue_count: int
+    completion_review_failure_count: int
+    completion_review_unchanged_count: int
+    completion_review_attempts: List[Dict[str, Any]]
+    completion_review_cache: Dict[str, Any]
+    completion_review_failed: bool
+    completion_rule_gate_count: int
     user_inputs: List[Dict[str, Any]]
     require_step_approval: bool
     pending_step_approval: Dict[str, Any]

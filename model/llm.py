@@ -1,9 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, Field, field_validator
+
+
+def _empty_text_if_null(value: Any) -> Any:
+    return "" if value is None else value
+
+
+def _empty_list_if_null(value: Any) -> Any:
+    return [] if value is None else value
+
+
+EmptyText = Annotated[str, BeforeValidator(_empty_text_if_null)]
+EmptyStringList = Annotated[list[str], BeforeValidator(_empty_list_if_null)]
 
 
 def _coerce_score(value: Any) -> Any:
@@ -33,7 +45,7 @@ class TaskAnalysisResponse(BaseModel):
     acceptance_criteria: list[str]
     risk_notes: list[str]
     review_focus: list[str] = Field(default_factory=list)
-    search_hints: list[str]
+    search_hints: EmptyStringList = Field(default_factory=list)
     historical_context: list[str] = Field(default_factory=list)
     user_update: str = ""
 
@@ -174,15 +186,15 @@ class ReviewedFindingResponse(BaseModel):
     claim: str
     evidence_refs: list[str] = Field(default_factory=list)
     reason: str = ""
-    recommended_next_action: str = ""
+    recommended_next_action: EmptyText = ""
 
 class CompletionJudgeResponse(BaseModel):
-    decision: Literal["complete", "needs_user_input", "continue"] = "continue"
+    decision: Literal["complete", "needs_user_input", "continue"]
     reason: str = ""
-    questions: list[str] = Field(default_factory=list)
-    suggested_next_action: str = ""
+    questions: EmptyStringList = Field(default_factory=list)
+    suggested_next_action: EmptyText = ""
     reviewed_findings: list[ReviewedFindingResponse] = Field(default_factory=list)
-    missing_evidence: list[str] = Field(default_factory=list)
+    missing_evidence: EmptyStringList = Field(default_factory=list)
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     user_update: str = ""
 
@@ -242,6 +254,18 @@ class PlanUpdateResponse(BaseModel):
     open_questions: list[str] = Field(default_factory=list)
 
 
+class AnalysisUpdateResponse(BaseModel):
+    file_path: str = Field(min_length=1)
+    file_revision: str = Field(min_length=1)
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+    dimension: str = Field(min_length=1, max_length=120)
+    conclusion: str = Field(min_length=1, max_length=1000)
+    finding_ids: list[str] = Field(default_factory=list)
+    open_questions: list[str] = Field(default_factory=list)
+    status: Literal["partial", "complete"]
+
+
 class ActionChoiceResponse(BaseModel):
     action: str = Field(min_length=1)
     reason: str = ""
@@ -250,6 +274,7 @@ class ActionChoiceResponse(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     plan_update: PlanUpdateResponse = Field(default_factory=PlanUpdateResponse)
     draft_findings: list[DraftFindingResponse] = Field(default_factory=list)
+    analysis_updates: list[AnalysisUpdateResponse] = Field(default_factory=list, max_length=20)
     user_update: str = ""
 
     @field_validator("confidence", mode="before")

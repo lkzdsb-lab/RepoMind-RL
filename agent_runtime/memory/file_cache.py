@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 from typing import Any, Iterable
 
 
@@ -85,13 +86,40 @@ def cache_read_result(
         previous["dirty_ranges"] = []
 
     access_seq = next_access_seq(cache, _as_int(state.get("file_cache_access_seq"), 0))
+    last_read = {
+        key: output.get(key)
+        for key in ("file_path", "file_revision", "start_line", "end_line", "requested_end_line", "truncated", "source")
+    }
+    returned_content = str(output.get("content") or "")
+    last_read["complete_end_line"] = _as_int(output.get("end_line"), 0)
+    if output.get("truncated") and not returned_content.endswith(("\n", "\r")):
+        last_read["complete_end_line"] -= 1
+    if output.get("source") == "cache" and previous.get("file_revision") == revision:
+        previous["access_seq"] = access_seq
+        for span in previous.get("spans", []):
+            if ranges_overlap(
+                _as_int(output.get("start_line"), 1), _as_int(output.get("end_line"), 1),
+                span["start_line"], span["end_line"],
+            ):
+                span["access_seq"] = access_seq
+        cache[file_path] = previous
+        return {
+            "read_file_cache": cache,
+            "read_file_order": touch_file_order(state.get("read_file_order"), file_path),
+            "file_cache_access_seq": access_seq,
+            "last_read": last_read,
+        }
     start = max(1, _as_int(output.get("start_line"), 1))
     end = max(start, _as_int(output.get("end_line"), start))
     content = str(output.get("content") or "")
+    if output.get("truncated") and content and not content.endswith(("\n", "\r")):
+        complete = content.splitlines(keepends=True)
+        content = "".join(line for line in complete if line.endswith(("\n", "\r")))
+        end = start + len(content.splitlines()) - 1
     spans = [
         span
         for span in previous.get("spans", [])
-        if not ranges_overlap(start, end, span["start_line"], span["end_line"])
+        if end < start or not ranges_overlap(start, end, span["start_line"], span["end_line"])
     ]
     if content:
         spans.append(make_span(start, end, content, access_seq=access_seq))
@@ -109,7 +137,7 @@ def cache_read_result(
         "line_range_requested": bool(output.get("line_range_requested", False)),
         "is_empty": _as_int(output.get("total_lines"), 0) == 0 and not content,
         "spans": spans,
-        "dirty_ranges": subtract_range(previous.get("dirty_ranges"), start, end),
+        "dirty_ranges": subtract_range(previous.get("dirty_ranges"), start, end) if end >= start else previous.get("dirty_ranges", []),
         "access_seq": access_seq,
         "session_cache_reused": False,
     }
@@ -120,6 +148,104 @@ def cache_read_result(
         "read_file_cache": cache,
         "read_file_order": order,
         "file_cache_access_seq": access_seq,
+        "last_read": last_read,
+    }
+
+
+def cached_read_coverage(state: dict[str, Any], args: dict[str, Any]) -> dict[str, Any] | None:
+    """Return reusable coverage only for the current on-disk file revision."""
+    path = str(args.get("file_path") or "").strip()
+    cache = state.get("read_file_cache")
+    snapshot = cache.get(path) if isinstance(cache, dict) else None
+    if not isinstance(snapshot, dict):
+        return None
+    revision = source_revision(state, path)
+    if not revision or revision != snapshot.get("file_revision"):
+        return None
+    total = _as_int(snapshot.get("total_lines"), 0)
+    start = _as_int(args.get("start_line"), 1) if args.get("start_line") is not None else 1
+    end = _as_int(args.get("end_line"), total) if args.get("end_line") is not None else total
+    if start < 1 or end < start or start > total:
+        return None
+    end = min(end, total)
+    covered = merge_ranges(snapshot.get("spans"))
+    if not range_is_cached(snapshot, start, end):
+        return None
+    return {
+        "file_path": path,
+        "file_revision": revision,
+        "requested_range": [start, end],
+        "covered_ranges": covered[:8],
+        "has_full_content": total > 0 and range_is_cached(snapshot, 1, total),
+    }
+
+
+def source_revision(state: dict[str, Any], path: str) -> str | None:
+    """Hash current source in bounded chunks, also when the cache has evicted it."""
+    root_value = str(state.get("repo_path") or "").strip()
+    if not root_value:
+        return None
+    try:
+        root = Path(root_value).resolve()
+        target = (root / path).resolve()
+        if target != root and root not in target.parents:
+            return None
+        digest = hashlib.sha256()
+        with target.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(65536), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except (OSError, ValueError):
+        return None
+
+
+def range_is_cached(snapshot: dict[str, Any], start: int, end: int) -> bool:
+    """One clean span must contain the entire range used by source projection or read reuse."""
+    if start < 1 or end < start:
+        return False
+    if any(
+        ranges_overlap(start, end, left, right)
+        for left, right in merge_ranges(snapshot.get("dirty_ranges"))
+    ):
+        return False
+    return any(
+        isinstance(span, dict)
+        and _as_int(span.get("start_line"), 0) <= start
+        and _as_int(span.get("end_line"), 0) >= end
+        for span in snapshot.get("spans", []) or []
+    )
+
+
+def content_for_range(snapshot: dict[str, Any], start: int, end: int) -> str:
+    if not range_is_cached(snapshot, start, end):
+        return ""
+    for span in reversed(snapshot.get("spans", [])):
+        left = int(span.get("start_line") or 1)
+        right = int(span.get("end_line") or left)
+        if left <= start and right >= end:
+            return "".join(str(span.get("content") or "").splitlines(keepends=True)[start - left:end - left + 1])
+    return ""
+
+
+def cached_read_result(state: dict[str, Any], args: dict[str, Any]) -> dict[str, Any] | None:
+    coverage = cached_read_coverage(state, args)
+    if coverage is None:
+        return None
+    path = coverage["file_path"]
+    snapshot = state["read_file_cache"][path]
+    start, end = coverage["requested_range"]
+    content = content_for_range(snapshot, start, end)
+    limit = max(1, int(args.get("max_chars", 8000)))
+    truncated = len(content) > limit
+    content = content[:limit]
+    return {
+        "file_path": path, "file_revision": coverage["file_revision"],
+        "content": content, "start_line": start,
+        "end_line": start + max(0, len(content.splitlines()) - 1),
+        "requested_end_line": args.get("end_line") or snapshot["total_lines"],
+        "total_lines": snapshot["total_lines"], "truncated": truncated,
+        "line_range_requested": args.get("start_line") is not None or args.get("end_line") is not None,
+        "source": "cache",
     }
 
 
@@ -130,7 +256,6 @@ def touch_cache_files(state: dict[str, Any], file_paths: Iterable[str]) -> dict[
     if not paths:
         return {}
     access_seq = _as_int(state.get("file_cache_access_seq"), 0)
-    order = list(state.get("read_file_order") or [])
     changed = False
     for path in paths:
         snapshot = normalize_snapshot(cache.get(path), file_path=path)
@@ -144,13 +269,11 @@ def touch_cache_files(state: dict[str, Any], file_paths: Iterable[str]) -> dict[
         snapshot["access_seq"] = access_seq
         snapshot["size_bytes"] = snapshot_size_bytes(snapshot)
         cache[path] = snapshot
-        order = touch_file_order(order, path)
         changed = True
     if not changed:
         return {}
     return {
         "read_file_cache": cache,
-        "read_file_order": order,
         "file_cache_access_seq": access_seq,
     }
 
@@ -194,7 +317,6 @@ def cache_after_patch(state: dict[str, Any], output: dict[str, Any]) -> dict[str
             )
             snapshot["size_bytes"] = 0
             cache[path] = snapshot
-            order = touch_file_order(order, path)
             changed = True
             continue
         if not ranges and old_revision != new_revision:
@@ -264,7 +386,6 @@ def cache_after_patch(state: dict[str, Any], output: dict[str, Any]) -> dict[str
         )
         snapshot["size_bytes"] = snapshot_size_bytes(snapshot)
         cache[path] = snapshot
-        order = touch_file_order(order, path)
         changed = True
     if not changed:
         return {}

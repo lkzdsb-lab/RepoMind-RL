@@ -27,16 +27,9 @@ def normalize_finding_candidates(value: Any) -> list[dict[str, Any]]:
         if severity not in _SEVERITY_RANK:
             severity = "medium"
         category = str(item.get("category") or "").strip().lower()[:80]
-        identity = json.dumps(
-            {"claim": claim.lower(), "locations": locations},
-            ensure_ascii=True,
-            sort_keys=True,
-        )
         findings.append(
             {
-                "candidate_id": (
-                    f"candidate_{hashlib.sha1(identity.encode('utf-8')).hexdigest()[:12]}"
-                ),
+                "candidate_id": str(item.get("candidate_id") or "").strip()[:100],
                 "claim": claim,
                 "locations": locations,
                 "related_tests": _clean_string_list(item.get("related_tests"), 8, 240),
@@ -53,13 +46,33 @@ def normalize_finding_candidates(value: Any) -> list[dict[str, Any]]:
 def merge_finding_candidates(existing: Any, incoming: Any) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
     order: list[str] = []
-    for item in normalize_finding_candidates(existing) + normalize_finding_candidates(incoming):
-        candidate_id = item["candidate_id"]
+    stored = normalize_finding_candidates(existing)
+    for index, item in enumerate(stored + normalize_finding_candidates(incoming)):
+        requested_id = item["candidate_id"]
+        current = merged.get(requested_id)
+        if current is not None and _shares_location(current, item):
+            candidate_id = requested_id
+        else:
+            # Text-identical findings at the same source anchor are safe to reuse.
+            # A file/function match alone is not enough to merge different bugs.
+            candidate_id = next((key for key, value in merged.items()
+                                 if value["claim"].casefold() == item["claim"].casefold()
+                                 and _shares_location(value, item)), "")
+            if not candidate_id:
+                candidate_id = requested_id if index < len(stored) and requested_id else _new_candidate_id(item)
+            if candidate_id in merged and not _shares_location(merged[candidate_id], item):
+                candidate_id = _new_candidate_id(item)
+        item["candidate_id"] = candidate_id
         if candidate_id not in merged:
             merged[candidate_id] = item
             order.append(candidate_id)
             continue
         current = merged[candidate_id]
+        current["claim"] = item["claim"]
+        for location in item["locations"]:
+            if location not in current["locations"]:
+                current["locations"].append(location)
+        current["locations"] = current["locations"][:8]
         current["confidence"] = max(current["confidence"], item["confidence"])
         if _SEVERITY_RANK[item["severity"]] > _SEVERITY_RANK[current["severity"]]:
             current["severity"] = item["severity"]
@@ -69,6 +82,27 @@ def merge_finding_candidates(existing: Any, incoming: Any) -> list[dict[str, Any
         if not current.get("category") and item.get("category"):
             current["category"] = item["category"]
     return [merged[candidate_id] for candidate_id in order][-20:]
+
+
+def _new_candidate_id(item: dict[str, Any]) -> str:
+    identity = json.dumps({"claim": item["claim"].casefold(), "locations": item["locations"]},
+                          ensure_ascii=True, sort_keys=True)
+    return f"candidate_{hashlib.sha1(identity.encode('utf-8')).hexdigest()[:12]}"
+
+
+def _shares_location(first: dict[str, Any], second: dict[str, Any]) -> bool:
+    for left in first["locations"]:
+        for right in second["locations"]:
+            if left["file_path"] != right["file_path"]:
+                continue
+            if left.get("symbol") and left.get("symbol") == right.get("symbol"):
+                return True
+            if left.get("start_line") and right.get("start_line"):
+                if max(left["start_line"], right["start_line"]) <= min(
+                    left.get("end_line", left["start_line"]), right.get("end_line", right["start_line"])
+                ):
+                    return True
+    return False
 
 
 def _normalize_locations(value: Any) -> list[dict[str, Any]]:

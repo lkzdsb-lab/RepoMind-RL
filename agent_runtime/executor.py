@@ -28,9 +28,13 @@ from agent_runtime.codebase_context.retrieval import (
     merge_code_context_outputs,
 )
 from agent_runtime.lifecycle.completion import derive_phase, evaluate_completion_transition
+from agent_runtime.lifecycle.completion_review import CompletionReviewController
 from agent_runtime.context import ContextCompressionManager
 from agent_runtime.context.attention import build_attention_focus
 from agent_runtime.memory.file_cache import touch_cache_files
+from agent_runtime.context.analysis_progress import (
+    refresh_analysis_records, analysis_fingerprint, record_execution_progress,
+)
 from agent_runtime.memory.domain.interfaces import LongTermMemoryReader
 from agent_runtime.memory.retrieval import LongTermMemoryService
 from ext.focus_files import current_focus_files
@@ -86,7 +90,7 @@ from agent_runtime.verification.guard import (
 )
 from model.agent.graph import AgentState, AgentRunResult
 from model.agent.actions import Action
-from config import CompressionConfig, DebugAgentConfig, LLMConfig
+from config import CompressionConfig, DebugAgentConfig, LLMConfig, resolve_llm_config
 from loguru import logger
 from model.agent.tools import tool_spec_prompt_dict
 from utils import _clean_string_list
@@ -154,6 +158,7 @@ class DebugAgent:
         self.observer = observer or self._default_observer()
         self.final_reporter = final_reporter or self._default_final_reporter()
         self.completion_judge = completion_judge or self._default_completion_judge()
+        self.completion_review = CompletionReviewController(self.completion_judge)
         self.code_context_query_planner = (
             code_context_query_planner or self._default_code_context_query_planner()
         )
@@ -165,6 +170,8 @@ class DebugAgent:
         self.skill_selector = skill_selector or self._default_skill_selector()
         self._active_registry: RegistrySnapshot | None = None
         self.context_manager = context_manager or ContextCompressionManager.from_config(config)
+        if isinstance(self.policy, LLMActionPolicy):
+            self.policy.context_manager = self.context_manager
         self.long_term_memory = long_term_memory or LongTermMemoryService.from_config(config)
         self.recorder = recorder or TrajectoryRecorder()
         logger.info(
@@ -279,6 +286,9 @@ class DebugAgent:
             "context_sections": state.get("context_sections", {}),
             "memory_candidates": state.get("memory_candidates", []),
             "draft_findings": state.get("draft_findings", []),
+            "analysis_records": state.get("analysis_records", []),
+            "analysis_progress": state.get("analysis_progress", {}),
+            "context_budget": state.get("context_budget", {}),
             "file_cache_access_seq": int(state.get("file_cache_access_seq", 0)),
             "file_cache_last_touch_loop": int(
                 state.get("file_cache_last_touch_loop", -1)
@@ -532,7 +542,16 @@ class DebugAgent:
             last_verified_edit_loop=-1,
             trajectory=[],
             completion_judgement={},
+            completion_review_cache={},
+            completion_review_attempts=[],
+            completion_review_failure_count=0,
+            completion_review_unchanged_count=0,
+            completion_judge_continue_count=0,
+            completion_rule_gate_count=0,
+            completion_review_failed=False,
             draft_findings=[],
+            analysis_records=[],
+            analysis_progress={},
             pending_user_questions=[],
             needs_user_input_reason="",
             user_inputs=[],
@@ -901,6 +920,7 @@ class DebugAgent:
         )
 
     def _prepare_context(self, state: AgentState) -> AgentState:
+        state = {**state, "analysis_records": refresh_analysis_records(state)}
         loop_count = int(state.get("loop_count", 0))
         if int(state.get("file_cache_last_touch_loop", -1)) != loop_count:
             touched = touch_cache_files(
@@ -949,6 +969,15 @@ class DebugAgent:
         )
 
     def _record_action_selection(self, state: AgentState, action: Action) -> AgentState:
+        budget = dict(state.get("context_budget") or {})
+        compressed_loop = budget.get("compressed_loop")
+        if compressed_loop is not None and budget.get("recorded_loop") != compressed_loop:
+            state = self.recorder.append(
+                state, node="compress_context",
+                thought="已按最终提示总量执行增量压缩；达标情况见 context_budget。",
+                observation=budget,
+            )
+            state = {**state, "context_budget": {**budget, "recorded_loop": compressed_loop}}
         logger.bind(task_id=state.get("task_id"), action=action.name).info(
             "action selected args={}",
             action.args,
@@ -969,6 +998,11 @@ class DebugAgent:
             if isinstance(raw_findings, list):
                 draft_findings = merge_finding_candidates(draft_findings, raw_findings)
         observations = list(state.get("observations", []) or [])
+        records = action.metadata.get("analysis_records", state.get("analysis_records", []))
+        progress = dict(state.get("analysis_progress") or {})
+        if analysis_fingerprint(records) != analysis_fingerprint(state.get("analysis_records", [])):
+            progress["no_progress"] = 0
+            logger.bind(task_id=state.get("task_id")).debug("analysis records updated count={}", len(records))
         llm_observations = list(state.get("llm_observations", []) or [])
         action_limit_events = list(state.get("action_limit_events", []) or [])
         if limit_events:
@@ -990,6 +1024,8 @@ class DebugAgent:
             "observations": observations,
             "llm_observations": llm_observations,
             "draft_findings": draft_findings,
+            "analysis_records": records,
+            "analysis_progress": progress,
             "current_step": action.name,
         }
         return self.recorder.append(
@@ -1059,6 +1095,8 @@ class DebugAgent:
             else:
                 action_args = dict(action.args)
                 runtime_context: dict[str, Any] | None = None
+                if action.name == "read_file":
+                    runtime_context = {"read_file_cache": state.get("read_file_cache", {})}
                 if action.name == "execution_task":
                     runtime_context = {"config": self.config, "task_id": state.get("task_id", "")}
                 if action.name == "build_codebase_context":
@@ -1115,7 +1153,12 @@ class DebugAgent:
             action_logger.info("action execution completed elapsed_ms={:.1f}", elapsed_ms)
 
         prev_state = state
+        output["source_edit_revision"] = int((state.get("runtime_facts") or {}).get("edit_revision", 0))
         state = self._apply_tool_output(state, action, output)
+        state = {**state, **record_execution_progress(state, action.name, output)}
+        logger.bind(task_id=state.get("task_id")).debug(
+            "analysis progress no_progress={}", (state.get("analysis_progress") or {}).get("no_progress", 0),
+        )
         state = {
             **state,
             "loop_count": state.get("loop_count", 0) + 1,
@@ -1649,6 +1692,7 @@ class DebugAgent:
             **state,
             "phase": runtime_decision.get("phase", state.get("phase", "")),
             "runtime_decision": runtime_decision,
+            "loop_count": int(state.get("loop_count", 0)) + 1,
         }
         if state.get("plan_mode"):
             judgement = {
@@ -1664,11 +1708,10 @@ class DebugAgent:
             state = {
                 **state,
                 "current_step": "select_action",
-                "completion_judge_continue_count": int(
-                    state.get("completion_judge_continue_count", 0)
+                "completion_rule_gate_count": int(
+                    state.get("completion_rule_gate_count", 0)
                 )
                 + 1,
-                "loop_count": int(state.get("loop_count", 0)) + 1,
             }
             return state, False, False, output
         if _requires_post_edit_verification(state):
@@ -1685,15 +1728,22 @@ class DebugAgent:
             state = {
                 **state,
                 "current_step": "select_action",
-                "completion_judge_continue_count": int(
-                    state.get("completion_judge_continue_count", 0)
+                "completion_rule_gate_count": int(
+                    state.get("completion_rule_gate_count", 0)
                 )
                 + 1,
-                "loop_count": int(state.get("loop_count", 0)) + 1,
             }
             return state, False, False, output
-        judgement = self.completion_judge.judge(state)
+        judgement = self.completion_review.review(state)
         output = {"completion_judgement": judgement}
+        if judgement.get("status") == "failed":
+            state = self._record_completion_judgement(state, judgement)
+            error = judgement.get("error") or {}
+            state = {
+                **state, "status": "failed", "completion_review_failed": True,
+                "error": f"Completion review failed [{error.get('category', 'unknown')}]: {judgement.get('reason', '')}",
+            }
+            return self._finalize(state), True, True, output
         decision = str(judgement.get("decision") or "continue").strip().lower()
         if decision == "needs_user_input":
             state = self._record_completion_judgement(state, judgement)
@@ -1702,10 +1752,6 @@ class DebugAgent:
                 state = {
                     **state,
                     "current_step": "select_action",
-                    "completion_judge_continue_count": int(
-                        state.get("completion_judge_continue_count", 0)
-                    )
-                    + 1,
                 }
                 return state, False, False, output
             return state, True, False, output
@@ -1726,6 +1772,7 @@ class DebugAgent:
                     ]
                 state = {
                     **state,
+                    "completion_review_failed": True,
                     "error": (
                         "Forced completion judgement returned continue near max_loops. "
                         f"Runtime blockers: {blockers or ['none']}."
@@ -1738,17 +1785,10 @@ class DebugAgent:
                 }
                 state = self._finalize(state)
                 return state, True, True, output
-            attempts = int(state.get("completion_judge_continue_count", 0)) + 1
             state = {
                 **state,
                 "current_step": "select_action",
-                "completion_judge_continue_count": attempts,
             }
-            # todo 考虑配置化
-            if attempts >= 2:
-                logger.bind(task_id=state.get("task_id")).warning(
-                    "completion judge requested continue repeatedly; runtime contract remains authoritative"
-                )
             return state, False, False, output
         state = self._record_completion_judgement(state, judgement)
         state = self._finalize(state)
@@ -1923,7 +1963,8 @@ class DebugAgent:
                 "rl_last_reward": terminal.to_dict(),
             }
         try:
-            final_report = self.final_reporter.report(state)
+            reporter = RuleBasedFinalReporter() if state.get("completion_review_failed") else self.final_reporter
+            final_report = reporter.report(state)
         except Exception as exc:
             logger.bind(task_id=state.get("task_id")).exception("final report generation failed")
             final_report = RuleBasedFinalReporter().report(state)
@@ -2079,30 +2120,7 @@ class DebugAgent:
 
 
 def _resolve_llm_config(base: LLMConfig, override: LLMConfig) -> LLMConfig:
-    default = LLMConfig()
-
-    def resolve_str(field: str) -> str:
-        value = getattr(override, field)
-        default_value = getattr(default, field)
-        return value if value and value != default_value else getattr(base, field)
-
-    return LLMConfig(
-        provider=resolve_str("provider"),
-        model=resolve_str("model"),
-        api_base=resolve_str("api_base"),
-        api_key_env=resolve_str("api_key_env"),
-        timeout=override.timeout if override.timeout != default.timeout else base.timeout,
-        temperature=(
-            override.temperature
-            if override.temperature != default.temperature
-            else base.temperature
-        ),
-        max_output_chars=(
-            override.max_output_chars
-            if override.max_output_chars != default.max_output_chars
-            else base.max_output_chars
-        ),
-    )
+    return resolve_llm_config(base, override)
 def _task_brief_from_analysis(state: AgentState, analysis: dict[str, Any]) -> dict[str, Any]:
     return {
         "intent": str(analysis.get("intent") or "diagnose").strip().lower(),

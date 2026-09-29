@@ -15,6 +15,7 @@ evidence shows fewer findings than history, report only the currently supported
 findings and do not preserve the historical count.
 
 observation_mode={{ observation_mode }}
+draft_findings={{ draft_findings }}
 title={{ title }}
 description={{ description }}
 task_analysis={{ task_analysis }}
@@ -32,6 +33,11 @@ recent_observations={{ recent_observations }}
 read_file_context={{ read_file_context }}
 
 # Output Schema
+
+For an existing defect, reuse its exact candidate_id from draft_findings and update its claim,
+locations and related_tests. New test evidence or rewording does not create a new defect.
+For a distinct root cause, leave candidate_id empty so the runtime assigns it.
+Do not reuse an ID merely because another issue is in the same file or function.
 
 Return JSON with keys: latest_tool, status, summary, new_findings, finding_candidates, hypotheses, invalidated_hypotheses, facts, risks, next_actions, memory_candidates, missing_context, next_search_terms, confidence, user_update.
 status must be one of ok, error, inconclusive, complete.

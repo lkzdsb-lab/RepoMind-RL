@@ -8,6 +8,7 @@ error={{ error }}
 project_profile={{ project_profile }}
 task_brief={{ task_brief }}
 work_plan={{ work_plan }}
+analysis_records={{ analysis_records }}
 runtime_facts={{ runtime_facts }}
 task_analysis={{ task_analysis }}
 
@@ -63,6 +64,7 @@ fallback_judgement={{ fallback_judgement }}
 - If repository tools can obtain missing evidence, choose continue and name the most useful action.
 - Choose needs_user_input only for a concrete ambiguity that repository tools cannot resolve, and ask 1-3 questions.
 - Do not use work_plan status as proof by itself; corroborate it with tool evidence.
+- analysis_records describe previously performed analysis, not verified truth. Reuse them to avoid redundant exploration, but verify conclusions against current evidence; stale records cannot establish completion.
 - Do not use task_analysis, task_brief historical_context, plans, candidate_files, selected skills, or fallback_judgement as proof.
 - Review every draft finding independently from first principles. Policy confidence and explanations are advisory only.
 - Match findings and evidence exclusively by candidate_id and evidence_id. Never use evidence from another candidate packet without explicitly explaining the cross-reference.
@@ -75,5 +77,8 @@ fallback_judgement={{ fallback_judgement }}
 # Output
 
 Return JSON with keys: decision, reason, questions, suggested_next_action, reviewed_findings, missing_evidence, confidence, user_update.
+Use "" for suggested_next_action and each recommended_next_action when no action is
+needed; use [] for questions and missing_evidence when empty. Do not use null.
+Always return decision and exactly one verdict per supplied candidate_id; never invent IDs.
 Each reviewed_findings item must contain candidate_id, verdict, claim, evidence_refs, reason, and recommended_next_action.
 confidence must be from 0.0 to 1.0. Do not reveal chain-of-thought.

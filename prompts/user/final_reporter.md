@@ -25,6 +25,7 @@ plan_mode_evaluation={{ plan_mode_evaluation }}
 plan={{ plan }}
 candidate_files={{ candidate_files }}
 read_files={{ read_files }}
+read_files contains only read tool calls from this run. Inherited source cache is historical context, not work performed in this run.
 edit_results={{ edit_results }}
 change_summaries={{ change_summaries }}
 has_patch={{ has_patch }}

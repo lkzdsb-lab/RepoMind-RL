@@ -68,7 +68,6 @@ def run_execution_task(repo_path: str, args: dict) -> dict:
         if not os.environ.get(llm.api_key_env):
             raise BackendUnavailable(f"Missing model credential environment variable: {llm.api_key_env}")
         llm_values = asdict(llm)
-        llm_values["structured_fallback"] = False
         llm_values["max_retries"] = 0
         llm_values["timeout"] = min(llm.timeout, limits.timeout)
         secret_names = {llm.api_key_env, config.llm_config.api_key_env}

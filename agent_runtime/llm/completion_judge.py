@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from agent_runtime.llm.llm_nodes import LLMJsonNode
@@ -24,21 +24,21 @@ class CompletionJudge(Protocol):
         ...
 
 
+def review_failure(category: str, message: str) -> dict[str, Any]:
+    return {
+        "status": "failed", "decision": None, "reason": message,
+        "error": {"category": category, "message": message},
+        "questions": [], "suggested_next_action": "", "reviewed_findings": [],
+        "missing_evidence": [], "confidence": 0.0, "source": "runtime",
+    }
+
+
 @dataclass
 class RuleBasedCompletionJudge:
     """Conservative fallback that never claims semantic completion."""
 
     def judge(self, state: AgentState) -> dict[str, Any]:
-        return {
-            "decision": "continue",
-            "reason": "Semantic completion could not be evaluated by the configured LLM.",
-            "questions": [],
-            "suggested_next_action": "read_file",
-            "reviewed_findings": [],
-            "missing_evidence": [],
-            "confidence": 0.5,
-            "source": "rule_based",
-        }
+        return review_failure("unavailable", "The configured completion judge could not evaluate completion.")
 
 
 @dataclass
@@ -50,7 +50,8 @@ class LLMCompletionJudge:
         self.fallback = self.fallback or RuleBasedCompletionJudge()
         self.node = LLMJsonNode(
             name="completion_judge",
-            llm_config=self.llm_config,
+            # Finish owns the retry budget; avoid nested SDK/format retries.
+            llm_config=replace(self.llm_config, max_retries=0, structured_fallback=False),
             system_prompt=load_prompt("system/completion_judge.md"),
             build_prompt=_completion_judge_prompt,
             fallback=lambda state, context: self.fallback.judge(state) if self.fallback else {},
@@ -59,10 +60,13 @@ class LLMCompletionJudge:
         )
 
     def judge(self, state: AgentState) -> dict[str, Any]:
-        return self.node.run(
-            state,
-            {"fallback_judgement": self.fallback.judge(state) if self.fallback else {}},
-        )
+        result = self.node.run(state)
+        if result.get("llm_error"):
+            error = result["llm_error"]
+            return {**result, **review_failure(error.get("category", "unknown"), error.get("message", "Review failed"))}
+        if result.get("status") != "failed":
+            result["status"] = "succeeded"
+        return result
 
 
 def _completion_judge_prompt(state: AgentState, context: dict[str, Any]) -> str:
@@ -94,6 +98,7 @@ def _completion_judge_prompt(state: AgentState, context: dict[str, Any]) -> str:
         task_analysis=json.dumps(state.get("task_analysis", {}), ensure_ascii=False, default=str),
         task_brief=json.dumps(state.get("task_brief", {}), ensure_ascii=False, default=str),
         work_plan=json.dumps(state.get("work_plan", {}), ensure_ascii=False, default=str),
+        analysis_records=json.dumps(state.get("analysis_records", []), ensure_ascii=False, default=str),
         runtime_facts=json.dumps(state.get("runtime_facts", {}), ensure_ascii=False, default=str),
         draft_findings=json.dumps(
             state.get("draft_findings", []), ensure_ascii=False, default=str
@@ -139,15 +144,14 @@ def _normalize_completion_judge(
     state: AgentState,
     context: dict[str, Any],
 ) -> dict[str, Any]:
-    decision = str(data.get("decision") or "continue").strip().lower()
+    decision = str(data.get("decision") or "").strip().lower()
     if decision not in {"complete", "needs_user_input", "continue"}:
-        decision = "continue"
+        return review_failure("response_format", "Completion response contains no valid decision.")
     questions = _clean_string_list(data.get("questions"), 3, 300)
     reason = str(data.get("reason") or "").strip()[:1000]
     suggested_next_action = str(data.get("suggested_next_action") or "").strip()[:120]
     if decision == "needs_user_input" and not questions:
-        decision = "continue"
-        suggested_next_action = suggested_next_action or "search_code_context"
+        return review_failure("response_format", "Completion response requests user input without a question.")
     if decision != "needs_user_input":
         questions = []
     confidence = _safe_float(data.get("confidence"), default=0.5)
@@ -162,10 +166,14 @@ def _normalize_completion_judge(
         if isinstance(item, dict) and str(item.get("candidate_id") or "").strip()
     }
     reviewed_ids = {item["candidate_id"] for item in reviewed_findings}
+    supplied_ids = [str(item.get("candidate_id") or "").strip()
+                    for item in data.get("reviewed_findings", [])]
+    if len(supplied_ids) != len(set(supplied_ids)) or set(supplied_ids) - expected_ids:
+        return review_failure("response_format", "Completion response contains duplicate or unknown candidate IDs.")
     omitted_ids = sorted(expected_ids - reviewed_ids)
     if omitted_ids:
-        missing_evidence.extend(f"candidate not reviewed: {candidate_id}" for candidate_id in omitted_ids)
-    if omitted_ids or any(
+        return review_failure("response_format", f"Completion response omitted candidate reviews: {', '.join(omitted_ids)}")
+    if any(
         item.get("verdict") == "needs_more_evidence" for item in reviewed_findings
     ):
         decision = "continue"

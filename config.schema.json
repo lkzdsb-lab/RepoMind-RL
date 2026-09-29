@@ -17,6 +17,7 @@
     "repo_path": { "type": "string" },
     "repo": { "type": "string" },
     "max_loops": { "type": "integer", "minimum": 1 },
+    "trace_dir": { "type": "string" },
     "execution_enabled": { "type": "boolean" },
     "execution_env": { "type": "object", "additionalProperties": { "type": "string" } },
     "execution_timeout": { "type": "integer", "minimum": 10, "maximum": 1800 },
@@ -64,8 +65,12 @@
         "timeout": { "type": "integer", "minimum": 1 },
         "temperature": { "type": "number" },
         "max_output_chars": { "type": "integer", "minimum": 1 },
+        "response_format_mode": { "type": "string", "enum": ["auto", "native", "json"] },
         "structured_fallback": { "type": "boolean" },
         "max_retries": { "type": "integer", "minimum": 0 },
+        "max_completion_tokens": { "type": ["integer", "null"], "minimum": 1 },
+        "reasoning_effort": { "type": ["string", "null"], "minLength": 1 },
+        "extra_body": { "type": "object" },
         "context_compressor": { "$ref": "#/$defs/llmConfig" },
         "context": { "$ref": "#/$defs/llmConfig" },
         "plan": { "$ref": "#/$defs/llmConfig" },
@@ -170,6 +175,7 @@
         "compressor_mode": { "enum": ["disabled", "rule_based", "llm"] },
         "max_tokens": { "type": "integer", "minimum": 1 },
         "compression_threshold": { "type": "number", "exclusiveMinimum": 0 },
+        "compression_target": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
         "recent_items": { "type": "integer", "minimum": 1 },
         "min_new_tokens": { "type": "integer", "minimum": 1 }
       }
@@ -250,8 +256,12 @@
         "timeout": { "type": "integer", "minimum": 1 },
         "temperature": { "type": "number" },
         "max_output_chars": { "type": "integer", "minimum": 1 },
+        "response_format_mode": { "type": "string", "enum": ["auto", "native", "json"] },
         "structured_fallback": { "type": "boolean" },
-        "max_retries": { "type": "integer", "minimum": 0 }
+        "max_retries": { "type": "integer", "minimum": 0 },
+        "max_completion_tokens": { "type": ["integer", "null"], "minimum": 1 },
+        "reasoning_effort": { "type": ["string", "null"], "minLength": 1 },
+        "extra_body": { "type": "object" }
       }
     },
     "embeddingConfig": {

@@ -16,6 +16,7 @@ from rich.text import Text
 from agent_runtime.session import AgentSession
 from tools.git_tools.diff import git_diff
 from model.session import ChatResponse
+from interfaces.report import render_final_report
 
 
 class ChatShell:
@@ -76,7 +77,7 @@ class ChatShell:
             return
 
         style = "red" if response.type == "failed" else "green"
-        self.console.print(Panel(response.message or response.type, title="Agent", border_style=style))
+        self.console.print(Panel(render_final_report(response), title="Agent", border_style=style))
         details = self._response_table(response)
         if details.row_count:
             self.console.print(details)
@@ -183,7 +184,7 @@ class ChatShell:
         table.add_column("Value")
         _add_row(table, "trace", response.trace_path)
         _add_row(table, "edited_files", ", ".join(response.edited_files))
-        _add_row(table, "candidate_files", ", ".join(response.candidate_files[:8]))
+        _add_row(table, "candidate_files", ", ".join(response.candidate_files))
         _add_row(table, "patch", response.patch_summary)
         _add_row(table, "llm_tokens", _format_token_usage(response.llm_token_usage))
         _add_row(table, "llm_error", _format_latest_llm_error(response.llm_errors))

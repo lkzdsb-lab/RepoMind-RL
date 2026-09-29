@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import time
+from threading import Lock
 from typing import Any, Protocol
 
-from config import LLMConfig
+from config import LLMConfig, validate_llm_generation
 from loguru import logger
 from model.llm import LLMMessage, LLMRequest, LLMResponse
-from openai import OpenAI, OpenAIError
-from pydantic import BaseModel
+from openai import BadRequestError, OpenAI, OpenAIError, LengthFinishReasonError
+from pydantic import BaseModel, ValidationError
 from utils import _safe_int
 
 
@@ -24,11 +26,27 @@ class DisabledLLMClient:
         raise RuntimeError("LLM client is disabled or not configured.")
 
 
+class LLMResponseError(RuntimeError):
+    """A completed but unusable response, retaining provider-reported usage."""
+
+    def __init__(self, message: str, category: str, completion: Any) -> None:
+        super().__init__(message)
+        self.category = category
+        raw = completion.model_dump()
+        self.response = LLMResponse(content="", model=str(raw.get("model") or ""),
+                                    raw=raw, parsed=None, usage=_extract_usage(raw))
+
+
+_UNSUPPORTED_STRUCTURED_FORMATS: set[tuple[str, str]] = set()
+_FORMAT_CACHE_LOCK = Lock()
+
+
 class OpenAICompatibleLLMClient:
     """
         llm 客户端
     """
     def __init__(self, config: LLMConfig) -> None:
+        validate_llm_generation(config)
         self.config = config
         api_key = os.getenv(config.api_key_env) if config.api_key_env else ""
         if not api_key:
@@ -58,37 +76,62 @@ class OpenAICompatibleLLMClient:
             "messages": messages,
             "temperature": temperature,
         }
+        if self.config.max_completion_tokens is not None:
+            kwargs["max_completion_tokens"] = self.config.max_completion_tokens
+        if self.config.reasoning_effort is not None:
+            kwargs["reasoning_effort"] = self.config.reasoning_effort
+        if self.config.extra_body:
+            kwargs["extra_body"] = dict(self.config.extra_body)
+        node = str(request.metadata.get("node") or "unknown")
 
         logger.info(
-            "llm request started provider={} model={} base_url={} messages={}",
+            "llm request started provider={} model={} base_url={} messages={} format_mode={}",
             self.config.provider,
             model,
             self.config.api_base,
             len(messages),
+            self.config.response_format_mode,
         )
-        try:
-            if not _is_pydantic_response_model(request.response_format):
-                raise RuntimeError(
-                    "OpenAI SDK structured response parsing requires a Pydantic response_format."
-                )
-            kwargs["response_format"] = request.response_format
-            completion = self.client.beta.chat.completions.parse(**kwargs)
-            parsed = _extract_parsed_message(completion)
-        except Exception as exc:
-            if not self.config.structured_fallback:
-                raise
-            logger.warning(
-                "structured parse failed; retrying with plain completion error_type={} error={}",
-                exc.__class__.__name__,
-                exc,
-            )
-            completion, parsed = self._retry_plain_completion(
-                model=model,
-                messages=messages,
-                temperature=temperature,
+        if not _is_pydantic_response_model(request.response_format):
+            raise RuntimeError("Structured responses require a Pydantic response_format.")
+        mode = self.config.response_format_mode.lower()
+        format_key = (str(self.config.api_base or "").rstrip("/"), model)
+        with _FORMAT_CACHE_LOCK:
+            known_unsupported = format_key in _UNSUPPORTED_STRUCTURED_FORMATS
+        if mode == "json" or (mode == "auto" and known_unsupported):
+            completion, parsed = self._plain_completion(
+                kwargs=kwargs, node=node,
                 response_model=request.response_format,
-                original_error=exc,
             )
+        else:
+            try:
+                completion = self._invoke_completion(
+                    kwargs, node=node, response_model=request.response_format,
+                )
+                parsed = _extract_parsed_message(completion)
+            except Exception as exc:
+                if isinstance(exc, LLMResponseError):
+                    raise
+                unsupported = mode == "auto" and self.config.structured_fallback and _unsupported_structured_format(exc)
+                if unsupported:
+                    with _FORMAT_CACHE_LOCK:
+                        _UNSUPPORTED_STRUCTURED_FORMATS.add(format_key)
+                    logger.warning(
+                        "structured response format unavailable; using JSON text mode endpoint={} model={}",
+                        format_key[0], model,
+                    )
+                elif mode == "native" or isinstance(exc, OpenAIError) or not self.config.structured_fallback:
+                    raise
+                else:
+                    logger.warning(
+                        "structured parse failed; retrying with plain completion error_type={} error={}",
+                        exc.__class__.__name__, exc,
+                    )
+                completion, parsed = self._plain_completion(
+                    kwargs=kwargs, node=node,
+                    response_model=request.response_format,
+                    original_error=exc,
+                )
 
         raw = completion.model_dump()
         content = _extract_chat_content(raw)
@@ -114,35 +157,89 @@ class OpenAICompatibleLLMClient:
             return {"role": str(message.get("role", "")), "content": str(message.get("content", ""))}
         return message.to_dict()
 
-    def _retry_plain_completion(
+    def _plain_completion(
         self,
         *,
-        model: str,
-        messages: list[dict[str, str]],
-        temperature: float | None,
+        kwargs: dict[str, Any],
+        node: str,
         response_model: Any,
-        original_error: Exception,
+        original_error: Exception | None = None,
     ) -> tuple[Any, Any]:
-        """ 降级以适配老模型传输格式出问题的场景 todo 后期换好模型考虑删除"""
-        try:
-            completion = self.client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-            )
-        except OpenAIError as exc:
-            logger.warning("llm request failed error_type={} error={}", exc.__class__.__name__, exc)
-            raise RuntimeError(f"LLM request failed via OpenAI SDK: {exc}") from exc
+        """Use the same model contract for JSON prompting and local validation."""
+        schema = json.dumps(response_model.model_json_schema(), ensure_ascii=False, separators=(",", ":"))
+        messages = list(kwargs["messages"]) + [{
+            "role": "system",
+            "content": "Return exactly one JSON object matching this JSON Schema. "
+                       "Use empty strings/lists for empty optional text/list fields, not null. "
+                       "Preserve required fields and enum values.\n" + schema,
+        }]
+        completion = self._invoke_completion({**kwargs, "messages": messages}, node=node)
 
         raw = completion.model_dump()
         content = _extract_chat_content(raw)
         try:
             parsed = _manual_parse_response(content, response_model)
         except Exception as manual_exc:
-            raise RuntimeError(
-                f"LLM structured parse failed: {original_error}; manual JSON recovery also failed: {manual_exc}"
+            issues = (
+                [{"field": ".".join(map(str, error["loc"])), "type": error["type"]}
+                 for error in manual_exc.errors(include_url=False, include_input=False)]
+                if isinstance(manual_exc, ValidationError) else [{"type": type(manual_exc).__name__}]
+            )
+            logger.bind(llm_node=node).warning(
+                "LLM response validation failed model={} issues={} response_excerpt={}",
+                response_model.__name__, issues, content[:4000],
+            )
+            fields = ", ".join(f"{item.get('field', '<root>')} ({item['type']})" for item in issues[:5])
+            raise LLMResponseError(
+                f"{response_model.__name__}: {len(issues)} response validation error(s): {fields}",
+                "response_format", completion,
             ) from manual_exc
         return completion, parsed
+
+    def _invoke_completion(self, kwargs: dict[str, Any], *, node: str, response_model: Any = None) -> Any:
+        """Shared transport for native and JSON responses, including format fallback."""
+        started = time.perf_counter()
+        request_log = logger.bind(llm_node=node)
+        request_log.info(
+            "llm generation request model={} max_completion_tokens={} reasoning_effort={} thinking_budget={} timeout={} max_retries={}",
+            kwargs["model"], kwargs.get("max_completion_tokens"), kwargs.get("reasoning_effort"),
+            (kwargs.get("extra_body") or {}).get("thinking_budget"), self.config.timeout, self.config.max_retries,
+        )
+        completion = None
+        try:
+            if response_model is None:
+                completion = self.client.chat.completions.create(**kwargs)
+            else:
+                try:
+                    completion = self.client.beta.chat.completions.parse(**kwargs, response_format=response_model)
+                except LengthFinishReasonError as exc:
+                    completion = exc.completion
+                    raise LLMResponseError("LLM generation budget exhausted (finish_reason=length).", "generation_budget", completion) from exc
+            if any(choice.finish_reason == "length" for choice in completion.choices):
+                raise LLMResponseError("LLM generation budget exhausted (finish_reason=length).", "generation_budget", completion)
+            return completion
+        except Exception as exc:
+            request_log.warning("llm generation failed error_type={} category={}", type(exc).__name__, getattr(exc, "category", type(exc).__name__))
+            raise
+        finally:
+            raw = completion.model_dump() if completion is not None else {}
+            request_log.info(
+                "llm generation finished elapsed_ms={:.1f} finish_reason={} usage={}",
+                (time.perf_counter() - started) * 1000,
+                [choice.get("finish_reason") for choice in raw.get("choices", [])],
+                raw.get("usage") if completion is not None else "unknown",
+            )
+
+
+def _unsupported_structured_format(exc: Exception) -> bool:
+    if not isinstance(exc, BadRequestError):
+        return False
+    body = getattr(exc, "body", None)
+    details = json.dumps(body, ensure_ascii=False, default=str) if body is not None else str(exc)
+    details = details.lower()
+    return ("response_format" in details or "json_schema" in details) and any(
+        phrase in details for phrase in ("unavailable", "unsupported", "not support", "not available")
+    )
 
 
 def _format_json_for_log(content: str) -> str:

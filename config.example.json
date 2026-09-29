@@ -23,11 +23,15 @@
     "timeout": 60,
     "temperature": 0.0,
     "max_output_chars": 12000,
+    "response_format_mode": "auto",
     "context": {},
     "context_compressor": {},
     "planner": {},
     "plan": {},
-    "action_policy": {},
+    "action_policy": {
+      "max_completion_tokens": 4096,
+      "extra_body": { "thinking_budget": 2048 }
+    },
     "action": {},
     "task_analysis": {},
     "observer": {},
@@ -37,7 +41,12 @@
     "code_context_rerank": {},
     "skill_selector": {},
     "final_reporter": {},
-    "completion_judge": {}
+    "completion_judge": {
+      "max_completion_tokens": 8192,
+      "extra_body": { "thinking_budget": 4096 }
+    },
+    "structured_fallback": true,
+    "max_retries": 2
   },
   "modes": {
     "planner": "llm",
@@ -103,13 +112,24 @@
       "timeout": 60,
       "dimensions": 0,
       "batch_size": 32
-    }
+    },
+    "semantic_candidates": 24,
+    "semantic_min_score": 0.5,
+    "semantic_timeout": 5.0,
+    "query_cache_size": 256,
+    "rrf_k": 60,
+    "keyword_weight": 1.0,
+    "semantic_weight": 1.0,
+    "scope_matched_weight": 1.1,
+    "scope_unknown_weight": 0.5,
+    "scope_unknown_limit": 2
   },
   "context": {
     "enabled": true,
     "compressor_mode": "llm",
     "max_tokens": 32000,
     "compression_threshold": 0.75,
+    "compression_target": 0.55,
     "recent_items": 8,
     "min_new_tokens": 1200
   },
@@ -149,5 +169,21 @@
   },
   "approval": {
     "require_step_approval": false
+  },
+  "trace_dir": ".repomind/traces",
+  "execution_enabled": false,
+  "execution_env": {},
+  "execution_timeout": 300,
+  "execution_model_calls": 16,
+  "execution_tool_calls": 32,
+  "execution_retries": 8,
+  "execution_startup_timeout": 30,
+  "execution_operation_timeout": 30,
+  "execution_cleanup_timeout": 5,
+  "execution_resources": {
+    "memory_limit_mb": 2048,
+    "cpu_limit_percent": 50,
+    "max_processes": 64,
+    "mode": "strict"
   }
 }

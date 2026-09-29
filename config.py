@@ -53,8 +53,12 @@ class LLMConfig:
     timeout: int = 60
     temperature: float = 0.0
     max_output_chars: int = 12000
+    response_format_mode: str = "auto"
     structured_fallback: bool = True
     max_retries: int = 2
+    max_completion_tokens: int | None = None
+    reasoning_effort: str | None = None
+    extra_body: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -162,6 +166,7 @@ class DebugAgentConfig:
     context_compressor_mode: str = "rule_based"
     context_max_tokens: int = 32000
     context_compression_threshold: float = 0.75
+    context_compression_target: float = 0.55
     context_recent_items: int = 8
     context_min_new_tokens: int = 1200
 
@@ -320,6 +325,7 @@ def default_config_payload() -> dict[str, Any]:
         },
         "repo_path": ".",
         "max_loops": config.max_loops,
+        "trace_dir": config.trace_dir,
         "execution_enabled": config.execution_enabled,
         "execution_env": config.execution_env,
         "execution_timeout": config.execution_timeout,
@@ -347,6 +353,12 @@ def default_config_payload() -> dict[str, Any]:
             "timeout": llm.timeout,
             "temperature": llm.temperature,
             "max_output_chars": llm.max_output_chars,
+            "response_format_mode": llm.response_format_mode,
+            "structured_fallback": llm.structured_fallback,
+            "max_retries": llm.max_retries,
+            "max_completion_tokens": llm.max_completion_tokens,
+            "reasoning_effort": llm.reasoning_effort,
+            "extra_body": dict(llm.extra_body),
             "context_compressor": {},
             "plan": {},
             "action": {},
@@ -430,6 +442,7 @@ def default_config_payload() -> dict[str, Any]:
             "compressor_mode": config.context_compressor_mode,
             "max_tokens": config.context_max_tokens,
             "compression_threshold": config.context_compression_threshold,
+            "compression_target": config.context_compression_target,
             "recent_items": config.context_recent_items,
             "min_new_tokens": config.context_min_new_tokens,
         },
@@ -647,6 +660,7 @@ def apply_debug_agent_config(config: DebugAgentConfig, data: dict[str, Any]) -> 
             "compressor_mode": "context_compressor_mode",
             "max_tokens": "context_max_tokens",
             "compression_threshold": "context_compression_threshold",
+            "compression_target": "context_compression_target",
             "recent_items": "context_recent_items",
             "min_new_tokens": "context_min_new_tokens",
         },
@@ -796,6 +810,8 @@ def _apply_llm_section(config: DebugAgentConfig, section: Any) -> None:
 
 
 def validate_debug_agent_config(config: DebugAgentConfig) -> None:
+    if not 0 < config.context_compression_target < config.context_compression_threshold <= 1:
+        raise ValueError("context requires 0 < compression_target < compression_threshold <= 1")
     from agent_runtime.execution.contracts import Limits, ResourceLimits
     Limits(timeout=config.execution_timeout, model_calls=config.execution_model_calls,
            tool_calls=config.execution_tool_calls, retries=config.execution_retries,
@@ -857,6 +873,8 @@ def validate_debug_agent_config(config: DebugAgentConfig) -> None:
         "completion_judge_llm_config",
     ):
         _validate_llm_config(field_name, getattr(config, field_name))
+        if field_name != "llm_config":
+            _validate_llm_config(field_name, resolve_llm_config(config.llm_config, getattr(config, field_name)))
 
     for field_name in (
         "max_loops",
@@ -1063,12 +1081,16 @@ def resolve_llm_config(base: LLMConfig, override: LLMConfig) -> LLMConfig:
             if override.max_output_chars != default.max_output_chars
             else base.max_output_chars
         ),
+        response_format_mode=resolve_str("response_format_mode"),
         structured_fallback=(
             override.structured_fallback
             if override.structured_fallback != default.structured_fallback
             else base.structured_fallback
         ),
         max_retries=override.max_retries if override.max_retries != default.max_retries else base.max_retries,
+        max_completion_tokens=override.max_completion_tokens if override.max_completion_tokens is not None else base.max_completion_tokens,
+        reasoning_effort=override.reasoning_effort if override.reasoning_effort is not None else base.reasoning_effort,
+        extra_body={**base.extra_body, **override.extra_body},
     )
 
 
@@ -1118,7 +1140,35 @@ def _validate_choice(field_name: str, value: Any, choices: set[str]) -> None:
         raise ValueError(f"{field_name} must be one of {sorted(choices)}, got {value!r}")
 
 
+def validate_llm_generation(value: LLMConfig) -> None:
+    if value.max_completion_tokens is not None and (
+        type(value.max_completion_tokens) is not int or value.max_completion_tokens <= 0
+    ):
+        raise ValueError("max_completion_tokens must be a positive integer or null")
+    if value.reasoning_effort is not None and (
+        not isinstance(value.reasoning_effort, str) or not value.reasoning_effort.strip()
+    ):
+        raise ValueError("reasoning_effort must be a nonempty string or null")
+    if not isinstance(value.extra_body, dict):
+        raise ValueError("extra_body must be an object")
+    reserved = {"model", "messages", "temperature", "response_format", "stream", "stream_options",
+                "max_tokens", "max_completion_tokens", "reasoning_effort", "n", "tools", "tool_choice"}
+    if reserved.intersection(value.extra_body):
+        raise ValueError(f"extra_body cannot override request fields: {sorted(reserved.intersection(value.extra_body))}")
+    budget = value.extra_body.get("thinking_budget")
+    if "thinking_budget" in value.extra_body and (type(budget) is not int or budget < 0):
+        raise ValueError("thinking_budget must be a nonnegative integer")
+    if value.model.lower().startswith("qwen3.8") and value.reasoning_effort is not None and budget is not None:
+        raise ValueError("Qwen3.8 does not support reasoning_effort and thinking_budget together")
+
+
 def _validate_llm_config(field_name: str, value: LLMConfig) -> None:
+    validate_llm_generation(value)
+    _validate_choice(
+        f"{field_name}.response_format_mode",
+        value.response_format_mode,
+        {"auto", "native", "json"},
+    )
     if type(value.max_retries) is not int or value.max_retries < 0:
         raise ValueError(f"{field_name}.max_retries must be a nonnegative integer")
     if not isinstance(value.structured_fallback, bool):
