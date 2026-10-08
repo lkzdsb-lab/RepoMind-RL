@@ -90,6 +90,7 @@ def score_evaluation(
         total_tokens=total_tokens,
         failures=failures,
         metrics={
+            **_session_continuity_metrics(turns),
             "finding_recall": recall,
             "completion_score": completion_score,
             "correctness_score": correctness_score,
@@ -98,6 +99,20 @@ def score_evaluation(
         },
         artifacts=artifacts,
     )
+
+
+def _session_continuity_metrics(turns: list[dict[str, Any]]) -> dict[str, float]:
+    """Structural retention, separate from bug correctness and discovery recall."""
+    expected = retained = 0
+    for turn in turns:
+        current = {item["item_id"]: item for item in turn.get("session_work_items", [])}
+        for item in turn.get("session_work_baseline", []):
+            expected += 1
+            if item["item_id"] in current and current[item["item_id"]]["version"] >= item["version"]:
+                retained += 1
+    if not expected:
+        return {}
+    return {"session_work_retention": retained / expected, "session_work_expected": float(expected)}
 
 
 def _collect_findings(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:

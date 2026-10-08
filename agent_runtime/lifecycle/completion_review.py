@@ -13,6 +13,10 @@ from agent_runtime.llm.completion_judge import CompletionJudge, review_failure
 from agent_runtime.llm.llm_nodes import _llm_error_payload
 from agent_runtime.memory.file_cache import source_revision
 from model.agent.graph import AgentState
+from agent_runtime.memory.working import validate_work_reviews
+from model.session_work import WorkItemContractError, validate_work_state
+from agent_runtime.context.progress import stable_material, tool_evidence_key
+from agent_runtime.memory.working import current_evidence_refs
 
 
 @dataclass
@@ -22,21 +26,32 @@ class CompletionReviewController:
     max_unchanged_finishes: int = 2
 
     def review(self, state: AgentState) -> dict[str, Any]:
+        try:
+            validate_work_state(state)
+        except WorkItemContractError as exc:
+            state["memory_persistence_error"] = str(exc)
+            return review_failure("session_work_contract", str(exc))
         fingerprint = evidence_fingerprint(state)
+        progress_key = progress_fingerprint(state)
         previous = state.get("completion_review_cache") or {}
         log = logger.bind(task_id=state.get("task_id"))
-        if previous.get("fingerprint") == fingerprint and previous.get("result", {}).get("decision") == "continue":
+        same_progress = previous.get("progress_fingerprint") == progress_key
+        if same_progress and previous.get("result", {}).get("decision") == "continue":
             count = int(state.get("completion_review_unchanged_count", 0)) + 1
             state["completion_review_unchanged_count"] = count
-            log.warning("completion review reused fingerprint={} unchanged_finishes={}", fingerprint[:16], count)
+            log.warning("completion review has no new progress fingerprint={} unchanged_finishes={} cache_compatible={}",
+                        fingerprint[:16], count, previous.get("fingerprint") == fingerprint)
             if count >= self.max_unchanged_finishes:
                 result = review_failure("no_progress", "Completion review requested more evidence, but repeated finish requests supplied no new evidence.")
                 result["missing_evidence"] = previous["result"].get("missing_evidence", [])
-                result["reviewed_findings"] = previous["result"].get("reviewed_findings", [])
-                return {**result, "evidence_fingerprint": fingerprint, "cached": True}
-            return {**previous["result"], "cached": True}
-
-        state["completion_review_unchanged_count"] = 0
+                # A changed claim/version must never inherit the old verdict.
+                if previous.get("fingerprint") == fingerprint:
+                    result["reviewed_findings"] = previous["result"].get("reviewed_findings", [])
+                return {**result, "evidence_fingerprint": fingerprint, "cached": False}
+            if previous.get("fingerprint") == fingerprint:
+                return {**previous["result"], "cached": True}
+        else:
+            state["completion_review_unchanged_count"] = 0
         for attempt in range(1, self.max_attempts + 1):
             try:
                 result = self.judge.judge(state)
@@ -47,10 +62,20 @@ class CompletionReviewController:
                 result = review_failure("response_format", "Completion judge returned no valid review status.")
             if result.get("status") == "succeeded" and result.get("decision") not in {"complete", "continue", "needs_user_input"}:
                 result = review_failure("response_format", "Completion judge returned an invalid decision.")
+            if result.get("status") == "succeeded":
+                errors = validate_work_reviews(state, result)
+                if state.get("memory_persistence_error"):
+                    errors.append(state["memory_persistence_error"])
+                if errors:
+                    invalid = any(not error.startswith(("Unreviewed work item:", "Unresolved work item:")) for error in errors)
+                    result = {**result, "decision": "continue", "work_item_reviews": [] if invalid else result.get("work_item_reviews", []),
+                              "missing_evidence": errors, "reason": "Session work coverage is incomplete.",
+                              "suggested_next_action": "read_session_memory"}
             result = {**result, "evidence_fingerprint": fingerprint, "attempt": attempt, "cached": False}
             if result["status"] == "succeeded":
                 state["completion_review_failed"] = False
-                state["completion_review_cache"] = {"fingerprint": fingerprint, "result": result}
+                state["completion_review_cache"] = {"fingerprint": fingerprint,
+                                                     "progress_fingerprint": progress_key, "result": result}
                 if result["decision"] == "continue":
                     state["completion_judge_continue_count"] = int(state.get("completion_judge_continue_count", 0)) + 1
                 log.info("completion review succeeded attempt={} decision={} fingerprint={}", attempt, result["decision"], fingerprint[:16])
@@ -88,8 +113,26 @@ def evidence_fingerprint(state: AgentState) -> str:
         "observations": sorted(observations),
         "source_revisions": {path: source_revision(state, path) for path in sorted(paths)},
         "edit_revision": (state.get("runtime_facts") or {}).get("edit_revision", 0),
+        "session_work": [(item["item_id"], item["version"], item.get("evidence_validity"))
+                         for item in state.get("session_work_items", [])],
+        "memory_persistence_error": state.get("memory_persistence_error", ""),
     }
     return hashlib.sha256(_canonical(material).encode("utf-8")).hexdigest()
+
+
+def progress_fingerprint(state: AgentState) -> str:
+    """Review compatibility may change without any new evidence or coverage."""
+    valid = current_evidence_refs(state)
+    evidence = {tool_evidence_key(call) for index, call in enumerate(state.get("tool_calls", []))
+                if f"tool:{index}" in valid}
+    return stable_material({
+        "evidence": sorted(evidence),
+        "coverage": (state.get("analysis_progress") or {}).get("coverage", {}),
+        "review_milestones": [key for key in (state.get("analysis_progress") or {}).get("material_seen", [])
+                              if key.startswith("review:")],
+        "edit_revision": (state.get("runtime_facts") or {}).get("edit_revision", 0),
+        "user_inputs": state.get("user_inputs", []),
+    })
 
 
 def _canonical(value: Any) -> str:

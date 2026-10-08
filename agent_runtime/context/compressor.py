@@ -257,7 +257,11 @@ def collect_context_items(state: AgentState) -> list[ContextItem]:
             ContextItem(
                 role="system",
                 item_type="memory_context",
-                content=str(state["memory_context"]),
+                content=json.dumps({
+                    "session_work_revision": state.get("session_work_revision", ""),
+                    "notice": "Authoritative session work is projected separately in memory_context. Do not summarize it into new facts.",
+                    "detail_tool": "read_session_memory",
+                }, ensure_ascii=False),
                 pinned=True,
                 metadata={"source": "memory"},
                 item_id="memory:context",

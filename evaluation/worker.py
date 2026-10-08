@@ -16,6 +16,7 @@ from config import (
     validate_debug_agent_config,
 )
 from evaluation.models import EvaluationCase
+from model.session_work import validate_work_state
 
 
 def run_worker(request_path: Path) -> int:
@@ -73,10 +74,17 @@ def _turn_result(
     state: dict[str, Any],
     trace_path: str,
 ) -> dict[str, Any]:
+    state = validate_work_state(state)
     return {
         "turn_index": index,
         "message": message,
         "task_id": str(state.get("task_id") or ""),
+        "session_id": state.get("session_id", ""),
+        "topic_id": state.get("topic_id", ""),
+        "session_work_baseline": state.get("session_work_baseline", []),
+        "session_work_items": state.get("session_work_items", []),
+        "session_work_revision": state.get("session_work_revision", ""),
+        "memory_persistence_error": state.get("memory_persistence_error", ""),
         "status": str(state.get("status") or response.type or ""),
         "response_type": str(response.type or ""),
         "summary": str(response.message or ""),

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Union
 from loguru import logger
 from utils import _safe_float, _clean_string_list
+from model.session_work import EditScope
 
 
 DENIED_PATH_PARTS = {
@@ -43,6 +44,12 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
             "error": "Editing is disabled. Enable editing before using apply_code_patch.",
             "applied": False,
         }
+
+    if "session_edit_scope" in guard:
+        try:
+            EditScope(guard["session_edit_scope"])
+        except ValueError:
+            return {"error": "Invalid session edit scope; expected none/tests/repository.", "applied": False}
 
     decision_context = runtime_context.get("decision")
     if not isinstance(decision_context, dict):
@@ -111,6 +118,8 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
             return {"error": error, "applied": False}
 
         file_path = str(raw_change.get("file_path") or "").strip()
+        if guard.get("session_edit_scope") == EditScope.NONE:
+            return {"error": "No active user requirement authorizes edits in this session task.", "applied": False}
         operation = str(raw_change.get("operation") or "replace").strip().lower()
         if Path(file_path).is_absolute():
             return {"error": f"Absolute paths are not allowed: {file_path}", "applied": False}
@@ -125,6 +134,9 @@ def apply_code_patch(repo_path: str, args: Dict[str, Any]) -> Dict[str, Any]:
             target = _safe_path(repo, file_path)
         except ValueError as exc:
             return {"error": str(exc), "applied": False}
+
+        if guard.get("session_edit_scope") == EditScope.TESTS and not _is_test_path(target.relative_to(repo)):
+            return {"error": "Current permission only covers test files; request explicit scope for this path.", "applied": False}
 
         if operation == "create":
             if not allow_create:
@@ -312,6 +324,14 @@ def _validate_change_shape(change: dict[str, Any], index: int) -> str:
     return ""
 
 
+def _is_test_path(path: Path) -> bool:
+    name = path.name.lower()
+    return (any(part.lower() in {"tests", "test", "__tests__"} for part in path.parts[:-1])
+            or name.endswith(("_test.go", "_test.py", ".test.js", ".test.ts", ".spec.js", ".spec.ts",
+                              ".test.jsx", ".test.tsx", ".spec.jsx", ".spec.tsx", "test.java"))
+            or name.startswith("test_"))
+
+
 def _safe_path(repo: Path, file_path: str) -> Path:
     target = (repo / file_path).resolve()
     if target != repo and repo not in target.parents:
@@ -479,6 +499,7 @@ def _recoverable_conflict(
             "start_line": max(1, line - 20),
             "end_line": line + 40,
         }
+
     response.update(
         {
             "recoverable_conflict": True,

@@ -9,6 +9,8 @@ work_plan={{ work_plan }}
 runtime_facts={{ runtime_facts }}
 completion_judgement={{ completion_judgement }}
 draft_findings={{ draft_findings }}
+finding_evidence={{ finding_evidence }}
+finding_update_errors={{ finding_update_errors }}
 
 # Runtime Facts
 
@@ -57,12 +59,13 @@ decision_feedback={{ decision_feedback }}
 - Return analysis_updates after analyzing shown source, including when no defect was found. Each update needs file_path, full file_revision from shown_ranges, start_line, end_line, dimension, conclusion, status (partial or complete), finding_ids and open_questions. A read alone is not completed analysis. Complete means the stated range and dimension are resolved; use partial when questions remain.
 - Reuse non-stale analysis_records even when their source is omitted in this prompt. Revisit analyzed code only to answer a concrete new question or reconcile evidence. Omitted source does not reset analysis progress. Do not repeatedly reconfirm unchanged conclusions before finish.
 - Finding IDs in analysis_updates must be existing runtime candidate IDs; leave finding_ids empty for a new finding whose runtime ID is not yet assigned.
+- analysis_updates.dimension must be correctness, boundary, concurrency, security, resource, api_contract, test_gap, or other. Reuse the same dimension for the same question; do not invent labels to represent progress.
 - Always return top-level confidence as a number between 0 and 1. It is required for every action; never omit it, set it to null, or place it inside action_input.
 - When decision_feedback contains required_action, keep that action and repair only its action_input using validation_errors and expected_input_fields.
 - When decision_feedback.reason is read_range_already_shown, the requested range is already fully present in this prompt. Use that source to continue analysis; changing max_chars adds no information. Decision repair attempts are bounded.
 - Build action_input from the selected action's flat input_fields list. Do not use aliases such as search_query, and do not place top-level response fields inside action_input. Required fields must be present and valid.
 - For a ranged read, return separate named fields, for example: `{"file_path":"server.go","start_line":30,"end_line":131,"max_chars":12000}`. Never encode a line range as an unnamed array.
-- The current task_brief is authoritative. Historical memory supplies context but never grants permission to edit.
+- The current task_brief and active user requirements define the task. Historical findings are hypotheses; only explicit user requirements authorize edits within their recorded scope.
 - Long-term memory is historical guidance, not current-run evidence. Re-read current files and revalidate applicable claims before relying on it.
 - You own semantic sequencing. Decide whether to inspect, patch, verify, ask, or finish from the evidence; no execution queue will decide this for you.
 - A failed verification is evidence. If it identifies missing implementation, inspect or patch before running the same command again.
@@ -88,6 +91,12 @@ decision_feedback={{ decision_feedback }}
 
 # Output
 
+Session memory and draft_findings are bounded projections. Inspect omitted items/details
+with read_session_memory; paginate using next_offset and revision. Historical candidates
+must be reviewed or explicitly left unresolved. Do not preserve them as current facts
+without current source/tool evidence. Reuse a historical candidate_id only for that
+same defect; memory reads do not count as independent verification.
+
 Return exactly one JSON object:
 
 {
@@ -99,7 +108,10 @@ Return exactly one JSON object:
   "analysis_updates": [],
   "draft_findings": [
     {
+      "operation": "create | enrich | revise",
       "candidate_id": "reuse the existing ID for an update; empty string for a new defect",
+      "evidence_refs": ["tool:0"],
+      "revision_reason": "required for revise; otherwise empty",
       "claim": "candidate conclusion to review",
       "locations": [
         {
@@ -136,8 +148,17 @@ draft_findings. Never omit an existing candidate to make completion easier.
 Include precise current-run file locations and related test names when
 available. Do not hide a candidate merely because its confidence is low.
 
-For an existing defect, reuse its exact candidate_id from draft_findings when adding
-evidence, correcting or rewording the claim. New test evidence does not create a new
-defect. Different root causes in the same file/function must remain separate candidates.
+Candidate entries are update commands. Use create with an empty candidate_id for a
+distinct root cause. Use enrich with the existing ID and EXACT existing claim to add
+evidence, locations or tests. Use revise with the existing ID, revision_reason and
+current evidence to correct the conclusion; this invalidates its previous review.
+Every command needs evidence_refs from finding_evidence. tool:N refers to the current
+run's tool call, not a history item. Memory reads are not evidence. Citing a tool is
+necessary but does not prove that it supports the conclusion: explain only what its
+actual output establishes. Do not submit updates merely to reword an existing claim
+or raise confidence. Submit [] when nothing changed. Read omitted candidate details
+with read_session_memory before updating them. Retain an existing source anchor;
+different root causes in the same file/function must remain separate candidates.
+Text edits, repeated evidence and toggling analysis status are not new progress.
 
 Keep plan_update empty when no plan state changed. Do not reveal chain-of-thought.

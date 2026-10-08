@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from model.agent.graph import AgentState, TrajectoryStep
 from model.agent.trajectory import TraceEvent
+from model.session_work import validate_work_state
 
 """
     跑图流程记录
@@ -53,7 +54,7 @@ class TrajectoryRecorder:
         path.mkdir(parents=True, exist_ok=True)
         trace_path = path / f"{state.get('task_id', self.task_id)}.json"
         trace_path.write_text(
-            json.dumps(state, ensure_ascii=False, indent=2, default=str),
+            json.dumps(validate_work_state(state), ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
         )
         return trace_path

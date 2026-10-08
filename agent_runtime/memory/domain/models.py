@@ -7,6 +7,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Mapping
+from model.session_work import work_item_data
 
 from utils import utc_now
 
@@ -402,12 +403,14 @@ class SessionMemorySnapshot:
     playbook: Mapping[str, Any] = field(default_factory=dict)
     recent_turns: tuple[Mapping[str, Any], ...] = ()
     memory_layers: Mapping[str, tuple[Mapping[str, Any], ...]] = field(default_factory=dict)
+    work_items: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "session_id", _required_text(self.session_id, "session_id", limit=200))
         object.__setattr__(self, "exported_at", _required_text(self.exported_at, "exported_at", limit=100))
         object.__setattr__(self, "topic", dict(self.topic or {}))
         object.__setattr__(self, "playbook", dict(self.playbook or {}))
+        object.__setattr__(self, "work_items", tuple(work_item_data(item) for item in self.work_items))
         object.__setattr__(
             self,
             "recent_turns",
@@ -428,6 +431,8 @@ class SessionMemorySnapshot:
     def to_dict(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
+            "schema_version": 2,
+            "work_items": [dict(item) for item in self.work_items],
             "exported_at": self.exported_at,
             "topic": dict(self.topic),
             "playbook": dict(self.playbook),
@@ -446,6 +451,7 @@ class SessionMemorySnapshot:
             topic=dict(data.get("topic") or {}),
             playbook=dict(data.get("playbook") or {}),
             recent_turns=tuple(data.get("recent_turns") or ()),
+            work_items=tuple(data.get("work_items") or ()),
             memory_layers=dict(data.get("memory_layers") or {}),
         )
 

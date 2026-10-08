@@ -56,3 +56,9 @@ Keep the report concise and user-facing.
 Return JSON with keys: summary, findings, work_done, candidate_files, test_results, has_patch, patch_status, next_steps, user_update.
 findings must contain the corrected claim for every confirmed reviewed finding and nothing else. Runtime will enforce this field from completion_judgement.
 user_update should be a short user-facing progress message when useful, or an empty string. Do not reveal chain-of-thought.
+# Session work context
+
+{{ session_work }}
+
+Only current-run reviewed findings may be presented as confirmed. Historical and
+unresolved items remain explicitly pending; do not silently omit them or claim completion.

@@ -82,6 +82,10 @@ class ActionFactory:
         defaults = default_args if default_args is not None else self.default_args(spec, state)
         action_name = spec.name
 
+        if action_name == "read_session_memory":
+            return {"item_ids": raw_input.get("item_ids", []), "offset": raw_input.get("offset", 0),
+                    "limit": raw_input.get("limit", 10), "revision": raw_input.get("revision", "")}
+
         if action_name == "execution_task":
             return {"objective": raw_input.get("objective", ""),
                     "acceptance_criteria": raw_input.get("acceptance_criteria", []),

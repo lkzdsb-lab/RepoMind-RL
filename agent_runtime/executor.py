@@ -32,8 +32,10 @@ from agent_runtime.lifecycle.completion_review import CompletionReviewController
 from agent_runtime.context import ContextCompressionManager
 from agent_runtime.context.attention import build_attention_focus
 from agent_runtime.memory.file_cache import touch_cache_files
+from agent_runtime.memory.projection import session_context
+from agent_runtime.memory.work_policy import is_unresolved_in_report
 from agent_runtime.context.analysis_progress import (
-    refresh_analysis_records, analysis_fingerprint, record_execution_progress,
+    refresh_analysis_records, record_execution_progress,
 )
 from agent_runtime.memory.domain.interfaces import LongTermMemoryReader
 from agent_runtime.memory.retrieval import LongTermMemoryService
@@ -46,7 +48,7 @@ from agent_runtime.llm.completion_judge import (
     LLMCompletionJudge,
     RuleBasedCompletionJudge,
 )
-from agent_runtime.llm.findings import merge_finding_candidates
+from agent_runtime.llm.finding_updates import apply_finding_updates
 from agent_runtime.llm.final_reporter import (
     FinalReporter,
     LLMFinalReporter,
@@ -123,6 +125,7 @@ class DebugAgent:
     ) -> None:
         configure_from_agent_config(config)
         self.config = config
+        self.session_memory_service = None
         self.user_update_sink = user_update_sink
         set_user_update_sink(user_update_sink)
         set_change_event_sink(change_event_sink)
@@ -200,6 +203,8 @@ class DebugAgent:
             session_id=session_id,
             session_memory=session_memory or {},
         )
+        if self.session_memory_service and state.get("message_id"):
+            self.session_memory_service.begin_run(state)
         state = self._refresh_long_term_memory(state, phase="bootstrap", force=True)
         run_logger = logger.bind(task_id=state.get("task_id"), repo_path=self.config.repo_path)
         run_logger.info(
@@ -314,6 +319,9 @@ class DebugAgent:
             return self._run_action_loop(state, started_at)
         if user_answer:
             state = self._inject_user_input(state, user_answer)
+            state = self._understand_task(state)
+            if state.get("status") == "failed":
+                return self._finish_run(self._finalize(state), started_at)
             state = self._refresh_long_term_memory(state, phase="resume")
         else:
             state = {
@@ -338,6 +346,7 @@ class DebugAgent:
         """
         run_logger = logger.bind(task_id=state.get("task_id"), repo_path=self.config.repo_path)
         while state.get("loop_count", 0) < state.get("max_loops", self.config.max_loops):
+            self._checkpoint_memory(state)
             state = self._sync_runtime_state(state)
             state = self._update_attention_focus(state)
             state = self._refresh_long_term_memory(state, phase="scope_refresh")
@@ -488,6 +497,10 @@ class DebugAgent:
             task_id=str(uuid4()),
             session_id=session_id,
             session_memory=visible_memory_pack,
+            message_id=str(memory_pack.get("message_id") or ""),
+            session_before_snapshot=dict(memory_pack.get("_before_snapshot") or {}),
+            session_work_items=list(memory_pack.get("work_items") or []),
+            session_memory_budget=int(getattr(self.config, "session_memory_max_chars", 12000)),
             task_type="DIAGNOSE",
             title=title,
             description=description,
@@ -550,6 +563,8 @@ class DebugAgent:
             completion_rule_gate_count=0,
             completion_review_failed=False,
             draft_findings=[],
+            finding_update_events=[],
+            finding_update_errors=[],
             analysis_records=[],
             analysis_progress={},
             pending_user_questions=[],
@@ -771,6 +786,8 @@ class DebugAgent:
         """ 根据用户输入以及同一轮对话的记忆理解任务并制定初步的分析"""
         try:
             analysis = self.task_analyzer.analyze(state)
+            if self.session_memory_service and state.get("message_id"):
+                self.session_memory_service.bind_analysis(state, analysis)
         except Exception as exc:
             logger.bind(task_id=state.get("task_id")).exception(
                 "task analysis failed without fallback"
@@ -992,17 +1009,7 @@ class DebugAgent:
         work_plan = state.get("work_plan") if isinstance(state.get("work_plan"), dict) else {}
         if isinstance(action.metadata, dict):
             work_plan = _apply_work_plan_update(work_plan, action.metadata.get("plan_update"))
-        draft_findings = list(state.get("draft_findings", []) or [])
-        if isinstance(action.metadata, dict):
-            raw_findings = action.metadata.get("draft_findings")
-            if isinstance(raw_findings, list):
-                draft_findings = merge_finding_candidates(draft_findings, raw_findings)
         observations = list(state.get("observations", []) or [])
-        records = action.metadata.get("analysis_records", state.get("analysis_records", []))
-        progress = dict(state.get("analysis_progress") or {})
-        if analysis_fingerprint(records) != analysis_fingerprint(state.get("analysis_records", [])):
-            progress["no_progress"] = 0
-            logger.bind(task_id=state.get("task_id")).debug("analysis records updated count={}", len(records))
         llm_observations = list(state.get("llm_observations", []) or [])
         action_limit_events = list(state.get("action_limit_events", []) or [])
         if limit_events:
@@ -1023,11 +1030,9 @@ class DebugAgent:
             "action_limit_events": action_limit_events,
             "observations": observations,
             "llm_observations": llm_observations,
-            "draft_findings": draft_findings,
-            "analysis_records": records,
-            "analysis_progress": progress,
             "current_step": action.name,
         }
+        self._checkpoint_memory(state)
         return self.recorder.append(
             state,
             node="select_action",
@@ -1097,6 +1102,8 @@ class DebugAgent:
                 runtime_context: dict[str, Any] | None = None
                 if action.name == "read_file":
                     runtime_context = {"read_file_cache": state.get("read_file_cache", {})}
+                if action.name == "read_session_memory":
+                    runtime_context = {"service": self.session_memory_service, "state": state}
                 if action.name == "execution_task":
                     runtime_context = {"config": self.config, "task_id": state.get("task_id", "")}
                 if action.name == "build_codebase_context":
@@ -1348,6 +1355,7 @@ class DebugAgent:
                     file_revisions[str(file_path)] = revision
         return {
             "editing_enabled": self.config.editing_enabled,
+            "session_edit_scope": state.get("session_edit_scope", "repository"),
             "allowed_files": sorted(allowed_files),
             "read_contents": read_contents,
             "read_spans": read_spans,
@@ -1580,11 +1588,11 @@ class DebugAgent:
             **state,
             "llm_observations": llm_observations,
             "observations": observations,
-            "draft_findings": merge_finding_candidates(
-                state.get("draft_findings", []),
-                observation.get("finding_candidates", []),
-            ),
         }
+        updates = apply_finding_updates(state, observation.get("finding_candidates", []), source="observer")
+        if updates.errors:
+            observation["finding_update_errors"] = updates.errors
+        self._checkpoint_memory(state)
         logger.bind(task_id=state.get("task_id")).info(
             "observation synthesized latest_tool={} status={} confidence={}",
             observation.get("latest_tool"),
@@ -1687,6 +1695,7 @@ class DebugAgent:
         """
             处理终止状态，由 llm 判断是否结束并总结，并且进行 loop 限制
         """
+        self._checkpoint_memory(state)
         runtime_decision = evaluate_completion_transition(state)
         state = {
             **state,
@@ -1810,6 +1819,7 @@ class DebugAgent:
             "completion_judgement": judgement,
             "observations": observations,
         }
+        self._checkpoint_memory(state)
         logger.bind(task_id=state.get("task_id")).info(
             "completion judged decision={} confidence={} source={}",
             judgement.get("decision"),
@@ -1950,12 +1960,23 @@ class DebugAgent:
             observation=input_item,
         )
 
+    def _checkpoint_memory(self, state: AgentState) -> None:
+        if not self.session_memory_service or not state.get("topic_id"):
+            return
+        try:
+            self.session_memory_service.checkpoint(state)
+        except Exception as exc:
+            state["memory_persistence_error"] = f"Session checkpoint failed: {exc}"
+            logger.bind(task_id=state.get("task_id")).exception("session checkpoint failed")
+        state["memory_context"] = session_context(state, "policy")
+
     def _finalize(self, state: AgentState) -> AgentState:
         """
             对话结束流程
         """
         status = "finished" if not state.get("error") else "failed"
         state = {**state, "status": status, "current_step": "finished"}
+        self._checkpoint_memory(state)
         if self.rl_enabled:
             terminal = self.rl_reward.terminal_reward(state)
             state = {
@@ -1970,6 +1991,14 @@ class DebugAgent:
             final_report = RuleBasedFinalReporter().report(state)
             final_report["fallback_reason"] = str(exc)
         final_report = _attach_runtime_usage_to_report(final_report, state)
+        final_report["session_work_revision"] = state.get("session_work_revision", "")
+        final_report["unresolved_work"] = [
+            {key: item.get(key) for key in ("item_id", "kind", "description", "status", "review_reason", "source_task_id")}
+            for item in state.get("session_work_items", [])
+            if is_unresolved_in_report(item, state.get("task_id", ""))
+        ]
+        if state.get("memory_persistence_error"):
+            final_report.setdefault("next_steps", []).append(state["memory_persistence_error"])
         state = {**state, "final_report": final_report}
         logger.bind(task_id=state.get("task_id")).info(
             "finalizing run status={} error={} final_report_source={}",
@@ -2124,7 +2153,7 @@ def _resolve_llm_config(base: LLMConfig, override: LLMConfig) -> LLMConfig:
 def _task_brief_from_analysis(state: AgentState, analysis: dict[str, Any]) -> dict[str, Any]:
     return {
         "intent": str(analysis.get("intent") or "diagnose").strip().lower(),
-        "objective": str(state.get("title") or state.get("description") or "").strip(),
+        "objective": str(state.get("effective_objective") or analysis.get("objective") or state.get("title") or state.get("description") or "").strip(),
         "constraints": _clean_string_list(analysis.get("risk_notes"), 12, 500),
         "acceptance": _clean_string_list(analysis.get("acceptance_criteria"), 12, 500),
         "review_focus": _clean_string_list(analysis.get("review_focus"), 10, 120),

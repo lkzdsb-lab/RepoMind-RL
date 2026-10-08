@@ -36,6 +36,16 @@ class AgentState(TypedDict, total=False):
     execution_results: List[Dict[str, Any]]
     task_id: str  # 后续考虑是否添加 trace id 跟踪任务流程
     session_id: str
+    topic_id: str
+    message_id: str
+    effective_objective: str
+    session_edit_scope: str
+    session_work_items: List[Dict[str, Any]]  # JSON transport; validated by model.session_work at boundaries.
+    session_work_baseline: List[Dict[str, Any]]
+    session_work_revision: str
+    session_before_snapshot: Dict[str, Any]
+    session_memory_budget: int
+    memory_persistence_error: str
     task_type: Literal["BUG_FIX", "FEATURE_IMPL", "DIAGNOSE"]
     title: str
     description: str
@@ -98,6 +108,9 @@ class AgentState(TypedDict, total=False):
     # 需要用户补充信息时的暂停/恢复状态
     completion_judgement: Dict[str, Any]
     draft_findings: List[Dict[str, Any]]
+    # JSON FindingUpdateEvent records, validated at the shared admission boundary.
+    finding_update_events: List[Dict[str, Any]]
+    finding_update_errors: List[str]
     pending_user_questions: List[str]
     needs_user_input_reason: str
     completion_judge_continue_count: int

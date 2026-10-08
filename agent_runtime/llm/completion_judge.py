@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from agent_runtime.llm.llm_nodes import LLMJsonNode
+from agent_runtime.memory.projection import session_context
 from ext.tool_summaries import (
     candidate_evidence_packets,
     read_file_summaries,
@@ -72,6 +73,11 @@ class LLMCompletionJudge:
 def _completion_judge_prompt(state: AgentState, context: dict[str, Any]) -> str:
     return render_prompt(
         "user/completion_judge.md",
+        session_work=session_context(state, "completion"),
+        evidence_ref_catalog=json.dumps(
+            [{"ref": f"tool:{index}", "name": call.get("name"), "input": call.get("input"),
+              "error": call.get("error") or (call.get("output") or {}).get("error")}
+             for index, call in enumerate(state.get("tool_calls", []))], ensure_ascii=False, default=str),
         title=state.get("title", ""),
         description=state.get("description", ""),
         status=state.get("status", ""),
@@ -187,6 +193,7 @@ def _normalize_completion_judge(
         "suggested_next_action": suggested_next_action,
         "reviewed_findings": reviewed_findings,
         "missing_evidence": missing_evidence[:12],
+        "work_item_reviews": data.get("work_item_reviews", []),
         "confidence": max(0.0, min(1.0, confidence)),
     }
 
@@ -204,7 +211,7 @@ def _normalize_reviewed_findings(
     }
     reviewed: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for item in value[:20]:
+    for item in value:
         if not isinstance(item, dict):
             continue
         candidate_id = str(item.get("candidate_id") or "").strip()

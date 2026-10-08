@@ -19,10 +19,13 @@ Available runtime capabilities:
 
 {{ session_memory }}
 
-Treat all session-memory outcomes, files, and next steps as historical advice.
-Use them to resolve references such as "the previous issue" or "continue", but
-do not treat them as authorization to edit. Only the current message determines
-whether implementation is allowed.
+Current-run follow-up user messages:
+{{ user_inputs }}
+
+Historical outcomes require revalidation. Explicit, unrevoked user requirements
+can authorize their original scope when continuing the same topic. A test-only
+permission never authorizes business-code edits. Current explicit instructions override
+earlier ones. If task reference/scope is ambiguous, preserve that uncertainty.
 
 # Historical Long-Term Memory
 
@@ -37,7 +40,7 @@ current facts without repository evidence.
 - `diagnose`: inspect, debug, identify, or explain what is wrong without changing code.
 - `review`: review or audit code without changing code.
 - `explain`: answer a conceptual or code-understanding question without changing code.
-- `implement`: the current message explicitly asks to add, change, fix, refactor, or remove code.
+- `implement`: the current message or an active user requirement in the continued topic explicitly asks for changes.
 - Generic wording such as "find bugs", "看看有什么问题", or "分析一下" is diagnose, even if historical memory contains fixes.
 - A follow-up such as "修复刚才的问题" is implement and may use historical findings.
 - Use `DIAGNOSE` for diagnose, review, and explain. Use `BUG_FIX` or `FEATURE_IMPL` only for implement.
@@ -50,6 +53,16 @@ current facts without repository evidence.
 - Acceptance criteria must describe the user's requested outcome. Do not turn the names of existing tests into an exhaustive specification.
 
 # Output
+
+Also return session_relation (new/continue/switch), topic_id (an existing supplied
+topic ID for continue/switch, empty for new), objective (the actual ongoing goal,
+not merely "continue"), and requirement_updates. Do not create a new topic for retries.
+Each requirement update has item_id (empty for add), operation (add/replace/revoke),
+quote (an exact substring of a current-run user message), description, and edit_scope
+(none/tests/repository). Preserve every distinct user constraint, including conditional
+requests such as adding missing tests. Reuse existing requirements rather than copying
+them on every continuation. Only user messages can revoke or replace requirements.
+Memory items omitted from the projection still exist; never assume they are completed.
 
 Return exactly one JSON object:
 
@@ -69,5 +82,7 @@ Return exactly one JSON object:
 search_hints must be a list of strings; use [] when there are no grounded search terms.
 
 Do not invent repository facts. Keep historical findings separate from current
-acceptance criteria. Do not include completion criteria, dependencies, evidence
-policies, obligations, or execution queues.
+acceptance criteria. Do not invent dependencies, evidence policies or execution queues.
+Completed requirements retain their explicit permission/constraints within the topic;
+only a later user replacement or revocation changes them. Raw-request work items are
+authoritative user text, not assistant summaries.

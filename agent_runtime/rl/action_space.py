@@ -25,6 +25,7 @@ class ActionSpace:
                 "search_code_context",
                 "search_text",
                 "read_file",
+                "read_session_memory",
                 "EnterPlanMode",
                 "ExitPlanMode",
                 "apply_code_patch",
@@ -58,6 +59,8 @@ class ActionSpace:
         self._append(specs, available, "search_code_context", "Search structured repository context.")
         self._append(specs, available, "search_text", "Search repository text or symbols.")
         self._append(specs, available, "read_file", "Read the file or line range needed for the next decision.")
+        if state.get("topic_id"):
+            self._append(specs, available, "read_session_memory", "Read full session requirements and historical findings by item IDs or paginated offset; this is not current verification.")
         self._append(specs, available, "run_shell_command", "Run an allowed diagnostic or verification command.")
         self._append(specs, available, "run_tests", "Run an allowed project verification command.")
         if state.get("execution_enabled"):

@@ -54,6 +54,9 @@ def tool_call_summaries(
         _put_if_present(summary, "input", call.get("input"))
         _put_if_present(summary, "error", call.get("error"))
         if output:
+            if call.get("name") == "read_session_memory":
+                # Explicit paginated details must not become another lossy preview.
+                summary["session_work_page"] = output
             execution = output.get("execution_result")
             if isinstance(execution, dict):
                 summary["execution"] = {

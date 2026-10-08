@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from agent_runtime.memory.projection import session_context
+
 import json
 from dataclasses import dataclass
 from typing import Protocol
@@ -81,7 +83,7 @@ def _planner_node_prompt(state: AgentState, context: dict) -> str:
             ensure_ascii=False,
             default=str,
         ),
-        memory_context=str(state.get("memory_context", ""))[:3000],
+        memory_context=session_context(state, "planner", 3000),
         long_term_memory_context=context_for_audience(
             state, "planner", max_chars=6000
         ),

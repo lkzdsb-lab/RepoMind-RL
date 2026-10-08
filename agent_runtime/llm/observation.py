@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from agent_runtime.context.events import latest_tool_event
-from agent_runtime.llm.findings import normalize_finding_candidates
+from agent_runtime.llm.finding_updates import normalize_finding_updates, evidence_manifest
+from agent_runtime.memory.projection import session_context, candidate_context
 from agent_runtime.llm.llm_nodes import LLMJsonNode
 from config import LLMConfig
 from ext.tool_summaries import read_file_summaries
@@ -142,7 +143,9 @@ def _observation_prompt(state: AgentState, context: dict[str, Any]) -> str:
     return render_prompt(
         "user/observer.md",
         observation_mode="full" if full_state else "delta",
-        draft_findings=json.dumps(state.get("draft_findings", []), ensure_ascii=False),
+        draft_findings=candidate_context(state),
+        finding_evidence=json.dumps(evidence_manifest(state), ensure_ascii=False),
+        finding_update_errors=json.dumps(state.get("finding_update_errors", []), ensure_ascii=False),
         title=state.get("title", ""),
         description=state.get("description", ""),
         task_analysis=json.dumps(state.get("task_analysis", {}), ensure_ascii=False) if full_state else "{}",
@@ -155,7 +158,7 @@ def _observation_prompt(state: AgentState, context: dict[str, Any]) -> str:
             default=str,
         ),
         patch_summary=state.get("patch_summary") if full_state else "",
-        memory_context=str(state.get("memory_context", ""))[:1800] if full_state else "",
+        memory_context=session_context(state, "observer", 4000),
         compressed_context=str(state.get("compressed_context", ""))[:1800] if full_state else "",
         latest_context_event=json.dumps(
             _latest_context_event_dict(state),
@@ -192,7 +195,7 @@ def _normalize_observation(
         "summary": str(data.get("summary") or "").strip()[:500],
         "facts": _clean_string_list(data.get("facts"), 8, OBSERVATION_MAX_CHAR),
         "new_findings": _clean_string_list(data.get("new_findings"), 8, OBSERVATION_MAX_CHAR),
-        "finding_candidates": normalize_finding_candidates(data.get("finding_candidates")),
+        "finding_candidates": normalize_finding_updates(data.get("finding_candidates")),
         "hypotheses": _clean_string_list(data.get("hypotheses"), 6, OBSERVATION_MAX_CHAR),
         "invalidated_hypotheses": _clean_string_list(data.get("invalidated_hypotheses"), 6, OBSERVATION_MAX_CHAR),
         "risks": _clean_string_list(data.get("risks"), 6, OBSERVATION_MAX_CHAR),

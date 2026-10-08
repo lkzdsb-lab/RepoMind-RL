@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from agent_runtime.memory.projection import session_context
+
 import re
 from typing import Any
 
@@ -57,7 +59,7 @@ class SearchQueryPlanner:
             weighted,
             buckets,
             "memory_terms",
-            str(state.get("memory_context", ""))[:3000],
+            session_context(state, "search", 3000),
             weight=0.8,
         )
         self._add_text(

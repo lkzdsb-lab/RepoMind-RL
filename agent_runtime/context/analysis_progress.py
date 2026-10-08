@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 from agent_runtime.memory.file_cache import range_is_cached, source_revision
+from agent_runtime.context.progress import register_progress
 
 
 def refresh_analysis_records(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -38,7 +39,7 @@ def merge_analysis_updates(
         spans = [s for s in shown if s["file_path"] == path and s["file_revision"] == revision]
         snapshot = (state.get("read_file_cache") or {}).get(path, {})
         start, end = update["start_line"], update["end_line"]
-        if (snapshot.get("file_revision") != revision or source_revision(state, path) != revision
+        if (start > end or snapshot.get("file_revision") != revision or source_revision(state, path) != revision
                 or not range_is_cached({"spans": spans}, start, end)):
             errors.append(f"{path}:{start}-{end}: analysis must cite current source actually shown in this decision")
             continue
@@ -52,10 +53,6 @@ def merge_analysis_updates(
         key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:20]
         records[key] = {**update, "record_id": key}
     return list(records.values()), errors
-
-
-def analysis_fingerprint(records: list[dict[str, Any]]) -> str:
-    return hashlib.sha256(json.dumps(records, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 def evidence_request_key(action: str, args: dict[str, Any]) -> str:
@@ -73,7 +70,7 @@ def record_execution_progress(state: dict[str, Any], action: str, output: dict[s
     tracker = dict(state.get("analysis_progress") or {})
     revision = int((state.get("runtime_facts") or {}).get("edit_revision", 0))
     if tracker.get("edit_revision") != revision:
-        tracker = {"edit_revision": revision, "seen": [], "no_progress": 0}
+        tracker = {**tracker, "edit_revision": revision, "seen": [], "requests": [], "no_progress": 0}
     if action == "read_file" and not output.get("error"):
         identity = [action, output.get("file_path"), output.get("file_revision"),
                     output.get("start_line"), output.get("end_line"), output.get("content")]
@@ -87,7 +84,8 @@ def record_execution_progress(state: dict[str, Any], action: str, output: dict[s
         return {"analysis_progress": tracker}
     key = hashlib.sha256(json.dumps(identity, ensure_ascii=False, default=str).encode()).hexdigest()
     seen = list(tracker.get("seen", []))
-    tracker["no_progress"] = int(tracker.get("no_progress", 0)) + 1 if key in seen else 0
+    repeated_or_failed = key in seen or bool(output.get("error") or output.get("skipped"))
+    tracker["no_progress"] = int(tracker.get("no_progress", 0)) + 1 if repeated_or_failed else 0
     if key not in seen:
         seen.append(key)
     tracker["seen"] = seen
@@ -96,6 +94,10 @@ def record_execution_progress(state: dict[str, Any], action: str, output: dict[s
     if request and request not in requests:
         requests.append(request)
     tracker["requests"] = requests
+    state["analysis_progress"] = tracker
+    if not output.get("error") and not output.get("skipped"):
+        register_progress(state, ["execution:" + key], source=action)
+        tracker = state["analysis_progress"]
     return {"analysis_progress": tracker}
 
 

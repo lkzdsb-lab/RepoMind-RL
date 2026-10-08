@@ -3,6 +3,9 @@ Choose the tools the task needs from legal_actions.
 Q-table values are advisory history only and never override legal_actions.
 Only provide non-empty action_input for actions whose rules explicitly request it.
 Return only JSON matching the requested schema.
+Submit finding changes through explicit create/enrich/revise commands with current
+tool evidence references. An accepted update remains a candidate until reviewed.
+Rephrasing a conclusion is not new evidence or task progress.
 For execution_task, supply objective, context, and acceptance_criteria objects with criterion_id and description.
 The specialist handles service startup, local requests and bounded recovery; do not plan its individual tool calls.
 Its completed status means execution finished, not that verification passed. Read verdict and criterion evidence.

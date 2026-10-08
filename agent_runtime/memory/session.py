@@ -19,6 +19,13 @@ from model.agent.graph import AgentState
 from agent_runtime.memory.domain.models import SessionMemorySnapshot
 from agent_runtime.memory.file_cache import normalize_snapshot, prune_cache
 from utils import _clean_string_list
+from agent_runtime.memory.projection import session_context
+from agent_runtime.memory.work_policy import effective_edit_scope
+from model.session_work import WorkItemBaseline, WorkItemPage
+from agent_runtime.memory.working import (
+    WORK_SCHEMA, active_items, apply_requirements, apply_reviews, collect_progress,
+    create_requirement, refresh_validity, save_item, stable_id, work_items,
+)
 
 
 class SessionMemoryService:
@@ -96,6 +103,18 @@ class SessionMemoryService:
 
             snapshot = self._build_snapshot(connection, session)
             file_cache, file_order = self._validated_file_cache(connection, session)
+            message_id = str(uuid4())
+            connection.execute("INSERT INTO session_messages VALUES (?,?,NULL,?,?)",
+                               (message_id, session_id, user_message, _utc_now()))
+            topics = [dict(row) for row in connection.execute(
+                "SELECT topic_id,title FROM topics WHERE session_id=? ORDER BY updated_at DESC", (session_id,))]
+            unassigned = [dict(row) for row in connection.execute(
+                "SELECT m.message_id,m.task_id,m.content FROM session_messages m "
+                "LEFT JOIN session_runs r ON m.task_id=r.task_id "
+                "WHERE m.session_id=? AND m.message_id<>? AND r.topic_id IS NULL "
+                "AND NOT EXISTS (SELECT 1 FROM session_work_items w WHERE w.session_id=m.session_id "
+                "AND json_extract(w.content,'$.source_message_id')=m.message_id) ORDER BY m.created_at",
+                (session_id, message_id))]
 
         snapshot_data = snapshot.to_dict()
         pack: dict[str, Any] = {
@@ -105,13 +124,15 @@ class SessionMemoryService:
             "playbook": snapshot_data["playbook"],
             "recent_turns": snapshot_data["recent_turns"],
             **snapshot_data["memory_layers"],
+            "message_id": message_id,
+            "topics": topics,
+            "unassigned_messages": unassigned,
+            "work_items": list(snapshot.work_items),
         }
+        pack["_before_snapshot"] = snapshot_data
         pack["_read_file_cache"] = file_cache
         pack["_read_file_order"] = file_order
-        pack["rendered"] = _bounded_json(
-            {key: value for key, value in pack.items() if not key.startswith("_")},
-            self.max_chars,
-        )
+        pack["rendered"] = session_context({"session_memory": pack}, "analyzer", self.max_chars)
         return pack
 
     def export_archive_snapshot(self, session_id: str) -> SessionMemorySnapshot:
@@ -146,7 +167,122 @@ class SessionMemoryService:
                     connection, session_id, topic_id
                 ).items()
             },
+            work_items=tuple(work_items(connection, session_id, topic_id)),
         )
+
+    def begin_run(self, state: AgentState) -> None:
+        """Attach a newly generated runtime task_id to the already durable input."""
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO session_runs(task_id,session_id,message_id,status,before_snapshot,updated_at) "
+                "VALUES (?,?,?,?,?,?)", (state["task_id"], state["session_id"], state["message_id"], "running",
+                json.dumps(state.get("session_before_snapshot", {}), ensure_ascii=False), _utc_now()))
+            connection.execute("UPDATE session_messages SET task_id=? WHERE message_id=? AND session_id=?",
+                               (state["task_id"], state["message_id"], state["session_id"]))
+
+    def record_followup(self, state: AgentState, text: str) -> None:
+        with self._connect() as connection:
+            connection.execute("INSERT INTO session_messages VALUES (?,?,?,?,?)",
+                               (str(uuid4()), state["session_id"], state["task_id"], text, _utc_now()))
+
+    def bind_analysis(self, state: AgentState, analysis: dict[str, Any]) -> None:
+        """Select a session-owned topic; apply only user-quoted requirement changes."""
+        target_state = state
+        state = {**state, "session_memory": dict(state.get("session_memory") or {})}
+        session_id = state["session_id"]
+        relation = analysis.get("session_relation", "continue")
+        requested = str(analysis.get("topic_id") or (state.get("session_memory", {}).get("topic") or {}).get("topic_id") or "")
+        if state.get("topic_id"):
+            # Resume keeps the same run identity and topic, even when the analyzer
+            # repeats its original "new" classification after a follow-up.
+            relation, requested = "continue", state["topic_id"]
+        with self._connect() as connection:
+            topic = connection.execute("SELECT * FROM topics WHERE topic_id=? AND session_id=?", (requested, session_id)).fetchone()
+            if requested and topic is None:
+                raise ValueError("Task analysis referenced an unknown session topic")
+            if relation == "new" or topic is None:
+                topic = self._create_topic(connection, session_id, analysis.get("objective") or state["title"], _utc_now())
+            state["topic_id"] = str(topic["topic_id"])
+            state["effective_objective"] = str(analysis.get("objective") or topic["title"])
+            connection.execute("UPDATE sessions SET active_topic_id=? WHERE session_id=?", (state["topic_id"], session_id))
+            connection.execute("UPDATE session_runs SET topic_id=? WHERE task_id=?", (state["topic_id"], state["task_id"]))
+            self._retain_user_messages(connection, state)
+            if relation == "continue":
+                for message in state.get("session_memory", {}).get("unassigned_messages", []):
+                    origin = {**state, "task_id": message.get("task_id") or "", "message_id": message["message_id"]}
+                    item = create_requirement(origin, "message:" + message["message_id"], message["content"],
+                                              quote=message["content"], source_message_id=message["message_id"], raw_request=True)
+                    if not connection.execute("SELECT 1 FROM session_work_items WHERE item_id=?", (item["item_id"],)).fetchone():
+                        save_item(connection, item, state["task_id"])
+                    if message.get("task_id"):
+                        connection.execute("UPDATE session_runs SET topic_id=? WHERE task_id=? AND session_id=? AND topic_id IS NULL",
+                                           (state["topic_id"], message["task_id"], session_id))
+            apply_requirements(connection, state, analysis.get("requirement_updates", []))
+            state["session_work_items"] = refresh_validity(state, work_items(connection, session_id, state["topic_id"]))
+        state["session_edit_scope"] = effective_edit_scope(state["session_work_items"])
+        state["session_memory"]["work_items"] = state["session_work_items"]
+        state["session_memory"]["topic"] = {"topic_id": state["topic_id"], "title": state["effective_objective"]}
+        state["session_work_baseline"] = [WorkItemBaseline(item_id=item["item_id"], version=item["version"]).model_dump(mode="json")
+                                           for item in active_items(state["session_work_items"])
+                                           if item.get("source_task_id") != state["task_id"]]
+        # Failed quote/model validation must not leave the caller bound to a
+        # topic whose creation was rolled back by the SQLite transaction.
+        target_state.update({key: state[key] for key in (
+            "topic_id", "effective_objective", "session_work_items", "session_edit_scope",
+            "session_memory", "session_work_baseline",
+        )})
+
+    def checkpoint(self, state: AgentState) -> None:
+        """ 记录检查点"""
+        if not state.get("topic_id"):
+            return
+        with self._connect() as connection:
+            self._retain_user_messages(connection, state)
+            collect_progress(connection, state)
+            apply_reviews(connection, state)
+            items = work_items(connection, state["session_id"], state["topic_id"])
+            state["session_work_items"] = refresh_validity(state, items)
+            state["session_work_revision"] = stable_id("workrev_", [(i["item_id"], i["version"]) for i in items])
+            connection.execute("UPDATE session_runs SET status=?,checkpoint=?,updated_at=? WHERE task_id=?",
+                               (state.get("status", "running"), json.dumps({"revision": state["session_work_revision"],
+                                "tool_calls": len(state.get("tool_calls", []))}), _utc_now(), state["task_id"]))
+        state["memory_persistence_error"] = ""
+
+    @staticmethod
+    def _retain_user_messages(connection: sqlite3.Connection, state: AgentState) -> None:
+        """Raw requests are review obligations even when extraction misses a clause."""
+        existing = {item["item_id"] for item in work_items(connection, state["session_id"], state["topic_id"])}
+        for message in connection.execute(
+            "SELECT message_id,content FROM session_messages WHERE session_id=? AND task_id=?",
+            (state["session_id"], state["task_id"]),
+        ):
+            item = create_requirement(state, "message:" + message[0], message[1],
+                                      quote=message[1], source_message_id=message[0], raw_request=True)
+            if item["item_id"] not in existing:
+                save_item(connection, item, state["task_id"])
+
+    def read_work(self, state: AgentState, args: dict[str, Any]) -> dict[str, Any]:
+        """Pagination uses a stable revision; details are never silently truncated."""
+        with self._connect() as connection:
+            items = refresh_validity(state, work_items(connection, state["session_id"], state["topic_id"]))
+        revision = stable_id("read_", [(i["item_id"], i["version"], i.get("evidence_validity")) for i in items])
+        if args.get("revision") and args["revision"] != revision:
+            return {"error": "Session work changed; restart pagination", "revision": revision}
+        ids = set(args.get("item_ids") or [])
+        if ids:
+            if ids - {i["item_id"] for i in items}:
+                return {"error": "Unknown item IDs for the current session/topic"}
+            items = [item for item in items if item["item_id"] in ids]
+        offset, limit = int(args.get("offset", 0)), int(args.get("limit", 10))
+        page = items[offset:offset + limit]
+        with self._connect() as connection:
+            for item in page:
+                origin = connection.execute("SELECT content FROM session_messages WHERE message_id=? AND session_id=?",
+                                            (item.get("source_message_id"), state["session_id"])).fetchone()
+                item["source_user_message"] = origin[0] if origin else ""
+        return WorkItemPage(items=page, total=len(items), revision=revision,
+                            next_offset=offset + len(page) if offset + len(page) < len(items) else None,
+                            historical_notice="Historical records require current evidence; reading memory is not verification.").model_dump(mode="json")
 
     def commit_turn(
         self,
@@ -163,11 +299,26 @@ class SessionMemoryService:
             ).fetchone()
             if not session:
                 raise ValueError(f"Unknown memory session: {session_id}")
-            topic = self._active_topic(connection, session)
+            prior = connection.execute("SELECT committed FROM session_runs WHERE task_id=? AND session_id=?",
+                                       (state.get("task_id"), session_id)).fetchone()
+            if prior and prior[0]:
+                return
+            topic = connection.execute("SELECT * FROM topics WHERE topic_id=? AND session_id=?",
+                                       (state.get("topic_id"), session_id)).fetchone()
+            if not topic:
+                topic = self._active_topic(connection, session)
             if not topic:
                 topic = self._create_topic(connection, session_id, user_message, now)
 
             topic_id = str(topic["topic_id"])
+            state["topic_id"] = topic_id
+            state["session_id"] = session_id
+            self._retain_user_messages(connection, state)
+            collect_progress(connection, state)
+            apply_reviews(connection, state)
+            items = work_items(connection, session_id, topic_id)
+            state["session_work_items"] = refresh_validity(state, items)
+            state["session_work_revision"] = stable_id("workrev_", [(i["item_id"], i["version"]) for i in items])
             turn_index = int(topic["turn_count"] or 0) + 1
             result = _turn_result(state)
             cursor = connection.execute(
@@ -207,7 +358,7 @@ class SessionMemoryService:
                 topic_id,
                 turn_id,
                 turn_index,
-                user_message,
+                state.get("effective_objective") or topic["title"],
                 result,
                 now,
             )
@@ -223,6 +374,8 @@ class SessionMemoryService:
                 (topic_id, now, session_id),
             )
             self._archive_expired_memories(connection, topic_id, turn_index)
+            connection.execute("UPDATE session_runs SET committed=1,topic_id=?,status=?,updated_at=? WHERE task_id=?",
+                               (topic_id, state.get("status", "unknown"), now, state.get("task_id")))
 
         logger.bind(session_id=session_id, task_id=state.get("task_id")).info(
             "session memory turn committed topic_id={} turn_index={}",
@@ -373,6 +526,7 @@ class SessionMemoryService:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")
             connection.executescript(_SCHEMA)
+            connection.executescript(WORK_SCHEMA)
             columns = {
                 str(row[1]) for row in connection.execute("PRAGMA table_info(memory_items)")
             }
@@ -633,6 +787,11 @@ def _turn_result(state: AgentState) -> dict[str, Any]:
         "verification": _clean_string_list(report.get("test_results"), 10, 600),
         "next_steps": _clean_string_list(report.get("next_steps"), 10, 500),
         "status": str(state.get("status") or "unknown"),
+        "task_id": state.get("task_id", ""),
+        "topic_id": state.get("topic_id", ""),
+        "pending_findings": report.get("pending_findings", []),
+        "draft_findings": state.get("draft_findings", []),
+        "work_revision": state.get("session_work_revision", ""),
     }
 
 

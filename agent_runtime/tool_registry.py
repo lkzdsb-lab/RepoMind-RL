@@ -31,6 +31,21 @@ class ToolInput(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
+class ReadSessionMemoryInput(ToolInput):
+    item_ids: list[str] = Field(default_factory=list, max_length=20)
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=10, ge=1, le=20)
+    revision: str = ""
+
+
+def run_read_session_memory(repo: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    context = args.get("_runtime_context") or {}
+    service, state = context.get("service"), context.get("state")
+    if service is None or not state or not state.get("topic_id"):
+        return {"error": "No active session work context"}
+    return service.read_work(state, args)
+
+
 class BuildCodebaseContextInput(ToolInput):
     index_path: str = ".repomind/codebase_context/index.json"
     force_rebuild: bool = False
@@ -803,6 +818,11 @@ class ToolRegistry(ToolRegistryBase):
             self.register_defaults()
 
     def register_defaults(self) -> None:
+        self.register(ToolSpec(
+            name="read_session_memory", runner=run_read_session_memory,
+            description="Read complete historical session work records by item IDs or pagination. Use when memory projection omits items/details. Not current evidence.",
+            input_schema=ReadSessionMemoryInput, permissions=["repo:read"],
+        ))
         self.register(ToolSpec(
             name="execution_task",
             description="Delegate bounded local runtime verification to an execution specialist. Returns criteria verdicts, evidence references and cleanup status. Runs trusted project commands, not a sandbox.",

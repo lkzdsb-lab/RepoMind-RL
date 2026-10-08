@@ -41,6 +41,9 @@ def render_final_report(response: ChatResponse) -> Group:
     patch = report.get("patch_status") or response.patch_summary
     _section(parts, "代码修改", [patch] if patch else [])
     _section(parts, "后续建议与未完成事项", report.get("next_steps", []))
+    _section(parts, "会话中仍未解决的事项", [
+        f"{item.get('description', '')}\n状态：{item.get('status', '')}；来源运行：{item.get('source_task_id', '')}"
+        for item in report.get("unresolved_work", [])])
     return Group(*parts)
 
 

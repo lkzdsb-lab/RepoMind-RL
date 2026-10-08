@@ -44,6 +44,27 @@ fallback_judgement={{ fallback_judgement }}
 
 # Decision Rules
 
+Session work projection: {{ session_work }}
+Current-run evidence reference catalog: {{ evidence_ref_catalog }}
+
+Raw user requests are retained as requirements as well as extracted clauses. Check
+the whole request, including conditional obligations; "continue" inherits the
+topic objective. A covered clause does not imply the whole raw request is satisfied.
+Memory details in tool_calls are historical context, never fresh verification.
+Review the visible work page even when other items are omitted. Return continue
+until all pages are reviewed; valid partial reviews will be retained by the runtime.
+
+Return work_item_reviews in addition to reviewed_findings. Each work review contains
+item_id, version, outcome, reason, evidence_refs. For findings use confirmed/rejected/
+pending/blocked; for requirements use satisfied/pending/blocked. For actions also
+allow rejected when current evidence explains why an old proposed step is no longer applicable.
+Reference current evidence as tool:<zero-based index> or finding:<candidate_id> whose
+verdict is confirmed/rejected in reviewed_findings. Memory reads are not verification.
+Complete requires every active work item to be accounted for. If projection omitted
+records or required details, choose continue and request read_session_memory; previous
+tool output may contain those full records. Do not discard or mark an item satisfied
+merely because it was not repeated. Confirming a bug satisfies diagnosis, not repair.
+
 - Judge semantic completion against task_brief.objective and every acceptance item.
 - Current user intent is authoritative. Historical findings are search guidance only, not current facts or edit authorization.
 - Rank evidence as follows: current test/command/tool output, current repository reads/diffs, grounded current-run observations, then plans/candidates/history.

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from agent_runtime.llm.llm_nodes import LLMJsonNode
+from agent_runtime.memory.projection import session_context
+from agent_runtime.memory.work_policy import is_current_confirmed_finding
 from ext.tool_summaries import read_file_summaries, tool_call_summaries
 from config import LLMConfig
 from model.agent.graph import AgentState
@@ -123,6 +125,7 @@ class LLMFinalReporter:
 def _final_report_prompt(state: AgentState, context: dict[str, Any]) -> str:
     return render_prompt(
         "user/final_reporter.md",
+        session_work=session_context(state, "reporter"),
         title=state.get("title", ""),
         description=state.get("description", ""),
         status=state.get("status", ""),
@@ -216,7 +219,14 @@ def _confirmed_finding_claims(state: AgentState) -> list[str]:
         claim = str(item.get("claim") or "").strip()
         if claim and claim not in claims:
             claims.append(claim[:600])
-    return claims[:20]
+    reported_ids = {item.get("candidate_id") for item in judgement.get("reviewed_findings", []) if item.get("verdict") == "confirmed"}
+    for item in state.get("session_work_items", []):
+        if (is_current_confirmed_finding(item, state.get("task_id", ""))
+                and item.get("candidate_id") not in reported_ids):
+            claim = str(item.get("description") or "").strip()
+            if claim and claim not in claims:
+                claims.append(claim)
+    return claims
 
 
 def _work_done_from_tools(tool_names: list[str]) -> list[str]:

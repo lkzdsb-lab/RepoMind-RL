@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, Field, field_validator
+from model.session_work import RequirementUpdate, WorkItemReview
+from model.finding_updates import FindingOperation
 
 
 def _empty_text_if_null(value: Any) -> Any:
@@ -47,6 +49,10 @@ class TaskAnalysisResponse(BaseModel):
     review_focus: list[str] = Field(default_factory=list)
     search_hints: EmptyStringList = Field(default_factory=list)
     historical_context: list[str] = Field(default_factory=list)
+    session_relation: Literal["new", "continue", "switch"] = "continue"
+    topic_id: str = ""
+    objective: str = ""
+    requirement_updates: list[RequirementUpdate] = Field(default_factory=list)
     user_update: str = ""
 
 
@@ -145,12 +151,18 @@ class DraftFindingResponse(BaseModel):
         return _coerce_score(value)
 
 
+class FindingUpdateResponse(DraftFindingResponse):
+    operation: FindingOperation
+    evidence_refs: list[str] = Field(min_length=1)
+    revision_reason: str = ""
+
+
 class ObservationResponse(BaseModel):
     latest_tool: str = "unknown"
     status: str = "inconclusive"
     summary: str = ""
     new_findings: list[str] = Field(default_factory=list)
-    finding_candidates: list[DraftFindingResponse] = Field(default_factory=list)
+    finding_candidates: list[FindingUpdateResponse] = Field(default_factory=list)
     hypotheses: list[str] = Field(default_factory=list)
     invalidated_hypotheses: list[str] = Field(default_factory=list)
     facts: list[str] = Field(default_factory=list)
@@ -194,6 +206,7 @@ class CompletionJudgeResponse(BaseModel):
     questions: EmptyStringList = Field(default_factory=list)
     suggested_next_action: EmptyText = ""
     reviewed_findings: list[ReviewedFindingResponse] = Field(default_factory=list)
+    work_item_reviews: list[WorkItemReview] = Field(default_factory=list)
     missing_evidence: EmptyStringList = Field(default_factory=list)
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     user_update: str = ""
@@ -259,7 +272,7 @@ class AnalysisUpdateResponse(BaseModel):
     file_revision: str = Field(min_length=1)
     start_line: int = Field(ge=1)
     end_line: int = Field(ge=1)
-    dimension: str = Field(min_length=1, max_length=120)
+    dimension: Literal["correctness", "boundary", "concurrency", "security", "resource", "api_contract", "test_gap", "other"]
     conclusion: str = Field(min_length=1, max_length=1000)
     finding_ids: list[str] = Field(default_factory=list)
     open_questions: list[str] = Field(default_factory=list)
@@ -273,7 +286,7 @@ class ActionChoiceResponse(BaseModel):
     uncertainty_questions: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0)
     plan_update: PlanUpdateResponse = Field(default_factory=PlanUpdateResponse)
-    draft_findings: list[DraftFindingResponse] = Field(default_factory=list)
+    draft_findings: list[FindingUpdateResponse] = Field(default_factory=list)
     analysis_updates: list[AnalysisUpdateResponse] = Field(default_factory=list, max_length=20)
     user_update: str = ""
 

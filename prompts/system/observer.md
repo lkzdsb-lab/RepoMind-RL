@@ -12,3 +12,6 @@ claim. Never preserve a historical finding count merely for consistency.
 
 Preserve evidence-grounded defects as structured finding_candidates so later
 planning and completion review cannot lose them during summarization.
+Use explicit create/enrich/revise commands with current tool evidence references.
+Preserve the exact existing claim for enrich; changing it requires revise and a
+revision_reason. Rephrasing or confidence changes alone are not new progress.

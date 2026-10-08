@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from agent_runtime.memory.projection import session_context
+
 import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping, Protocol
@@ -156,7 +158,7 @@ def _skill_selector_prompt(state: AgentState, context: dict[str, Any]) -> str:
         project_profile=json.dumps(state.get("project_profile", {}), ensure_ascii=False),
         task_analysis=json.dumps(state.get("task_analysis", {}), ensure_ascii=False),
         current_step=state.get("current_step", ""),
-        memory_context=_truncate_text(str(state.get("memory_context", "")), 3000),
+        memory_context=session_context(state, "skills", 3000),
         long_term_memory_context=context_for_audience(
             state, "skill", max_chars=3000
         ),

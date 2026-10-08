@@ -16,6 +16,8 @@ findings and do not preserve the historical count.
 
 observation_mode={{ observation_mode }}
 draft_findings={{ draft_findings }}
+finding_evidence={{ finding_evidence }}
+finding_update_errors={{ finding_update_errors }}
 title={{ title }}
 description={{ description }}
 task_analysis={{ task_analysis }}
@@ -34,10 +36,19 @@ read_file_context={{ read_file_context }}
 
 # Output Schema
 
-For an existing defect, reuse its exact candidate_id from draft_findings and update its claim,
-locations and related_tests. New test evidence or rewording does not create a new defect.
-For a distinct root cause, leave candidate_id empty so the runtime assigns it.
-Do not reuse an ID merely because another issue is in the same file or function.
+Each finding_candidates entry is an update command with operation, candidate_id,
+claim, locations, related_tests, confidence, severity, category, evidence_refs and
+revision_reason. operation is create, enrich or revise. create requires an empty ID
+and a distinct root cause. enrich requires an existing ID and EXACT existing claim.
+revise requires an existing ID, an explained revision_reason and evidence for the
+changed conclusion; it invalidates the previous review. Retain a source anchor.
+All operations require current tool:N references from finding_evidence. Cite only
+outputs that actually support the update; memory reads are not verification.
+New test evidence or rewording does not create a new defect. Do not emit an update
+just to rephrase a claim or change confidence. Return [] for unchanged candidates.
+If the required candidate is omitted from the preview, leave it unchanged and ask
+the policy to retrieve its details with read_session_memory through next_actions.
+Do not guess IDs or reuse an ID just because another issue is in the same function.
 
 Return JSON with keys: latest_tool, status, summary, new_findings, finding_candidates, hypotheses, invalidated_hypotheses, facts, risks, next_actions, memory_candidates, missing_context, next_search_terms, confidence, user_update.
 status must be one of ok, error, inconclusive, complete.

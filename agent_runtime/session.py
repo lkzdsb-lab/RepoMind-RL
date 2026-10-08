@@ -12,6 +12,7 @@ from agent_runtime.memory.domain.interfaces import TaskArchiveStore
 from agent_runtime.memory.session import SessionMemoryService
 from model.agent.graph import AgentRunResult, AgentState
 from model.session import ChatResponse
+from model.session_work import validate_work_state
 from utils import _clean_string_list, utc_now
 
 
@@ -29,6 +30,7 @@ class AgentSession:
     ) -> None:
         self.agent = agent
         self.session_memory = session_memory or SessionMemoryService.from_config(agent.config)
+        self.agent.session_memory_service = self.session_memory
         self.task_archive = task_archive or TaskArchiveStoreImpl.from_config(agent.config)
         self.session_id = self.session_memory.open_session(agent.config.repo_path)
         self.state: AgentState | None = None
@@ -41,6 +43,7 @@ class AgentSession:
             return ChatResponse(type="empty", message="Empty message ignored.")
 
         if self.state and self.state.get("status") == "awaiting_user_input":
+            self.session_memory.record_followup(self.state, text)
             self._turn_message = _append_follow_up(self._turn_message, text)
             result = self.agent.resume(self.state, user_answer=text)
         else:
@@ -55,6 +58,7 @@ class AgentSession:
         return self._record_result(result)
 
     def load_state(self, state: AgentState, trace_path: str = "") -> ChatResponse:
+        state = validate_work_state(state)
         self.state = state
         self.session_id = str(state.get("session_id") or self.session_id)
         self._turn_message = str(state.get("title") or "")
@@ -110,12 +114,16 @@ class AgentSession:
                     session_id=self.session_id,
                     task_id=result.state.get("task_id"),
                 ).exception("failed to commit session memory")
+                result.state["memory_persistence_error"] = "Session commit failed; latest results may not survive restart."
+                result.state.setdefault("final_report", {}).setdefault("next_steps", []).append(result.state["memory_persistence_error"])
             self._turn_message = ""
         return self._to_response(result.state, result.trace_path)
 
     def _archive_session_snapshot(self) -> tuple[dict[str, Any], bool]:
         """ 导出本论对话一开始记录的短期记忆"""
         try:
+            if self.state and "session_before_snapshot" in self.state:
+                return self.state["session_before_snapshot"], True
             return self.session_memory.export_archive_snapshot(self.session_id).to_dict(), True
         except Exception as exc:
             logger.bind(session_id=self.session_id).exception(

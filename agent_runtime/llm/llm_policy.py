@@ -11,7 +11,8 @@ from ext.focus_files import current_focus_files
 from agent_runtime.actions import ActionArgumentValidator, ActionFactory
 from agent_runtime.llm.llm_nodes import LLMJsonNode, publish_user_update
 from agent_runtime.memory.retrieval import context_for_audience
-from agent_runtime.llm.findings import normalize_finding_candidates
+from agent_runtime.memory.projection import session_context, candidate_context
+from agent_runtime.llm.finding_updates import apply_finding_updates, normalize_finding_updates, evidence_manifest
 from ext.tool_summaries import (
     cached_source_excerpt,
     build_read_projection,
@@ -19,8 +20,8 @@ from ext.tool_summaries import (
     validated_cache_summary,
 )
 from agent_runtime.memory.file_cache import cached_read_coverage, source_revision
-from agent_runtime.context.analysis_progress import merge_analysis_updates, analysis_fingerprint, evidence_request_key
-from agent_runtime.llm.findings import merge_finding_candidates
+from agent_runtime.context.analysis_progress import merge_analysis_updates, evidence_request_key
+from agent_runtime.context.progress import accept_analysis_records
 from agent_runtime.rl.action_space import ActionSpace
 from agent_runtime.rl.state_encoder import StateEncoder
 from config import LLMConfig
@@ -143,24 +144,17 @@ class LLMActionPolicy:
                 publish_update=False,
             )
             action_name = str(data.get("action", "")).strip()
+            updates = apply_finding_updates(state, data.get("draft_findings", []), source="policy")
             records, analysis_errors = merge_analysis_updates(
                 state, data.get("analysis_updates", []), read_projection["shown_ranges"],
-                merge_finding_candidates(state.get("draft_findings", []), data.get("draft_findings", [])),
+                updates.findings,
             )
-            if analysis_errors:
-                last_error = "; ".join(analysis_errors)
-                decision_feedback = {"reason": "invalid_analysis_update", "errors": analysis_errors}
+            accept_analysis_records(state, records)
+            update_errors = updates.errors + analysis_errors
+            if update_errors:
+                last_error = "; ".join(update_errors)
+                decision_feedback = {"reason": "invalid_evidence_update", "errors": update_errors}
                 continue
-            analysis_changed = analysis_fingerprint(records) != analysis_fingerprint(state.get("analysis_records", []))
-            # Valid analysis survives rejection/repair of the accompanying action.
-            if analysis_changed:
-                state["analysis_records"] = records
-                state["analysis_progress"] = {**(state.get("analysis_progress") or {}), "no_progress": 0}
-                logger.bind(task_id=state.get("task_id")).debug("analysis records accepted count={}", len(records))
-            findings = merge_finding_candidates(state.get("draft_findings", []), data.get("draft_findings", []))
-            if findings != state.get("draft_findings", []):
-                state["draft_findings"] = findings
-                state["analysis_progress"] = {**(state.get("analysis_progress") or {}), "no_progress": 0}
             reason = str(data.get("reason", "")).strip()
             if required_action and action_name != required_action:
                 last_error = (
@@ -414,8 +408,6 @@ class LLMActionPolicy:
                         "uncertainty_questions": data.get("uncertainty_questions", []),
                     },
                     "plan_update": data.get("plan_update", {}),
-                    "draft_findings": data.get("draft_findings", []),
-                    "analysis_records": records,
                     "llm_guard": {
                         "selected_action": selected_spec.name,
                         "guard": guard.to_dict(),
@@ -548,7 +540,7 @@ def _normalize_action_choice(
         "uncertainty_questions": uncertainty_questions,
         "confidence": confidence,
         "plan_update": _normalize_plan_update(data.get("plan_update")),
-        "draft_findings": normalize_finding_candidates(data.get("draft_findings")),
+        "draft_findings": normalize_finding_updates(data.get("draft_findings")),
         "analysis_updates": data.get("analysis_updates", []),
     }
 
@@ -671,10 +663,9 @@ def _action_prompt(
             json.dumps(state.get("completion_judgement", {}), ensure_ascii=False, default=str),
             2600,
         ),
-        draft_findings=_truncate_text(
-            json.dumps(state.get("draft_findings", []), ensure_ascii=False, default=str),
-            4000,
-        ),
+        draft_findings=candidate_context(state),
+        finding_evidence=json.dumps(evidence_manifest(state), ensure_ascii=False),
+        finding_update_errors=json.dumps(state.get("finding_update_errors", []), ensure_ascii=False),
         verification_capabilities=_truncate_text(
             json.dumps(state.get("verification_capabilities", {}), ensure_ascii=False, default=str),
             1800,
@@ -708,7 +699,7 @@ def _action_prompt(
             ensure_ascii=False,
             default=str,
         ),
-        memory_context=str(state.get("memory_context", ""))[:2500],
+        memory_context=session_context(state, "policy"),
         long_term_memory_context=context_for_audience(
             state, "action", max_chars=6000
         ),
